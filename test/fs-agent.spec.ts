@@ -6,12 +6,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { TemplateProject } from '../src/template-project';
+import { FsAgent } from '../src/fs-agent';
 
 
-describe('TemplateProject', () => {
+describe('FsAgent', () => {
   it('should validate a template', () => {
-    const templateProject = TemplateProject.example;
-    expect(templateProject).toBeDefined();
+    const fsAgent = FsAgent.example;
+    expect(fsAgent).toBeDefined();
   });
 });
