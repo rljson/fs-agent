@@ -21,8 +21,8 @@ importers:
         specifier: ^0.0.23
         version: 0.0.23
       '@rljson/rljson':
-        specifier: ^0.0.73
-        version: 0.0.73
+        specifier: ^0.0.74
+        version: 0.0.74
     devDependencies:
       '@types/node':
         specifier: ^25.0.9
