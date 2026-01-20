@@ -1,9 +1,9 @@
 {
-  "name": "@rljson/template-project",
-  "version": "0.0.18",
-  "description": "Rljson template-project description",
-  "homepage": "https://github.com/rljson/template-project",
-  "bugs": "https://github.com/rljson/template-project/issues",
+  "name": "@rljson/fs-agent",
+  "version": "0.0.1",
+  "description": "Rljson fs-agent description",
+  "homepage": "https://github.com/rljson/fs-agent",
+  "bugs": "https://github.com/rljson/fs-agent/issues",
   "private": false,
   "license": "MIT",
   "engines": {
@@ -11,9 +11,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rljson/template-project.git"
+    "url": "git+https://github.com/rljson/fs-agent.git"
   },
-  "main": "dist/template-project.js",
+  "main": "dist/fs-agent.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist"

@@ -21,11 +21,11 @@ found in the LICENSE file in the root of this package.
   - [Create an account on NPM](#create-an-account-on-npm)
   - [Request access to Rljson](#request-access-to-rljson)
   - [Generate and install an access token](#generate-and-install-an-access-token)
-- [Open template-project the first time](#open-template-project-the-first-time)
+- [Open fs-agent the first time](#open-fs-agent-the-first-time)
   - [Create a dev and rljson folder](#create-a-dev-and-rljson-folder)
   - [Clone code](#clone-code)
   - [Configure email address and user name](#configure-email-address-and-user-name)
-  - [Open template-project with Vscode](#open-template-project-with-vscode)
+  - [Open fs-agent with Vscode](#open-fs-agent-with-vscode)
   - [Install recommended extensions](#install-recommended-extensions)
   - [Activate PNPM for the project](#activate-pnpm-for-the-project)
 
@@ -227,7 +227,7 @@ Replace `your-auth-token` by your token.
 
 Now you should be able to publish package updates
 
-## Open template-project the first time
+## Open fs-agent the first time
 
 ### Create a dev and rljson folder
 
@@ -243,7 +243,7 @@ cd rljson
 ### Clone code
 
 ```bash
-git clone https://github.com/rljson/template-project.git
+git clone https://github.com/rljson/fs-agent.git
 ```
 
 ### Configure email address and user name
@@ -260,10 +260,10 @@ Replace `email` by your email and execute:
 git config --global user.email "email"
 ```
 
-### Open template-project with Vscode
+### Open fs-agent with Vscode
 
 ```bash
-code template-project
+code fs-agent
 ```
 
 ### Install recommended extensions
