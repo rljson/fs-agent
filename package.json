@@ -1,0 +1,62 @@
+{
+  "name": "@rljson/template-project",
+  "version": "0.0.18",
+  "description": "Rljson template-project description",
+  "homepage": "https://github.com/rljson/template-project",
+  "bugs": "https://github.com/rljson/template-project/issues",
+  "private": false,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rljson/template-project.git"
+  },
+  "main": "dist/template-project.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "pnpx vite build && tsc && node scripts/copy-readme-to-dist.js",
+    "test": "pnpx vitest run --coverage && pnpm run lint",
+    "prebuild": "npm run test",
+    "prepublishOnly": "npm run build",
+    "lint": "pnpx eslint",
+    "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.46.3",
+    "@typescript-eslint/parser": "^8.46.3",
+    "@vitest/coverage-v8": "^4.0.6",
+    "cross-env": "^10.1.0",
+    "eslint": "^9.39.1",
+    "eslint-plugin-jsdoc": "^61.1.12",
+    "eslint-plugin-tsdoc": "^0.4.0",
+    "globals": "^16.5.0",
+    "jsdoc": "^4.0.5",
+    "read-pkg": "^9.0.1",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.3",
+    "vite": "^7.1.12",
+    "vite-node": "^3.2.4",
+    "vite-plugin-dts": "^4.5.4",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.0.6",
+    "vitest-dom": "^0.1.1"
+  },
+  "dependencies": {
+    "@rljson/hash": "^0.0.17",
+    "@rljson/json": "^0.0.22",
+    "@rljson/rljson": "^0.0.66"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "packageManager": "pnpm@10.11.0"
+}
