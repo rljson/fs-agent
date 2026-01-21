@@ -52,6 +52,7 @@
     "@rljson/bs": "^0.0.18",
     "@rljson/db": "^0.0.12",
     "@rljson/hash": "^0.0.18",
+    "@rljson/io": "^0.0.64",
     "@rljson/json": "^0.0.23",
     "@rljson/rljson": "^0.0.74"
   },

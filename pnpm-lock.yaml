@@ -17,6 +17,9 @@ importers:
       '@rljson/hash':
         specifier: ^0.0.18
         version: 0.0.18
+      '@rljson/io':
+        specifier: ^0.0.64
+        version: 0.0.64
       '@rljson/json':
         specifier: ^0.0.23
         version: 0.0.23

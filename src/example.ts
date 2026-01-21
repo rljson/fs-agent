@@ -64,6 +64,30 @@ export const example = async () => {
 
   p('Scanner is ready. Changes will be logged.');
   p('(Call scanner.watch() to start watching)');
+
+  // Example 4: Automatic Database Sync
+  h1('\nFsAgent - Automatic Database Sync');
+  h2('Automatically sync filesystem changes to database');
+  p('When creating FsAgent with db and treeKey options,');
+  p('it automatically starts watching and syncing changes:');
+  p('');
+  p('const agent = new FsAgent(');
+  p('  "./my-project",');
+  p('  myBlobStorage,');
+  p('  {');
+  p('    db: myDatabase,');
+  p('    treeKey: "projectTree",');
+  p('    ignore: ["node_modules", ".git"]');
+  p('  }');
+  p(');');
+  p('');
+  p('// Agent now automatically:');
+  p('// 1. Watches for file changes');
+  p('// 2. Extracts trees and stores blobs');
+  p('// 3. Syncs to database on changes');
+  p('');
+  p('// Clean up when done:');
+  p('agent.dispose();');
 };
 
 /*

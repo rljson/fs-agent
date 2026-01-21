@@ -5,11 +5,16 @@
 // found in the LICENSE file in the root of this package.
 
 import { Bs, BsMem } from '@rljson/bs';
+import { Route } from '@rljson/rljson';
 
-import { join } from 'path';
+import { mkdir, utimes, writeFile } from 'fs/promises';
+import { dirname, join } from 'path';
 
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
+import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
+
+import type { Db } from '@rljson/db';
 
 // .............................................................................
 // Types
@@ -25,6 +30,12 @@ export interface FsAgentOptions {
   maxDepth?: number;
   /** Follow symlinks (default: false) */
   followSymlinks?: boolean;
+  /** Database instance for automatic syncing */
+  db?: Db;
+  /** Tree key for database storage */
+  treeKey?: string;
+  /** Storage options for database operations */
+  storageOptions?: StoreFsTreeOptions;
 }
 
 // .............................................................................
@@ -39,12 +50,27 @@ export class FsAgent {
   private _adapter: FsBlobAdapter;
   private _rootPath: string;
   private _bs: Bs;
+  private _db?: Db;
+  private _treeKey?: string;
+  private _stopSync?: () => void;
+  private _storageOptions?: StoreFsTreeOptions;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
     this._bs = bs || new BsMem();
+    this._db = options.db;
+    this._treeKey = options.treeKey;
+    this._storageOptions = options.storageOptions;
     this._scanner = new FsScanner(rootPath, { ...options, bs: this._bs });
     this._adapter = new FsBlobAdapter(this._bs);
+
+    // Automatically start syncing if db and treeKey are provided
+    if (this._db && this._treeKey) {
+      /* v8 ignore next 3 -- @preserve */
+      this._startAutoSync().catch((error) => {
+        console.error('Failed to start auto-sync:', error);
+      });
+    }
   }
 
   /**
@@ -73,6 +99,32 @@ export class FsAgent {
    */
   get adapter(): FsBlobAdapter {
     return this._adapter;
+  }
+
+  /**
+   * Starts automatic syncing to database
+   */
+  private async _startAutoSync(): Promise<void> {
+    /* v8 ignore next 3 -- @preserve */
+    if (!this._db || !this._treeKey) {
+      return;
+    }
+
+    this._stopSync = await this.syncToDb(
+      this._db,
+      this._treeKey,
+      this._storageOptions,
+    );
+  }
+
+  /**
+   * Stops automatic syncing and cleans up resources
+   */
+  dispose(): void {
+    if (this._stopSync) {
+      this._stopSync();
+      this._stopSync = undefined;
+    }
   }
 
   /**
@@ -129,12 +181,9 @@ export class FsAgent {
         const fileBlob = await this._bs.getBlob(meta.blobId);
 
         // Create parent directories
-        const { mkdir } = await import('fs/promises');
-        const { dirname } = await import('path');
         await mkdir(dirname(filePath), { recursive: true });
 
         // Write file
-        const { writeFile, utimes } = await import('fs/promises');
         await writeFile(filePath, fileBlob.content);
 
         // Preserve mtime
@@ -151,7 +200,6 @@ export class FsAgent {
           ? targetPath
           : join(targetPath, meta.relativePath);
 
-      const { mkdir } = await import('fs/promises');
       await mkdir(dirPath, { recursive: true });
 
       // Recursively restore children
@@ -185,6 +233,105 @@ export class FsAgent {
    */
   async getFileContent(blobId: string): Promise<Buffer> {
     return await this._adapter.getFileContent(blobId);
+  }
+
+  /**
+   * Extracts and stores filesystem tree in database
+   * Reads from filesystem, stores trees in DB and blobs in Bs
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   * @param options - Storage options
+   * @returns The root tree reference
+   */
+  async storeInDb(
+    db: Db,
+    treeKey: string,
+    options?: StoreFsTreeOptions,
+  ): Promise<string> {
+    const tree = await this.extract();
+    const dbAdapter = new FsDbAdapter(db, treeKey);
+    return await dbAdapter.storeFsTree(tree, options);
+  }
+
+  /**
+   * Loads tree from database and restores to filesystem
+   * Writes to filesystem from DB trees and Bs blobs
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   * @param rootRef - Root tree reference (hash)
+   * @param targetPath - Optional target path (defaults to rootPath)
+   */
+  async loadFromDb(
+    db: Db,
+    treeKey: string,
+    rootRef: string,
+    targetPath?: string,
+  ): Promise<void> {
+    // Read tree by specific root reference - try without /root suffix
+    const route = `/${treeKey}@${rootRef}`;
+    const { rljson } = await db.get(Route.fromFlat(route), {});
+
+    // Get tree data from rljson
+    const treeData = rljson[treeKey];
+    /* v8 ignore next -- @preserve */
+    if (!treeData || !treeData._data) {
+      throw new Error(`No tree data found for ${treeKey}@${rootRef}`);
+    }
+
+    // DO NOT re-hash - the database manages hashes internally
+    // Build trees Map from data as-is
+    const trees = new Map<string, any>();
+    for (const treeNode of treeData._data) {
+      if (treeNode._hash) {
+        trees.set(treeNode._hash, treeNode);
+      }
+    }
+
+    // Use rootRef directly - it identifies the root tree from InsertHistory
+    const fsTree: FsTree = {
+      rootHash: rootRef,
+      trees,
+    };
+
+    // Restore to filesystem
+    await this.restore(fsTree, targetPath);
+  }
+
+  /**
+   * Watches filesystem for changes and syncs to database
+   * Registers change callbacks and automatically stores updates in DB
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   * @param options - Storage options
+   * @returns Function to stop watching
+   */
+  async syncToDb(
+    db: Db,
+    treeKey: string,
+    options?: StoreFsTreeOptions,
+  ): Promise<() => void> {
+    // Store initial state
+    await this.storeInDb(db, treeKey, options);
+
+    // Create callback to sync on changes
+    const syncCallback = async () => {
+      // Use the scanner's already-updated tree instead of extracting again
+      const tree = this._scanner.tree;
+      if (tree) {
+        const dbAdapter = new FsDbAdapter(db, treeKey);
+        await dbAdapter.storeFsTree(tree, options);
+      }
+    };
+
+    // Register callback and start watching
+    this._scanner.onChange(syncCallback);
+    await this._scanner.watch();
+
+    // Return cleanup function
+    return () => {
+      this._scanner.offChange(syncCallback);
+      this._scanner.stopWatch();
+    };
   }
 
   /** Example instance for test purposes */

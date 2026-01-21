@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import { Bs, BsMem } from '@rljson/bs';
-import { hsh } from '@rljson/hash';
+import { hip } from '@rljson/hash';
 import { Json } from '@rljson/json';
 import { Tree, TreeRef } from '@rljson/rljson';
 
@@ -125,9 +125,9 @@ export class FsScanner {
     const trees = new Map<TreeRef, Tree>();
     const rootTree = await this._scanDirectory(this._rootPath, '.', 0, trees);
 
-    // Hash root tree based on its JSON representation (content-addressed)
-    const rootHash = hsh(rootTree) as unknown as { _hash: string };
-    const rootHashStr = rootHash._hash;
+    // Hash root tree in place (content-addressed by JSON)
+    hip(rootTree);
+    const rootHashStr = rootTree._hash as string;
 
     // Add the root tree to the map
     trees.set(rootHashStr, rootTree);
@@ -184,9 +184,9 @@ export class FsScanner {
         );
         childTrees.push(childTree);
 
-        // Hash directory tree node (JSON hash, NOT stored in Bs)
-        const childHash = hsh(childTree) as unknown as { _hash: string };
-        const childHashStr = childHash._hash;
+        // Hash directory tree node in place (JSON hash, NOT stored in Bs)
+        hip(childTree);
+        const childHashStr = childTree._hash as string;
 
         // Add child tree to map
         trees.set(childHashStr, childTree);
@@ -216,9 +216,9 @@ export class FsScanner {
 
         childTrees.push(fileTree);
 
-        // Hash file tree node (JSON hash, NOT stored in Bs)
-        const fileTreeHash = hsh(fileTree) as unknown as { _hash: string };
-        const fileTreeHashStr = fileTreeHash._hash;
+        // Hash file tree node in place (JSON hash, NOT stored in Bs)
+        hip(fileTree);
+        const fileTreeHashStr = fileTree._hash as string;
 
         // Add file tree to map
         trees.set(fileTreeHashStr, fileTree);

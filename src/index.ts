@@ -11,6 +11,7 @@ export {
   type FileBlobMeta,
   type FileTooBlobOptions,
 } from './fs-blob-adapter.ts';
+export { FsDbAdapter, type StoreFsTreeOptions } from './fs-db-adapter.ts';
 export {
   FsScanner,
   type FsChange,
