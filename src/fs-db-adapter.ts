@@ -47,6 +47,37 @@ export class FsDbAdapter {
   ): Promise<string> {
     const { notify = false } = options;
 
+    // Validate input
+    if (!fsTree) {
+      throw new Error('fsTree cannot be null or undefined');
+    }
+
+    if (!fsTree.rootHash || typeof fsTree.rootHash !== 'string') {
+      throw new Error(
+        `Invalid rootHash: expected non-empty string, got ${typeof fsTree.rootHash}`,
+      );
+    }
+
+    if (!fsTree.trees || !(fsTree.trees instanceof Map)) {
+      throw new Error(
+        `Invalid trees: expected Map, got ${typeof fsTree.trees}`,
+      );
+    }
+
+    if (fsTree.trees.size === 0) {
+      throw new Error(
+        'Cannot store empty tree: trees Map must contain at least one node',
+      );
+    }
+
+    // Verify root node exists in the tree
+    if (!fsTree.trees.has(fsTree.rootHash)) {
+      throw new Error(
+        `Root hash "${fsTree.rootHash}" not found in trees Map. ` +
+          `The tree structure may be corrupted.`,
+      );
+    }
+
     // Convert all tree nodes from Map to Array
     const trees: Array<Tree> = Array.from(fsTree.trees.values());
 
@@ -57,9 +88,16 @@ export class FsDbAdapter {
     };
 
     // Import trees into database
-    await this.db.core.import({
-      [this.treeKey]: treeTable,
-    });
+    try {
+      await this.db.core.import({
+        [this.treeKey]: treeTable,
+      });
+    } catch (error) {
+      /* v8 ignore next 4 -- @preserve */
+      throw new Error(
+        `Failed to import tree data into database: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     // Get root reference
     const treeRootRef = fsTree.rootHash;
@@ -83,8 +121,9 @@ export class FsDbAdapter {
 
     // Optionally trigger notification
     if (notify) {
-      const notifyRoute = Route.fromFlat(`/${this.treeKey}/${treeRootRef}`);
-      this.db.notify.notify(notifyRoute, historyRow);
+      // Notify on the treeKey+ route (inserts)
+      const treeKeyRoute = Route.fromFlat(`/${this.treeKey}+`);
+      this.db.notify.notify(treeKeyRoute, historyRow);
     }
 
     return treeRootRef;

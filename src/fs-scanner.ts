@@ -97,6 +97,7 @@ export class FsScanner {
   private _changeCallbacks: FsChangeCallback[] = [];
   private _options: FsScanOptions;
   private _bs: Bs;
+  private _paused: boolean = false;
 
   constructor(rootPath: string, options: FsScanOptions = {}) {
     this._rootPath = rootPath;
@@ -122,12 +123,47 @@ export class FsScanner {
   }
 
   async scan(): Promise<FsTree> {
+    // Validate root path exists
+    try {
+      const stats = await stat(this._rootPath);
+      if (!stats.isDirectory()) {
+        throw new Error(
+          `Root path "${this._rootPath}" exists but is not a directory`,
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(
+          `Root path "${this._rootPath}" does not exist. Cannot scan non-existent directory.`,
+        );
+      }
+      /* v8 ignore next 3 -- @preserve */
+      throw new Error(
+        `Cannot access root path "${this._rootPath}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     const trees = new Map<TreeRef, Tree>();
-    const rootTree = await this._scanDirectory(this._rootPath, '.', 0, trees);
+    let rootTree;
+    try {
+      rootTree = await this._scanDirectory(this._rootPath, '.', 0, trees);
+    } catch (error) {
+      /* v8 ignore next 4 -- @preserve */
+      throw new Error(
+        `Failed to scan directory "${this._rootPath}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     // Hash root tree in place (content-addressed by JSON)
     hip(rootTree);
     const rootHashStr = rootTree._hash as string;
+
+    /* v8 ignore next 5 -- @preserve */
+    if (!rootHashStr) {
+      throw new Error(
+        'Failed to generate hash for root tree. Tree structure may be invalid.',
+      );
+    }
 
     // Add the root tree to the map
     trees.set(rootHashStr, rootTree);
@@ -194,8 +230,29 @@ export class FsScanner {
       } else if (entry.isFile()) {
         /* v8 ignore else -- @preserve */
         // Store ONLY file content in blob storage (NOT tree node)
-        const fileContent = await readFile(childPath);
-        const blobProps = await this._bs.setBlob(fileContent);
+        let fileContent: Buffer;
+        try {
+          fileContent = await readFile(childPath);
+        } catch (error) {
+          throw new Error(
+            `Failed to read file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+
+        let blobProps;
+        try {
+          blobProps = await this._bs.setBlob(fileContent);
+        } catch (error) {
+          throw new Error(
+            `Failed to store blob for file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+
+        if (!blobProps || !blobProps.blobId) {
+          throw new Error(
+            `Blob storage returned invalid blobId for file "${childRelPath}"`,
+          );
+        }
 
         const fileMeta: FsNodeMeta = {
           name: entry.name,
@@ -291,6 +348,11 @@ export class FsScanner {
     _eventType: string,
     filename: string,
   ): Promise<void> {
+    // Skip processing if paused
+    if (this._paused) {
+      return;
+    }
+
     const relativePath = filename.replace(/\\/g, '/');
 
     try {
@@ -314,12 +376,19 @@ export class FsScanner {
         });
       }
     } catch {
-      // File doesn't exist - it was deleted
-      await this.scan();
-      await this._notifyChange({
-        type: 'deleted',
-        path: relativePath,
-      });
+      // Check if root directory still exists
+      try {
+        await stat(this._rootPath);
+        // Root exists, so file was deleted
+        await this.scan();
+        await this._notifyChange({
+          type: 'deleted',
+          path: relativePath,
+        });
+      } catch {
+        // Root directory no longer exists - stop watching
+        this.stopWatch();
+      }
     }
   }
 
@@ -336,6 +405,12 @@ export class FsScanner {
   }
 
   private async _notifyChange(change: FsChange): Promise<void> {
+    // Don't notify if watching is paused (prevents loops during external updates)
+    /* v8 ignore next 3 -- @preserve */
+    if (this._paused) {
+      return;
+    }
+
     for (const callback of this._changeCallbacks) {
       await callback(change);
     }
@@ -357,6 +432,21 @@ export class FsScanner {
       this._watcher.close();
       this._watcher = null;
     }
+  }
+
+  /**
+   * Temporarily pause file change notifications
+   * Used to prevent loops when updating filesystem from external source
+   */
+  pauseWatch(): void {
+    this._paused = true;
+  }
+
+  /**
+   * Resume file change notifications
+   */
+  resumeWatch(): void {
+    this._paused = false;
   }
 
   getTreeByHash(treeHash: TreeRef): Tree | undefined {
