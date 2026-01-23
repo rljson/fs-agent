@@ -8,7 +8,6 @@
 
 import { defineConfig } from 'vite';
 
-
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   return {
@@ -24,7 +23,11 @@ export default defineConfig(({ mode }) => {
         provider: 'v8', // "istanbul" or "v8"
         reporter: ['text', 'json', 'html'],
         include: ['src/**/*.ts'],
-        exclude: ['src/index.ts', 'src/example.ts'],
+        exclude: [
+          'src/index.ts',
+          'src/example.ts',
+          'src/demo/live-client-server.ts',
+        ],
         all: true,
         thresholds: {
           statements: 98,

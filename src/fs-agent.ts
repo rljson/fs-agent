@@ -7,12 +7,14 @@
 import { Bs, BsMem } from '@rljson/bs';
 import { Route } from '@rljson/rljson';
 
-import { mkdir, utimes, writeFile } from 'fs/promises';
+import { mkdir, readdir, rm, utimes, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
+
+import type { FsNodeMeta } from './fs-scanner.ts';
 
 import type { Db } from '@rljson/db';
 
@@ -38,6 +40,12 @@ export interface FsAgentOptions {
   storageOptions?: StoreFsTreeOptions;
   /** Enable bidirectional sync (both fs→db and db→fs) */
   bidirectional?: boolean;
+}
+
+/** Restore options */
+export interface RestoreOptions {
+  /** Remove files/dirs on target that are not present in the tree */
+  cleanTarget?: boolean;
 }
 
 // .............................................................................
@@ -157,7 +165,7 @@ export class FsAgent {
 
   /**
    * Extracts filesystem into tree structure with file content in blobs
-   * Files content stored in Bs, tree structure returned with blobIds embedded
+   * File content is stored in Bs, tree structure returned with blobIds embedded
    * @returns Tree structure with blobIds in file metadata
    */
   async extract(): Promise<FsTree> {
@@ -172,12 +180,25 @@ export class FsAgent {
    * Restores filesystem from tree structure and blob storage
    * @param tree - Tree structure with blobIds in file metadata
    * @param targetPath - Optional target path (defaults to rootPath)
+   * @param options - Restore options
    */
-  async restore(tree: FsTree, targetPath?: string): Promise<void> {
+  async restore(
+    tree: FsTree,
+    targetPath?: string,
+    options?: RestoreOptions,
+  ): Promise<void> {
     const target = targetPath || this._rootPath;
+    const { expectedDirs, expectedFiles } = this._collectExpectedPaths(
+      tree,
+      target,
+    );
 
     // Recursively restore from tree structure
     await this._restoreTree(tree.rootHash, tree.trees, target);
+
+    if (options?.cleanTarget) {
+      await this._pruneExtraneous(target, expectedDirs, expectedFiles);
+    }
   }
 
   /**
@@ -197,7 +218,11 @@ export class FsAgent {
       throw new Error(`Tree node not found: ${treeHash}`);
     }
 
-    const meta = treeNode.meta;
+    const meta = treeNode.meta as FsNodeMeta | null | undefined;
+    /* v8 ignore next 3 -- @preserve */
+    if (!meta) {
+      throw new Error(`Tree node is missing meta for hash: ${treeHash}`);
+    }
 
     /* v8 ignore next -- @preserve */
     if (meta.type === 'file') {
@@ -321,12 +346,14 @@ export class FsAgent {
    * @param treeKey - Tree table key
    * @param rootRef - Root tree reference (hash)
    * @param targetPath - Optional target path (defaults to rootPath)
+   * @param options - Restore options
    */
   async loadFromDb(
     db: Db,
     treeKey: string,
     rootRef: string,
     targetPath?: string,
+    options?: RestoreOptions,
   ): Promise<void> {
     // Validate inputs
     if (!rootRef || rootRef.trim() === '') {
@@ -397,7 +424,73 @@ export class FsAgent {
     };
 
     // Restore to filesystem
-    await this.restore(fsTree, targetPath);
+    await this.restore(fsTree, targetPath, options);
+  }
+
+  /**
+   * Collects expected file and directory paths for cleanup
+   * @param tree - Tree structure to evaluate
+   * @param target - Filesystem root where the tree will be restored
+   */
+  private _collectExpectedPaths(
+    tree: FsTree,
+    target: string,
+  ): {
+    expectedDirs: Set<string>;
+    expectedFiles: Set<string>;
+  } {
+    const expectedDirs = new Set<string>([target]);
+    const expectedFiles = new Set<string>();
+
+    for (const [, node] of tree.trees) {
+      const meta = node?.meta as FsNodeMeta | null | undefined;
+      /* v8 ignore next 3 -- @preserve */
+      if (!meta) {
+        continue;
+      }
+      if (meta.type === 'directory') {
+        const dirPath =
+          meta.relativePath === '.' ? target : join(target, meta.relativePath);
+        expectedDirs.add(dirPath);
+      } else if (meta.type === 'file') {
+        const filePath = join(target, meta.relativePath);
+        expectedFiles.add(filePath);
+        expectedDirs.add(dirname(filePath));
+      }
+    }
+
+    return { expectedDirs, expectedFiles };
+  }
+
+  /**
+   * Remove files/dirs not present in the expected sets
+   * @param currentDir - Directory currently being inspected
+   * @param expectedDirs - Allowed directory paths
+   * @param expectedFiles - Allowed file paths
+   */
+  private async _pruneExtraneous(
+    currentDir: string,
+    expectedDirs: Set<string>,
+    expectedFiles: Set<string>,
+  ): Promise<void> {
+    const entries = await readdir(currentDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry.name);
+
+      if (entry.isDirectory()) {
+        if (!expectedDirs.has(fullPath)) {
+          await rm(fullPath, { recursive: true, force: true });
+          continue;
+        }
+
+        await this._pruneExtraneous(fullPath, expectedDirs, expectedFiles);
+      } else {
+        if (!expectedFiles.has(fullPath)) {
+          await rm(fullPath, { force: true });
+        }
+      }
+    }
   }
 
   /**

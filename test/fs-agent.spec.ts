@@ -241,6 +241,55 @@ describe('FsAgent', () => {
       expect(restoredStats.mtime.getTime()).toBe(originalStats.mtime.getTime());
       expect(restoredStats.size).toBe(originalStats.size);
     });
+
+    it('should ignore unknown node types when cleaning target', async () => {
+      const agent = new FsAgent(testDir);
+      const strayPath = join(testDir, 'stray.txt');
+      await writeFile(strayPath, 'stray');
+
+      const ghostHash = 'ghost-node';
+      const rootHash = 'root-node';
+      const timestamp = Date.now();
+      const tree = {
+        rootHash,
+        trees: new Map([
+          [
+            rootHash,
+            {
+              _hash: rootHash,
+              meta: {
+                type: 'directory',
+                name: '.',
+                path: testDir,
+                relativePath: '.',
+                mtime: timestamp,
+              },
+              children: [ghostHash],
+            },
+          ],
+          [
+            ghostHash,
+            {
+              _hash: ghostHash,
+              meta: {
+                type: 'unknown' as any,
+                name: 'ghost',
+                path: join(testDir, 'ghost'),
+                relativePath: 'ghost',
+                mtime: timestamp,
+              },
+            },
+          ],
+        ]),
+      } as any;
+
+      await agent.restore(tree, undefined, { cleanTarget: true });
+
+      const strayExists = await stat(strayPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(strayExists).toBe(false);
+    });
   });
 
   describe('round-trip', () => {

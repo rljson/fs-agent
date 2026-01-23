@@ -23,7 +23,8 @@ found in the LICENSE file in the root of this package.
 - 🔁 **Bidirectional Sync**: Changes in either direction are automatically propagated
 - 🛡️ **Loop Prevention**: Intelligent pause/resume mechanism prevents infinite sync loops
 - ✅ **Type-Safe**: Full TypeScript support with comprehensive type definitions
-- 🧪 **Battle-Tested**: 100% test coverage with 123 tests
+- 🧪 **Battle-Tested**: 100% test coverage with 139 tests
+- 🧹 **Target Cleanup**: Optional `cleanTarget` restore prunes stale files and directories
 
 ## Installation
 
@@ -140,6 +141,16 @@ With `bidirectional: true`, the agent listens for database changes:
 4. Pauses filesystem watching during restoration (prevents loops)
 5. Resumes watching after restoration completes
 
+### Live Client-Server Demo
+
+Run the live in-process demo that mirrors changes between two folders using the same approach as our sync tests (SocketMock, IoMem, BsMem):
+
+```bash
+pnpm exec vite-node src/demo/live-client-server.ts
+```
+
+It creates `demo/live-client-server/folder-a` and `demo/live-client-server/folder-b`, seeds sample files, and keeps them in sync until you press Ctrl+C.
+
 ## API Reference
 
 ### FsAgent
@@ -200,12 +211,12 @@ const tree = await agent.extract();
 // Returns: { rootHash: string, trees: Map<string, Tree> }
 ```
 
-##### `restore(tree: FsTree, targetPath?: string): Promise<void>`
+##### `restore(tree: FsTree, targetPath?: string, options?: RestoreOptions): Promise<void>`
 
-Restores a tree structure to the filesystem.
+Restores a tree structure to the filesystem. Use `options.cleanTarget` to remove files and directories that are not part of the tree (helpful for propagating renames or deletions):
 
 ```typescript
-await agent.restore(tree, './restore-location');
+await agent.restore(tree, './restore-location', { cleanTarget: true });
 ```
 
 ##### `storeInDb(db: Db, treeKey: string, options?: StoreFsTreeOptions): Promise<void>`
@@ -475,6 +486,18 @@ async function backupAndRestore() {
 
   // ... later, restore from backup
   await agent.restore(backup, './my-data-restored');
+}
+```
+
+### Example 2b: Clean Restore (remove stale files)
+
+```typescript
+async function cleanRestore() {
+  const agent = new FsAgent('./source', new BsMem());
+  const snapshot = await agent.extract();
+
+  // Restore to target and prune anything not in the snapshot
+  await agent.restore(snapshot, './target', { cleanTarget: true });
 }
 ```
 
