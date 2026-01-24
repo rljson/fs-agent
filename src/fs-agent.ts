@@ -14,9 +14,9 @@ import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
-import type { FsNodeMeta } from './fs-scanner.ts';
 
 import type { Db } from '@rljson/db';
+import type { FsNodeMeta } from './fs-scanner.ts';
 
 // .............................................................................
 // Types
@@ -40,6 +40,8 @@ export interface FsAgentOptions {
   storageOptions?: StoreFsTreeOptions;
   /** Enable bidirectional sync (both fs→db and db→fs) */
   bidirectional?: boolean;
+  /** Restore options applied when syncing from DB */
+  restoreOptions?: RestoreOptions;
 }
 
 /** Restore options */
@@ -65,6 +67,7 @@ export class FsAgent {
   private _stopSync?: () => void;
   private _stopSyncFromDb?: () => void;
   private _storageOptions?: StoreFsTreeOptions;
+  private _restoreOptions?: RestoreOptions;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
@@ -72,6 +75,7 @@ export class FsAgent {
     this._db = options.db;
     this._treeKey = options.treeKey;
     this._storageOptions = options.storageOptions;
+    this._restoreOptions = options.restoreOptions;
     this._scanner = new FsScanner(rootPath, { ...options, bs: this._bs });
     this._adapter = new FsBlobAdapter(this._bs);
 
@@ -146,7 +150,11 @@ export class FsAgent {
       return;
     }
 
-    this._stopSyncFromDb = await this.syncFromDb(this._db, this._treeKey);
+    this._stopSyncFromDb = await this.syncFromDb(
+      this._db,
+      this._treeKey,
+      this._restoreOptions,
+    );
   }
 
   /**
@@ -536,9 +544,14 @@ export class FsAgent {
    * Registers notification callbacks and automatically updates filesystem
    * @param db - Database instance
    * @param treeKey - Tree table key
+   * @param restoreOptions - Restore behavior (e.g., cleanTarget)
    * @returns Function to stop watching
    */
-  async syncFromDb(db: Db, treeKey: string): Promise<() => void> {
+  async syncFromDb(
+    db: Db,
+    treeKey: string,
+    restoreOptions?: RestoreOptions,
+  ): Promise<() => void> {
     // Start watching filesystem (if not already watching)
     if (!this._scanner['_watcher']) {
       await this._scanner.watch();
@@ -571,7 +584,7 @@ export class FsAgent {
 
       try {
         // Load tree from database and restore to filesystem
-        await this.loadFromDb(db, treeKey, treeRef);
+        await this.loadFromDb(db, treeKey, treeRef, undefined, restoreOptions);
       } catch (error) {
         /* v8 ignore next 5 -- @preserve */
         console.error(

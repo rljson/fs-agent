@@ -146,10 +146,10 @@ With `bidirectional: true`, the agent listens for database changes:
 Run the live in-process demo that mirrors changes between two folders using the same approach as our sync tests (SocketMock, IoMem, BsMem):
 
 ```bash
-pnpm exec vite-node src/demo/live-client-server.ts
+pnpm exec vite-node src/live-client-server.ts
 ```
 
-It creates `demo/live-client-server/folder-a` and `demo/live-client-server/folder-b`, seeds sample files, and keeps them in sync until you press Ctrl+C.
+It wipes and recreates `demo/live-client-server/folder-a` and `demo/live-client-server/folder-b`, seeds sample files, and keeps them in sync until you press Ctrl+C. Pass `--keep-existing` to skip the reset.
 
 ## API Reference
 
@@ -188,6 +188,9 @@ interface FsAgentOptions {
 
   // Bidirectional sync
   bidirectional?: boolean; // Enable database → filesystem sync (default: false)
+
+    // Restore options applied when syncing from DB (e.g., cleanTarget)
+    restoreOptions?: RestoreOptions;
 }
 ```
 

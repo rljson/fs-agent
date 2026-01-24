@@ -9,7 +9,7 @@ export {
   FsBlobAdapter,
   type BlobToFileOptions,
   type FileBlobMeta,
-  type FileTooBlobOptions,
+  type FileToBlobOptions,
 } from './fs-blob-adapter.ts';
 export { FsDbAdapter, type StoreFsTreeOptions } from './fs-db-adapter.ts';
 export {
@@ -21,3 +21,10 @@ export {
   type FsScanOptions,
   type FsTree,
 } from './fs-scanner.ts';
+
+// Client-server utilities
+export {
+  runClientServerSetup,
+  type ClientServerSetupOptions,
+  type ClientServerSetupResult,
+} from './client-server/client-server-setup.ts';

@@ -8,6 +8,7 @@
 
 import { defineConfig } from 'vite';
 
+
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   return {
@@ -26,7 +27,7 @@ export default defineConfig(({ mode }) => {
         exclude: [
           'src/index.ts',
           'src/example.ts',
-          'src/demo/live-client-server.ts',
+          'src/live-client-server.ts',
         ],
         all: true,
         thresholds: {

@@ -4,7 +4,6 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { BsMem } from '@rljson/bs';
 import { Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
@@ -13,7 +12,13 @@ import { Client, Server } from '@rljson/server';
 import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 
-import { FsAgent } from './fs-agent.ts';
+import { FsAgent } from '../fs-agent.ts';
+
+async function createSharedTreeTable(io: IoMem, treeKey: string) {
+  const db = new Db(io);
+  const treeCfg = createTreesTableCfg(treeKey);
+  await db.core.createTableWithInsertHistory(treeCfg);
+}
 
 export interface ClientServerSetupOptions {
   baseDir?: string;
@@ -51,40 +56,56 @@ export async function runClientServerSetup(
   const serverIo = new IoMem();
   await serverIo.init();
   await serverIo.isReady();
-  const serverBs = new BsMem();
-  const server = new Server(route, serverIo, serverBs);
-  await server.init();
-  const sharedDb = new Db(serverIo);
-  await sharedDb.core.createTableWithInsertHistory(
-    createTreesTableCfg(treeKey),
-  );
 
-  // Clients
+  const { BsMem } = await import('@rljson/bs');
+
+  const serverBsMem = new BsMem();
+
+  // Create table schema on server
+  await createSharedTreeTable(serverIo, treeKey);
+
+  const server = new Server(route, serverIo, serverBsMem);
+  await server.init();
+
+  // Client A setup
   const socketA = new SocketMock();
   socketA.connect();
   await server.addSocket(socketA);
   const localIoA = new IoMem();
   await localIoA.init();
   await localIoA.isReady();
-  const clientA = new Client(socketA, localIoA, new BsMem());
-  await clientA.init();
-  const agentA = new FsAgent(folderA, server.bs);
 
+  // Create table schema on client A's local Io
+  await createSharedTreeTable(localIoA, treeKey);
+
+  const localBsA = new BsMem();
+  const clientA = new Client(socketA, localIoA, localBsA);
+  await clientA.init();
+  const clientDbA = new Db(clientA.io);
+  const agentA = new FsAgent(folderA, clientA.bs);
+
+  // Client B setup
   const socketB = new SocketMock();
   socketB.connect();
   await server.addSocket(socketB);
   const localIoB = new IoMem();
   await localIoB.init();
   await localIoB.isReady();
-  const clientB = new Client(socketB, localIoB, new BsMem());
+
+  // Create table schema on client B's local Io
+  await createSharedTreeTable(localIoB, treeKey);
+
+  const localBsB = new BsMem();
+  const clientB = new Client(socketB, localIoB, localBsB);
   await clientB.init();
-  const agentB = new FsAgent(folderB, server.bs);
+  const clientDbB = new Db(clientB.io);
+  const agentB = new FsAgent(folderB, clientB.bs);
 
   // Write + sync
   const helloPathA = join(folderA, 'hello.txt');
   await writeFile(helloPathA, 'Hello from Client A');
-  const rootRef = await agentA.storeInDb(sharedDb, treeKey, { notify: false });
-  await agentB.loadFromDb(sharedDb, treeKey, rootRef);
+  const rootRef = await agentA.storeInDb(clientDbA, treeKey, { notify: false });
+  await agentB.loadFromDb(clientDbB, treeKey, rootRef);
   const contentB = await readFile(join(folderB, 'hello.txt'), 'utf8');
 
   const cleanup = async () => {

@@ -33,7 +33,7 @@ export interface FileBlobMeta extends Json {
 /**
  * Options for file-to-blob conversion
  */
-export interface FileTooBlobOptions {
+export interface FileToBlobOptions {
   /** Custom blob storage (defaults to BsMem) */
   bs?: Bs;
   /** Include full path in metadata (default: true) */
@@ -81,7 +81,7 @@ export class FsBlobAdapter {
    */
   async fileToBlob(
     filePath: string,
-    options: FileTooBlobOptions = {},
+    options: FileToBlobOptions = {},
   ): Promise<FileBlobMeta> {
     const bs = options.bs || this._bs;
     const includePath = options.includePath !== false;
@@ -117,7 +117,7 @@ export class FsBlobAdapter {
    */
   async filesToBlobs(
     filePaths: string[],
-    options: FileTooBlobOptions = {},
+    options: FileToBlobOptions = {},
   ): Promise<FileBlobMeta[]> {
     const results: FileBlobMeta[] = [];
 
