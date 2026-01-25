@@ -7,7 +7,6 @@
 import { FsAgent } from './fs-agent.ts';
 import { FsScanner } from './fs-scanner.ts';
 
-
 export const example = async () => {
   // Print methods
   const l = console.log;
@@ -65,28 +64,34 @@ export const example = async () => {
   p('Scanner is ready. Changes will be logged.');
   p('(Call scanner.watch() to start watching)');
 
-  // Example 4: Automatic Database Sync
-  h1('\nFsAgent - Automatic Database Sync');
-  h2('Automatically sync filesystem changes to database');
-  p('When creating FsAgent with db and treeKey options,');
-  p('it automatically starts watching and syncing changes:');
+  // Example 4: Manual Database Sync
+  h1('\nFsAgent - Manual Database Sync');
+  h2('Manually sync filesystem changes to database using Connector');
+  p('Use syncToDb() with a Connector for socket-based synchronization:');
+  p('');
+  p('import { Connector } from "@rljson/db";');
+  p('import { Route } from "@rljson/rljson";');
+  p('import { SocketMock } from "@rljson/io";');
   p('');
   p('const agent = new FsAgent(');
   p('  "./my-project",');
   p('  myBlobStorage,');
-  p('  {');
-  p('    db: myDatabase,');
-  p('    treeKey: "projectTree",');
-  p('    ignore: ["node_modules", ".git"]');
-  p('  }');
+  p('  { ignore: ["node_modules", ".git"] }');
   p(');');
   p('');
-  p('// Agent now automatically:');
+  p('const socket = new SocketMock();');
+  p('const route = Route.fromFlat("/projectTree+");');
+  p('const connector = new Connector(db, route, socket);');
+  p('');
+  p('const stopSync = await agent.syncToDb(db, connector, "projectTree");');
+  p('');
+  p('// Agent now:');
   p('// 1. Watches for file changes');
   p('// 2. Extracts trees and stores blobs');
-  p('// 3. Syncs to database on changes');
+  p('// 3. Broadcasts changes via Connector');
   p('');
-  p('// Clean up when done:');
+  p('// Stop syncing:');
+  p('stopSync();');
   p('agent.dispose();');
 };
 

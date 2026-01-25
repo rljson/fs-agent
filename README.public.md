@@ -40,10 +40,10 @@ The simplest way to get started is with automatic synchronization:
 
 ```typescript
 import { FsAgent } from '@rljson/fs-agent';
-import { Db } from '@rljson/db';
-import { IoMem } from '@rljson/io';
+import { Connector, Db } from '@rljson/db';
+import { IoMem, SocketMock } from '@rljson/io';
 import { BsMem } from '@rljson/bs';
-import { createTreesTableCfg } from '@rljson/rljson';
+import { Route, createTreesTableCfg } from '@rljson/rljson';
 
 // Setup database
 const io = new IoMem();
@@ -55,21 +55,28 @@ const treeKey = 'projectFilesTree';
 const treeTableCfg = createTreesTableCfg(treeKey);
 await db.core.createTableWithInsertHistory(treeTableCfg);
 
-// Create FsAgent - syncing starts automatically!
+// Create FsAgent
 const agent = new FsAgent('./my-project', new BsMem(), {
-  db,
-  treeKey,
   ignore: ['node_modules', '.git', 'dist'],
   maxDepth: 10,
 });
 
-// That's it! The agent now:
+// Create Connector for socket-based synchronization
+const socket = new SocketMock();
+const route = Route.fromFlat(`/${treeKey}+`);
+const connector = new Connector(db, route, socket);
+
+// Start syncing
+const stopSync = await agent.syncToDb(db, connector, treeKey);
+
+// The agent now:
 // ✓ Watches your filesystem for changes
 // ✓ Extracts tree structures from directories
 // ✓ Stores file content in blob storage
-// ✓ Syncs everything to the database automatically
+// ✓ Broadcasts changes via Connector
 
 // When you're done:
+stopSync();
 agent.dispose();
 ```
 
@@ -78,18 +85,34 @@ agent.dispose();
 Enable two-way synchronization so changes in the database also update the filesystem:
 
 ```typescript
+import { Connector } from '@rljson/db';
+import { Route } from '@rljson/rljson';
+import { SocketMock } from '@rljson/io';
+
 const agent = new FsAgent('./my-project', new BsMem(), {
-  db,
-  treeKey,
-  bidirectional: true, // ← Enable bidirectional sync
   ignore: ['node_modules', '.git', 'dist'],
 });
+
+// Create Connector for bidirectional communication
+const socket = new SocketMock();
+const route = Route.fromFlat(`/${treeKey}+`);
+const connector = new Connector(db, route, socket);
+
+// Start filesystem → database sync
+const stopToDb = await agent.syncToDb(db, connector, treeKey);
+
+// Start database → filesystem sync (same Connector)
+const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
 
 // Now the agent handles changes in BOTH directions:
 // 1. Filesystem changes → automatically synced to database
 // 2. Database changes → automatically synced to filesystem
 // 3. Loop prevention ensures no infinite sync cycles
 // 4. Both sides stay perfectly synchronized
+
+// Stop syncing
+stopToDb();
+stopFromDb();
 ```
 
 ## Core Concepts
@@ -124,22 +147,26 @@ Files are stored efficiently using content-addressed blob storage:
 
 ### Automatic Watching
 
-When you create an `FsAgent` with `db` and `treeKey` options:
+### Automatic Synchronization (Constructor-based)
 
-1. Initial scan happens immediately
-2. File watcher starts monitoring changes
-3. Changes trigger automatic database sync
-4. No manual intervention needed
+**Note:** Constructor-based automatic synchronization using `db`, `treeKey`, and `bidirectional` options is deprecated and will throw an error. Use the explicit `syncToDb()` and `syncFromDb()` methods with a `Connector` instance instead (see examples above).
 
-### Bidirectional Sync
+The new approach provides better control and uses the Connector pattern for socket-based synchronization:
 
-With `bidirectional: true`, the agent listens for database changes:
+```typescript
+// ❌ Deprecated (will throw error)
+const agent = new FsAgent('./my-project', new BsMem(), {
+  db,
+  treeKey,
+  bidirectional: true,
+});
 
-1. Monitors database insert history for the tree table
-2. Detects when other processes add new tree versions
-3. Automatically restores new versions to filesystem
-4. Pauses filesystem watching during restoration (prevents loops)
-5. Resumes watching after restoration completes
+// ✅ Use this instead
+const agent = new FsAgent('./my-project', new BsMem());
+const connector = new Connector(db, route, socket);
+const stopToDb = await agent.syncToDb(db, connector, treeKey);
+const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
+```
 
 ### Live Client-Server Demo
 
@@ -175,6 +202,17 @@ new FsAgent(rootPath: string, bs?: Bs, options?: FsAgentOptions)
 interface FsAgentOptions {
   // Scanning options
   ignore?: string[]; // Patterns to ignore (e.g., ['node_modules', '*.log'])
+  maxDepth?: number; // Maximum directory depth to scan
+  followSymlinks?: boolean; // Whether to follow symbolic links (default: false)
+
+  // Deprecated options (will throw error if used)
+  // Use syncToDb()/syncFromDb() methods with Connector instead
+  db?: Db; // DEPRECATED
+  treeKey?: string; // DEPRECATED
+  bidirectional?: boolean; // DEPRECATED
+  storageOptions?: StoreFsTreeOptions; // DEPRECATED
+  restoreOptions?: RestoreOptions; // DEPRECATED
+}
   maxDepth?: number; // Maximum directory depth (default: 10)
   followSymlinks?: boolean; // Follow symbolic links (default: false)
 
@@ -230,21 +268,39 @@ Manually stores the current filesystem state in the database.
 await agent.storeInDb(db, 'myFilesTree', { includeBlobs: true });
 ```
 
-##### `syncToDb(db: Db, treeKey: string, options?: StoreFsTreeOptions): Promise<() => void>`
+##### `syncToDb(db: Db, connector: Connector, treeKey: string, options?: StoreFsTreeOptions): Promise<() => void>`
 
-Starts watching filesystem and syncing to database.
+Starts watching filesystem and syncing to database using Connector for socket-based broadcasts.
 
 ```typescript
-const stopSync = await agent.syncToDb(db, 'myFilesTree');
+import { Connector } from '@rljson/db';
+import { Route } from '@rljson/rljson';
+import { SocketMock } from '@rljson/io';
+
+const socket = new SocketMock();
+const route = Route.fromFlat(`/${treeKey}+`);
+const connector = new Connector(db, route, socket);
+
+const stopSync = await agent.syncToDb(db, connector, 'myFilesTree');
 // Later: stopSync();
 ```
 
-##### `syncFromDb(db: Db, treeKey: string): Promise<() => void>`
+##### `syncFromDb(db: Db, connector: Connector, treeKey: string, restoreOptions?: RestoreOptions): Promise<() => void>`
 
-Starts listening to database and syncing to filesystem.
+Starts listening to database changes via Connector and syncing to filesystem.
 
 ```typescript
-const stopSync = await agent.syncFromDb(db, 'myFilesTree');
+import { Connector } from '@rljson/db';
+import { Route } from '@rljson/rljson';
+import { SocketMock } from '@rljson/io';
+
+const socket = new SocketMock();
+const route = Route.fromFlat(`/${treeKey}+`);
+const connector = new Connector(db, route, socket);
+
+const stopSync = await agent.syncFromDb(db, connector, 'myFilesTree', {
+  cleanTarget: true // Optional: remove files not in tree
+});
 // Later: stopSync();
 ```
 
@@ -289,13 +345,23 @@ const rootTree = scanner.getRootTree();
 If you need fine-grained control over synchronization:
 
 ```typescript
+import { Connector } from '@rljson/db';
+import { Route } from '@rljson/rljson';
+import { SocketMock } from '@rljson/io';
+
 const agent = new FsAgent('./my-project', new BsMem());
 
+// Create Connector for synchronization
+const socket = new SocketMock();
+const route = Route.fromFlat('/myFilesTree+');
+const connector = new Connector(db, route, socket);
+
 // Start filesystem → database sync
-const stopToDb = await agent.syncToDb(db, 'myFilesTree');
+const stopToDb = await agent.syncToDb(db, connector, 'myFilesTree');
 
 // Start database → filesystem sync
-const stopFromDb = await agent.syncFromDb(db, 'myFilesTree');
+const stopFromDb = await agent.syncFromDb(db, connector, 'myFilesTree');
+
 // Stop when needed
 stopToDb();
 stopFromDb();
@@ -446,10 +512,10 @@ try {
 
 ```typescript
 import { FsAgent } from '@rljson/fs-agent';
-import { Db } from '@rljson/db';
-import { IoMem } from '@rljson/io';
+import { Connector, Db } from '@rljson/db';
+import { IoMem, SocketMock } from '@rljson/io';
 import { BsMem } from '@rljson/bs';
-import { createTreesTableCfg } from '@rljson/rljson';
+import { Route, createTreesTableCfg } from '@rljson/rljson';
 
 async function syncProject() {
   // Setup
@@ -457,19 +523,24 @@ async function syncProject() {
   await io.init();
   const db = new Db(io);
 
-  const treeTableCfg = createTreesTableCfg('projectTree');
+  const treeKey = 'projectTree';
+  const treeTableCfg = createTreesTableCfg(treeKey);
   await db.core.createTableWithInsertHistory(treeTableCfg);
 
-  // Sync
+  // Create agent
   const agent = new FsAgent('./src', new BsMem(), {
-    db,
-    treeKey: 'projectTree',
     ignore: ['*.tmp'],
   });
 
-  // Runs automatically!
+  // Create Connector and start syncing
+  const socket = new SocketMock();
+  const route = Route.fromFlat(`/${treeKey}+`);
+  const connector = new Connector(db, route, socket);
+  const stopSync = await agent.syncToDb(db, connector, treeKey);
+
   // Clean up when done
   process.on('SIGINT', () => {
+    stopSync();
     agent.dispose();
     process.exit();
   });
@@ -640,25 +711,32 @@ try {
 
 ### Agent not syncing changes
 
-Check that automatic sync is enabled:
+Make sure you've called `syncToDb()` with a Connector:
 
 ```typescript
-const agent = new FsAgent(path, bs, {
-  db, // ← Must be provided
-  treeKey, // ← Must be provided
-});
+import { Connector } from '@rljson/db';
+import { Route } from '@rljson/rljson';
+import { SocketMock } from '@rljson/io';
+
+const agent = new FsAgent(path, bs);
+
+// Create Connector and start syncing
+const socket = new SocketMock();
+const route = Route.fromFlat(`/${treeKey}+`);
+const connector = new Connector(db, route, socket);
+const stopSync = await agent.syncToDb(db, connector, treeKey);
 ```
 
 ### Bidirectional sync not working
 
-Ensure `bidirectional: true` is set:
+Ensure you've started both `syncToDb()` and `syncFromDb()` with the same Connector:
 
 ```typescript
-const agent = new FsAgent(path, bs, {
-  db,
-  treeKey,
-  bidirectional: true, // ← Required for db→fs sync
-});
+const connector = new Connector(db, route, socket);
+
+// Start both directions
+const stopToDb = await agent.syncToDb(db, connector, treeKey);
+const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
 ```
 
 ### High memory usage

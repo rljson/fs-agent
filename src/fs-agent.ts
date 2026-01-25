@@ -14,8 +14,7 @@ import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
-
-import type { Db } from '@rljson/db';
+import type { Connector, Db } from '@rljson/db';
 import type { FsNodeMeta } from './fs-scanner.ts';
 
 // .............................................................................
@@ -126,6 +125,8 @@ export class FsAgent {
 
   /**
    * Starts automatic syncing to database
+   * Note: Auto-sync requires Connector which is not available in constructor.
+   * Consider using syncToDb() directly instead of constructor options.
    */
   private async _startAutoSync(): Promise<void> {
     /* v8 ignore next 3 -- @preserve */
@@ -133,16 +134,18 @@ export class FsAgent {
       return;
     }
 
-    this._stopSync = await this.syncToDb(
-      this._db,
-      this._treeKey,
-      this._storageOptions,
+    // Cannot create Connector without socket - auto-sync not supported
+    throw new Error(
+      'Auto-sync from constructor is not supported. ' +
+        'Use syncToDb() method directly with a Connector instance.',
     );
   }
 
   /**
    * Starts automatic syncing from database
    * @param bidirectional - Whether bidirectional sync is enabled
+   * Note: Auto-sync requires Connector which is not available in constructor.
+   * Consider using syncFromDb() directly instead of constructor options.
    */
   private async _startAutoSyncFromDb(bidirectional: boolean): Promise<void> {
     /* v8 ignore next 3 -- @preserve */
@@ -150,10 +153,10 @@ export class FsAgent {
       return;
     }
 
-    this._stopSyncFromDb = await this.syncFromDb(
-      this._db,
-      this._treeKey,
-      this._restoreOptions,
+    // Cannot create Connector without socket - auto-sync not supported
+    throw new Error(
+      'Auto-sync from constructor is not supported. ' +
+        'Use syncFromDb() method directly with a Connector instance.',
     );
   }
 
@@ -503,19 +506,26 @@ export class FsAgent {
 
   /**
    * Watches filesystem for changes and syncs to database
-   * Registers change callbacks and automatically stores updates in DB
+   * Uses Connector for socket-based broadcast
    * @param db - Database instance
+   * @param connector - Connector instance for socket-based sync
    * @param treeKey - Tree table key
-   * @param options - Storage options
+   * @param options - Storage options (e.g., notify)
    * @returns Function to stop watching
    */
   async syncToDb(
     db: Db,
+    connector: Connector,
     treeKey: string,
     options?: StoreFsTreeOptions,
   ): Promise<() => void> {
     // Store initial state
-    await this.storeInDb(db, treeKey, options);
+    const initialRef = await this.storeInDb(db, treeKey, options);
+
+    // Send initial ref through connector
+    if (initialRef) {
+      connector.send(initialRef);
+    }
 
     // Create callback to sync on changes
     const syncCallback = async () => {
@@ -524,7 +534,12 @@ export class FsAgent {
       /* v8 ignore next 3 -- @preserve */
       if (tree) {
         const dbAdapter = new FsDbAdapter(db, treeKey);
-        await dbAdapter.storeFsTree(tree, options);
+        const ref = await dbAdapter.storeFsTree(tree, options);
+
+        // Broadcast the new ref through connector
+        if (ref) {
+          connector.send(ref);
+        }
       }
     };
 
@@ -541,14 +556,16 @@ export class FsAgent {
 
   /**
    * Watches database for tree changes and syncs to filesystem
-   * Registers notification callbacks and automatically updates filesystem
+   * Uses Connector for socket-based notifications
    * @param db - Database instance
+   * @param connector - Connector instance for socket-based sync
    * @param treeKey - Tree table key
-   * @param restoreOptions - Restore behavior (e.g., cleanTarget)
+   * @param restoreOptions - Restore options (e.g., cleanTarget)
    * @returns Function to stop watching
    */
   async syncFromDb(
     db: Db,
+    connector: Connector,
     treeKey: string,
     restoreOptions?: RestoreOptions,
   ): Promise<() => void> {
@@ -557,23 +574,12 @@ export class FsAgent {
       await this._scanner.watch();
     }
 
-    // Register on the treeKey+ route to listen for insertions
-    const notifyRoute = Route.fromFlat(`/${treeKey}+`);
-
     // Create callback to sync on DB changes
-    const syncCallback = async (historyRow: any) => {
-      // Validate history row structure
-      if (!historyRow || typeof historyRow !== 'object') {
-        console.error('[syncFromDb] Invalid history row received:', historyRow);
-        return;
-      }
-
-      // Extract the tree reference from the history row
-      const treeRef = historyRow[`${treeKey}Ref`];
-
+    const syncCallback = async (treeRef: string) => {
+      // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
         console.error(
-          `[syncFromDb] Missing or invalid treeRef in history row. Expected string, got:`,
+          `[syncFromDb] Invalid treeRef received. Expected string, got:`,
           typeof treeRef,
         );
         return;
@@ -598,12 +604,12 @@ export class FsAgent {
       }
     };
 
-    // Register notification callback
-    db.notify.register(notifyRoute, syncCallback);
+    // Register callback with Connector
+    connector.listen(syncCallback);
 
     // Return cleanup function
     return () => {
-      db.notify.unregister(notifyRoute, syncCallback);
+      connector.teardown();
     };
   }
 

@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import { BsMem } from '@rljson/bs';
-import { Db } from '@rljson/db';
+import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 import { Client, Server } from '@rljson/server';
@@ -71,7 +71,11 @@ async function setupClient(server: Server) {
 
   const clientDb = new Db(client.io!);
 
-  return { client, clientDb };
+  // Create Connector for bidirectional sync
+  const route = Route.fromFlat('/sharedTree+');
+  const connector = new Connector(clientDb, route, socket);
+
+  return { client, clientDb, connector };
 }
 async function createTempFolders() {
   const tempRoot = await mkdtemp(join(tmpdir(), 'fs-agent-demo-'));
@@ -109,6 +113,31 @@ async function waitFor(
   throw new Error('waitFor timed out');
 }
 
+async function cleanup(resources: {
+  tempRoot?: string;
+  agents?: FsAgent[];
+  connectors?: Array<{ teardown: () => void }>;
+}) {
+  // Dispose agents first (stops watchers)
+  if (resources.agents) {
+    for (const agent of resources.agents) {
+      agent.dispose();
+    }
+  }
+
+  // Tear down connectors
+  if (resources.connectors) {
+    for (const connector of resources.connectors) {
+      connector.teardown();
+    }
+  }
+
+  // Clean up temp folders
+  if (resources.tempRoot) {
+    await rm(resources.tempRoot, { recursive: true, force: true });
+  }
+}
+
 describe('client-server setup helper', () => {
   it('runs end-to-end and cleans up', async () => {
     const tempBase = await mkdtemp(join(tmpdir(), 'fs-agent-setup-'));
@@ -133,8 +162,16 @@ describe('client-server folder sync', () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
 
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -150,15 +187,27 @@ describe('client-server folder sync', () => {
     const contentB = await readFile(join(folderB, 'hello.txt'), 'utf8');
     expect(contentB).toBe('Hello from Client A');
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('syncs back from B to A', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
 
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -174,14 +223,26 @@ describe('client-server folder sync', () => {
     const contentA = await readFile(join(folderA, 'reply.txt'), 'utf8');
     expect(contentA).toBe('Hello from Client B');
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('updates existing files', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -203,14 +264,26 @@ describe('client-server folder sync', () => {
     const contentB = await readFile(join(folderB, 'note.txt'), 'utf8');
     expect(contentB).toBe('v2');
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB, freshAgentA],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('does not currently propagate deletions (documented behavior)', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -232,14 +305,26 @@ describe('client-server folder sync', () => {
     // FsAgent.restore does not delete extra files; current behavior retains stale files
     expect(await fileExists(join(folderB, 'drop.txt'))).toBe(true);
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('handles nested directories', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -261,14 +346,26 @@ describe('client-server folder sync', () => {
     expect(nestedB).toBe('nested content');
     expect(rootB).toBe('root content');
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('syncs binary files', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -283,14 +380,26 @@ describe('client-server folder sync', () => {
     const dataB = await readFile(join(folderB, 'blob.bin'));
     expect(dataB.equals(data)).toBe(true);
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('removes stale files when cleanTarget is enabled', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -318,14 +427,26 @@ describe('client-server folder sync', () => {
     expect(await fileExists(join(folderB, 'drop.txt'))).toBe(false);
     expect(await fileExists(join(folderB, 'stale-dir'))).toBe(false);
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('propagates renames/moves when cleanTarget is enabled', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -348,14 +469,26 @@ describe('client-server folder sync', () => {
     expect(await fileExists(join(folderB, 'moved', 'renamed.txt'))).toBe(true);
     expect(await fileExists(join(folderB, 'old.txt'))).toBe(false);
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('syncs zero-byte files', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -369,14 +502,26 @@ describe('client-server folder sync', () => {
     const content = await readFile(join(folderB, 'empty.txt'), 'utf8');
     expect(content).toBe('');
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('syncs hidden files', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -389,14 +534,26 @@ describe('client-server folder sync', () => {
     const content = await readFile(join(folderB, '.env.local'), 'utf8');
     expect(content).toBe('SECRET=1');
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('syncs large files with checksum verification', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -412,14 +569,26 @@ describe('client-server folder sync', () => {
     const hashB = await hashFile(join(folderB, 'large.bin'));
     expect(hashB).toBe(hashA);
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('last writer wins on conflicting edits', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -439,14 +608,26 @@ describe('client-server folder sync', () => {
     const contentA = await readFile(conflictPath, 'utf8');
     expect(contentA).toBe('B2');
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('preserves mtime when restoring', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -464,14 +645,26 @@ describe('client-server folder sync', () => {
       1500,
     );
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('restore is idempotent for the same root ref', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -489,14 +682,26 @@ describe('client-server folder sync', () => {
 
     expect(secondHash).toBe(firstHash);
 
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 10000);
 
   it('live sync propagates copied files with watchers', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -509,12 +714,22 @@ describe('client-server folder sync', () => {
       cleanTarget: true,
     });
 
-    const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', {
-      notify: true,
-    });
-    const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree', {
-      cleanTarget: true,
-    });
+    const stopAtoDb = await agentA.syncToDb(
+      clientDbA,
+      connectorA,
+      'sharedTree',
+      {
+        notify: true,
+      },
+    );
+    const stopBfromDb = await agentB.syncFromDb(
+      clientDbB,
+      connectorB,
+      'sharedTree',
+      {
+        cleanTarget: true,
+      },
+    );
 
     const copyPath = join(folderA, 'copy.txt');
     await copyFile(sourcePath, copyPath);
@@ -530,14 +745,26 @@ describe('client-server folder sync', () => {
 
     stopAtoDb();
     stopBfromDb();
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 15000);
 
   it('live sync propagates copied files without cleanTarget (stale allowed)', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -548,10 +775,19 @@ describe('client-server folder sync', () => {
     const baseRef = await agentA.storeInDb(clientDbA, 'sharedTree');
     await agentB.loadFromDb(clientDbB, 'sharedTree', baseRef);
 
-    const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', {
-      notify: true,
-    });
-    const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree');
+    const stopAtoDb = await agentA.syncToDb(
+      clientDbA,
+      connectorA,
+      'sharedTree',
+      {
+        notify: true,
+      },
+    );
+    const stopBfromDb = await agentB.syncFromDb(
+      clientDbB,
+      connectorB,
+      'sharedTree',
+    );
 
     const copyPath = join(folderA, 'copy.txt');
     await copyFile(sourcePath, copyPath);
@@ -567,14 +803,26 @@ describe('client-server folder sync', () => {
 
     stopAtoDb();
     stopBfromDb();
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 20000);
 
   it('live sync removes deletions when cleanTarget is enabled', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -587,12 +835,22 @@ describe('client-server folder sync', () => {
       cleanTarget: true,
     });
 
-    const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', {
-      notify: true,
-    });
-    const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree', {
-      cleanTarget: true,
-    });
+    const stopAtoDb = await agentA.syncToDb(
+      clientDbA,
+      connectorA,
+      'sharedTree',
+      {
+        notify: true,
+      },
+    );
+    const stopBfromDb = await agentB.syncFromDb(
+      clientDbB,
+      connectorB,
+      'sharedTree',
+      {
+        cleanTarget: true,
+      },
+    );
 
     await rm(filePath);
 
@@ -602,14 +860,26 @@ describe('client-server folder sync', () => {
 
     stopAtoDb();
     stopBfromDb();
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 15000);
 
   it('live sync propagates renames with cleanTarget', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -623,12 +893,22 @@ describe('client-server folder sync', () => {
       cleanTarget: true,
     });
 
-    const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', {
-      notify: true,
-    });
-    const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree', {
-      cleanTarget: true,
-    });
+    const stopAtoDb = await agentA.syncToDb(
+      clientDbA,
+      connectorA,
+      'sharedTree',
+      {
+        notify: true,
+      },
+    );
+    const stopBfromDb = await agentB.syncFromDb(
+      clientDbB,
+      connectorB,
+      'sharedTree',
+      {
+        cleanTarget: true,
+      },
+    );
 
     await rename(oldPath, newPath);
 
@@ -645,14 +925,26 @@ describe('client-server folder sync', () => {
 
     stopAtoDb();
     stopBfromDb();
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 20000);
 
   it('live sync keeps stale deletions when cleanTarget is disabled', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -665,10 +957,19 @@ describe('client-server folder sync', () => {
       cleanTarget: false,
     });
 
-    const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', {
-      notify: true,
-    });
-    const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree');
+    const stopAtoDb = await agentA.syncToDb(
+      clientDbA,
+      connectorA,
+      'sharedTree',
+      {
+        notify: true,
+      },
+    );
+    const stopBfromDb = await agentB.syncFromDb(
+      clientDbB,
+      connectorB,
+      'sharedTree',
+    );
 
     await rm(filePath);
 
@@ -682,14 +983,26 @@ describe('client-server folder sync', () => {
 
     stopAtoDb();
     stopBfromDb();
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 20000);
 
   it('live sync keeps renamed source when cleanTarget is disabled', async () => {
     const { tempRoot, folderA, folderB } = await createTempFolders();
     const { server } = await setupServer();
-    const { client: clientA, clientDb: clientDbA } = await setupClient(server);
-    const { client: clientB, clientDb: clientDbB } = await setupClient(server);
+    const {
+      client: clientA,
+      clientDb: clientDbA,
+      connector: connectorA,
+    } = await setupClient(server);
+    const {
+      client: clientB,
+      clientDb: clientDbB,
+      connector: connectorB,
+    } = await setupClient(server);
 
     const agentA = new FsAgent(folderA, clientA.bs);
     const agentB = new FsAgent(folderB, clientB.bs);
@@ -701,10 +1014,19 @@ describe('client-server folder sync', () => {
     const baseRef = await agentA.storeInDb(clientDbA, 'sharedTree');
     await agentB.loadFromDb(clientDbB, 'sharedTree', baseRef);
 
-    const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', {
-      notify: true,
-    });
-    const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree');
+    const stopAtoDb = await agentA.syncToDb(
+      clientDbA,
+      connectorA,
+      'sharedTree',
+      {
+        notify: true,
+      },
+    );
+    const stopBfromDb = await agentB.syncFromDb(
+      clientDbB,
+      connectorB,
+      'sharedTree',
+    );
 
     await rename(oldPath, newPath);
 
@@ -722,6 +1044,10 @@ describe('client-server folder sync', () => {
 
     stopAtoDb();
     stopBfromDb();
-    await rm(tempRoot, { recursive: true, force: true });
+    await cleanup({
+      tempRoot,
+      agents: [agentA, agentB],
+      connectors: [connectorA, connectorB],
+    });
   }, 20000);
 });

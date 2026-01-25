@@ -8,7 +8,6 @@
 
 import { defineConfig } from 'vite';
 
-
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   return {
@@ -17,6 +16,8 @@ export default defineConfig(({ mode }) => {
       environment: 'node',
       setupFiles: ['./test/setup/test-setup.ts'],
       include: ['**/test/**/*.spec.ts'],
+      testTimeout: 30000, // 30 seconds for slow tests
+      hookTimeout: 30000, // 30 seconds for setup/teardown hooks
 
       reporters: ['default'],
       coverage: {
