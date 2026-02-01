@@ -78,16 +78,14 @@ export class FsAgent {
     // Automatically start syncing if db and treeKey are provided
     /* v8 ignore next -- @preserve */
     if (this._db && this._treeKey) {
-      this._startAutoSync().catch((error) => {
-        console.error('Failed to start auto-sync:', error);
+      this._startAutoSync().catch(() => {
+        // Intentionally ignored - deprecated constructor pattern
       });
 
       // Start reverse sync if bidirectional is enabled
-      this._startAutoSyncFromDb(options.bidirectional || false).catch(
-        (error) => {
-          console.error('Failed to start auto-sync from DB:', error);
-        },
-      );
+      this._startAutoSyncFromDb(options.bidirectional || false).catch(() => {
+        // Intentionally ignored - deprecated constructor pattern
+      });
     }
   }
 
@@ -641,10 +639,6 @@ export class FsAgent {
     const syncCallback = async (treeRef: string) => {
       // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
-        console.error(
-          `[syncFromDb] Invalid treeRef received. Expected string, got:`,
-          typeof treeRef,
-        );
         return;
       }
 
@@ -660,12 +654,8 @@ export class FsAgent {
       try {
         // Load tree from database and restore to filesystem
         await this.loadFromDb(db, treeKey, treeRef, undefined, restoreOptions);
-      } catch (error) {
-        /* v8 ignore next 5 -- @preserve */
-        console.error(
-          `[syncFromDb] Failed to sync tree "${treeRef}" from database:`,
-          error instanceof Error ? error.message : String(error),
-        );
+      } catch {
+        /* v8 ignore next 2 -- @preserve */
         // Don't re-throw - we don't want one sync failure to break the notification system
       } finally {
         // Always resume watching, even if there was an error
