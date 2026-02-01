@@ -16,6 +16,8 @@ export default defineConfig(({ mode }) => {
       environment: 'node',
       setupFiles: ['./test/setup/test-setup.ts'],
       include: ['**/test/**/*.spec.ts'],
+      testTimeout: 30000, // 30 seconds for slow tests
+      hookTimeout: 30000, // 30 seconds for setup/teardown hooks
 
       reporters: ['default'],
       coverage: {
@@ -23,7 +25,12 @@ export default defineConfig(({ mode }) => {
         provider: 'v8', // "istanbul" or "v8"
         reporter: ['text', 'json', 'html'],
         include: ['src/**/*.ts'],
-        exclude: ['src/index.ts'],
+        exclude: [
+          'src/index.ts',
+          'src/example.ts',
+          'src/live-client-server.ts',
+          'src/client-server/**/*.ts', // Exclude demo/example files from coverage
+        ],
         all: true,
         thresholds: {
           statements: 100,

@@ -81,7 +81,13 @@
   "testExplorer.codeLens": true,
   "testExplorer.useNativeTesting": true,
 
+  "vitest.enable": true,
   "vitest.debugExclude": ["<node_internals>/**" /*"node_modules/**"*/],
+  "vitest.nodeEnv": {
+    "NODE_OPTIONS": "--max-old-space-size=8192"
+  },
+  "vitest.commandLine": "pnpx vitest",
+  "vitest.exclude": ["**/node_modules/**", "**/dist/**", "**/coverage/**"],
 
   // #############
   // Code Coverage
