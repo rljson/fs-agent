@@ -5,8 +5,8 @@
 // found in the LICENSE file in the root of this package.
 
 import { BsMem } from '@rljson/bs';
-import { Db } from '@rljson/db';
-import { IoMem, SocketMock } from '@rljson/io';
+import { Connector, Db } from '@rljson/db';
+import { createSocketPair, IoMem } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 import { Client, Server } from '@rljson/server';
 
@@ -47,17 +47,18 @@ async function main() {
   await mkdir(folderA, { recursive: true });
   await mkdir(folderB, { recursive: true });
 
-  // Seed initial content if empty
-  await writeFile(join(folderA, 'hello-from-a.txt'), 'Edit me in folder A', {
-    flag: 'a',
+  // Seed same initial content in both folders
+  await writeFile(join(folderA, 'shared.txt'), 'Shared initial content', {
+    flag: 'w',
   });
-  await writeFile(join(folderB, 'hello-from-b.txt'), 'Edit me in folder B', {
-    flag: 'a',
+  await writeFile(join(folderB, 'shared.txt'), 'Shared initial content', {
+    flag: 'w',
   });
 
   // ---------------------------------------------------------------------------
   // Server setup (local Io/Bs)
-  const route = Route.fromFlat('fsagent.demo.live');
+  const treeKey = 'sharedTree';
+  const route = Route.fromFlat(`/${treeKey}`);
   const serverIo = new IoMem();
   await serverIo.init();
   await serverIo.isReady();
@@ -72,9 +73,9 @@ async function main() {
 
   // ---------------------------------------------------------------------------
   // Client A (folder A)
-  const socketA = new SocketMock();
-  socketA.connect();
-  await server.addSocket(socketA);
+  const [serverSocketA, clientSocketA] = createSocketPair();
+  serverSocketA.connect();
+  await server.addSocket(serverSocketA);
 
   const localIoA = new IoMem();
   await localIoA.init();
@@ -84,21 +85,27 @@ async function main() {
   await createSharedTreeTable(localIoA);
 
   const localBsA = new BsMem();
-  const clientA = new Client(socketA, localIoA, localBsA);
+  const clientA = new Client(clientSocketA, localIoA, localBsA);
   await clientA.init();
 
-  const clientDbA = new Db(clientA.io);
+  const clientDbA = new Db(clientA.io!);
+  const connectorA = new Connector(clientDbA, route, clientSocketA);
+
   const agentA = new FsAgent(folderA, clientA.bs);
-  const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', {
+
+  // Client A starts syncToDb and syncFromDb immediately
+  const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey, {
     notify: true,
   });
-  const stopAfromDb = await agentA.syncFromDb(clientDbA, 'sharedTree');
+  const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey, {
+    cleanTarget: true,
+  });
 
   // ---------------------------------------------------------------------------
   // Client B (folder B)
-  const socketB = new SocketMock();
-  socketB.connect();
-  await server.addSocket(socketB);
+  const [serverSocketB, clientSocketB] = createSocketPair();
+  serverSocketB.connect();
+  await server.addSocket(serverSocketB);
 
   const localIoB = new IoMem();
   await localIoB.init();
@@ -108,17 +115,21 @@ async function main() {
   await createSharedTreeTable(localIoB);
 
   const localBsB = new BsMem();
-  const clientB = new Client(socketB, localIoB, localBsB);
+  const clientB = new Client(clientSocketB, localIoB, localBsB);
   await clientB.init();
 
-  const clientDbB = new Db(clientB.io);
+  const clientDbB = new Db(clientB.io!);
+  const connectorB = new Connector(clientDbB, route, clientSocketB);
+
   const agentB = new FsAgent(folderB, clientB.bs);
-  const stopBtoDb = await agentB.syncToDb(clientDbB, 'sharedTree', {
+
+  // Start bidirectional sync for Client B
+  const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey, {
     notify: true,
   });
-  const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree');
-
-  console.log('Live sync running. Try editing files:');
+  const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey, {
+    cleanTarget: true,
+  });
   console.log(`  Folder A: ${folderA}`);
   console.log(`  Folder B: ${folderB}`);
   console.log(

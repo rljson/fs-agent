@@ -79,7 +79,12 @@ export class FsDbAdapter {
     }
 
     // Convert all tree nodes from Map to Array
-    const trees: Array<Tree> = Array.from(fsTree.trees.values());
+    // CRITICAL: Root tree MUST be the last element (per @rljson/server pattern)
+    const rootTree = fsTree.trees.get(fsTree.rootHash)!;
+    const trees: Array<Tree> = Array.from(fsTree.trees.values()).filter(
+      (tree) => tree._hash !== fsTree.rootHash,
+    );
+    trees.push(rootTree); // Add root as last element
 
     // Create TreesTable
     const treeTable: TreesTable = {
@@ -99,15 +104,15 @@ export class FsDbAdapter {
       );
     }
 
-    // Get root reference
-    const treeRootRef = fsTree.rootHash;
+    // Get root reference (last tree in array per @rljson/server pattern)
+    const treeRootRef = trees[trees.length - 1]._hash as string;
 
     // Manually create insert history entry for root tree
     const historyRow: InsertHistoryRow<any> = {
       timeId: timeId(),
       route: `/${this.treeKey}/${treeRootRef}`,
       [`${this.treeKey}Ref`]: treeRootRef,
-    };
+    } as InsertHistoryRow<any>;
 
     const historyTable: InsertHistoryTable<any> = {
       _type: 'insertHistory',
@@ -121,8 +126,8 @@ export class FsDbAdapter {
 
     // Optionally trigger notification
     if (notify) {
-      // Notify on the treeKey+ route (inserts)
-      const treeKeyRoute = Route.fromFlat(`/${this.treeKey}+`);
+      // Notify on the treeKey route (matches table name)
+      const treeKeyRoute = Route.fromFlat(`/${this.treeKey}`);
       this.db.notify.notify(treeKeyRoute, historyRow);
     }
 

@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import { Db } from '@rljson/db';
-import { IoMem, SocketMock } from '@rljson/io';
+import { createSocketPair, IoMem } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 import { Client, Server } from '@rljson/server';
 
@@ -52,7 +52,7 @@ export async function runClientServerSetup(
   await mkdir(folderB, { recursive: true });
 
   // Server
-  const route = Route.fromFlat('fsagent.demo');
+  const route = Route.fromFlat(`/${treeKey}`);
   const serverIo = new IoMem();
   await serverIo.init();
   await serverIo.isReady();
@@ -67,10 +67,10 @@ export async function runClientServerSetup(
   const server = new Server(route, serverIo, serverBsMem);
   await server.init();
 
-  // Client A setup
-  const socketA = new SocketMock();
-  socketA.connect();
-  await server.addSocket(socketA);
+  // Client A setup - use DirectionalSocketMock for proper client/server separation
+  const [serverSocketA, clientSocketA] = createSocketPair();
+  serverSocketA.connect();
+  await server.addSocket(serverSocketA);
   const localIoA = new IoMem();
   await localIoA.init();
   await localIoA.isReady();
@@ -79,15 +79,15 @@ export async function runClientServerSetup(
   await createSharedTreeTable(localIoA, treeKey);
 
   const localBsA = new BsMem();
-  const clientA = new Client(socketA, localIoA, localBsA);
+  const clientA = new Client(clientSocketA, localIoA, localBsA);
   await clientA.init();
-  const clientDbA = new Db(clientA.io);
+  const clientDbA = new Db(clientA.io!);
   const agentA = new FsAgent(folderA, clientA.bs);
 
-  // Client B setup
-  const socketB = new SocketMock();
-  socketB.connect();
-  await server.addSocket(socketB);
+  // Client B setup - use DirectionalSocketMock for proper client/server separation
+  const [serverSocketB, clientSocketB] = createSocketPair();
+  serverSocketB.connect();
+  await server.addSocket(serverSocketB);
   const localIoB = new IoMem();
   await localIoB.init();
   await localIoB.isReady();
@@ -96,9 +96,9 @@ export async function runClientServerSetup(
   await createSharedTreeTable(localIoB, treeKey);
 
   const localBsB = new BsMem();
-  const clientB = new Client(socketB, localIoB, localBsB);
+  const clientB = new Client(clientSocketB, localIoB, localBsB);
   await clientB.init();
-  const clientDbB = new Db(clientB.io);
+  const clientDbB = new Db(clientB.io!);
   const agentB = new FsAgent(folderB, clientB.bs);
 
   // Write + sync

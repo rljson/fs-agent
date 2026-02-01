@@ -87,15 +87,7 @@
     "NODE_OPTIONS": "--max-old-space-size=8192"
   },
   "vitest.commandLine": "pnpx vitest",
-  "vitest.configSearchPatternExclude": [
-    "**/node_modules/**",
-    "**/dist/**",
-    "**/build/**"
-  ],
-  "vitest.disabledWorkspaceFolders": [],
-  "vitest.vitestPackagePath": "",
-  "vitest.commandLine": "",
-  "vitest.exclude": ["**/node_modules/**", "**/dist/**"],
+  "vitest.exclude": ["**/node_modules/**", "**/dist/**", "**/coverage/**"],
 
   // #############
   // Code Coverage

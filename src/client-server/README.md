@@ -72,7 +72,62 @@ await agentB.loadFromDb(clientDbB, 'sharedTree', rootRef);
 
 ❌ **WRONG:** Sharing the server's Db directly bypasses the Client/Server architecture.
 
-#### 3. Table Schema Setup
+#### 3. Connector Route Matching (CRITICAL)
+
+**Connectors MUST use the same route as the Server for message routing to work.**
+
+The Server's multicast logic listens on the server route, and Connectors send/receive on their route. If these don't match, messages will never be routed between clients.
+
+```typescript
+// ✅ CORRECT: All connectors use server route (based on tree table name)
+const treeKey = 'sharedTree';
+const route = Route.fromFlat(`/${treeKey}`);
+const server = new Server(route, serverIo, serverBs);
+await server.init();
+
+// Pass the SAME route to all connectors
+const connectorA = new Connector(clientDbA, route, socketA);
+const connectorB = new Connector(clientDbB, route, socketB);
+```
+
+```typescript
+// ❌ WRONG: Connector routes differ from server route
+const treeKey = 'sharedTree';
+const serverRoute = Route.fromFlat('myapp.sync'); // Wrong! Not based on treeKey
+const server = new Server(serverRoute, serverIo, serverBs);
+
+// These routes don't match - messages will NOT be routed!
+const connectorA = new Connector(clientDbA, Route.fromFlat('/sync'), socketA);
+const connectorB = new Connector(clientDbB, Route.fromFlat('/sync'), socketB);
+```
+
+**Why:** The Server listens on `server.route.flat` and only processes messages sent to that exact route. If Connectors use different routes, the Server never receives their messages, and cross-client communication fails.
+
+#### 4. Self-Broadcast Filtering
+
+**Connectors receive their own messages via local socket echo - this is expected behavior.**
+
+When a Connector sends a message, it immediately triggers its own listeners due to EventEmitter's local echo. The Server (v0.0.4+) filters the sender from multicast, but cannot prevent local echo.
+
+**Application code must filter out self-broadcasts:**
+
+```typescript
+// In FsAgent - self-filtering example:
+private _lastSentRef?: string;
+
+// Track sent ref before broadcasting
+this._lastSentRef = ref;
+connector.send(ref);
+
+// Skip processing own messages when received
+if (treeRef === this._lastSentRef) {
+  return; // Don't process self-broadcast
+}
+```
+
+This prevents infinite loops where a client processes its own broadcast, triggers a change, broadcasts again, etc.
+
+#### 5. Table Schema Setup
 
 Before clients can use a table, the table schema must exist in both:
 
@@ -282,15 +337,16 @@ pnpm exec vite-node src/client-server/live-client-server.ts --keep-existing
 
 ## Testing
 
-The comprehensive test suite in `test/client-server-sync.spec.ts` validates:
+The comprehensive test suite in `test/client-server/full-sync-test.spec.ts` validates:
 
 - ✅ One-shot syncs (A→B, B→A)
 - ✅ File updates and modifications
 - ✅ Nested directory structures
 - ✅ Binary file handling
 - ✅ Large file transfers with checksum verification
-- ✅ Deletion handling (with `cleanTarget` option)
-- ✅ Rename/move operations
+- ✅ Deletion handling with `cleanTarget: true` (removes stale files)
+- ✅ Rename/move operations with proper cleanup
+- ✅ Nested directory cleanup with `cleanTarget`
 - ✅ Hidden files
 - ✅ Conflict resolution (last writer wins)
 - ✅ Modification time preservation
@@ -299,6 +355,8 @@ The comprehensive test suite in `test/client-server-sync.spec.ts` validates:
 - ✅ Bidirectional propagation
 
 All tests use the exact same Server/Client pattern documented here.
+
+**Coverage:** The project maintains 100% test coverage across all metrics (statements, branches, functions, lines). Every code path is validated, including error scenarios and edge cases.
 
 ## Key Characteristics
 
@@ -314,9 +372,11 @@ Clients prioritize local storage (priority 1) over server peers (priority 2):
 
 All client-server communication happens over sockets:
 
-- In these examples: `SocketMock` (in-memory, same process)
+- In these examples: `DirectionalSocketMock` via `createSocketPair()` (in-memory, same process)
 - In production: Real WebSocket, TCP socket, or other socket implementation
 - The Server and Client classes abstract away the socket details
+
+**Critical:** Always use `createSocketPair()` from `@rljson/io` to create proper bidirectional socket pairs. Single `SocketMock` instances are deprecated and can cause communication issues.
 
 ### Blob Storage Propagation
 
@@ -347,16 +407,16 @@ await createSharedTreeTable(serverIo);
 const server = new Server(route, serverIo, new BsMem());
 await server.init();
 
-// 2. Client
-const socket = new SocketMock();
-socket.connect();
-await server.addSocket(socket);
+// 2. Client (use DirectionalSocketMock pair)
+const [serverSocket, clientSocket] = createSocketPair();
+serverSocket.connect();
+await server.addSocket(serverSocket);
 
 const localIo = new IoMem();
 await localIo.init();
 await createSharedTreeTable(localIo);
 
-const client = new Client(socket, localIo, new BsMem());
+const client = new Client(clientSocket, localIo, new BsMem());
 await client.init();
 
 // 3. Use client for operations
@@ -377,13 +437,19 @@ await agentB.loadFromDb(clientDbB, 'sharedTree', rootRef);
 ### Live Bidirectional Sync
 
 ```typescript
-// Both clients: watch filesystem → sync to DB
-const stopAtoDb = await agentA.syncToDb(clientDbA, 'sharedTree', { notify: true });
-const stopBtoDb = await agentB.syncToDb(clientDbB, 'sharedTree', { notify: true });
+// Create connectors for both clients
+const treeKey = 'sharedTree';
+const route = Route.fromFlat(`/${treeKey}`);
+const connectorA = new Connector(clientDbA, route, socketA);
+const connectorB = new Connector(clientDbB, route, socketB);
 
-// Both clients: watch DB → sync to filesystem
-const stopAfromDb = await agentA.syncFromDb(clientDbA, 'sharedTree');
-const stopBfromDb = await agentB.syncFromDb(clientDbB, 'sharedTree');
+// Both clients: watch filesystem → sync to DB
+const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey, { notify: true });
+const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey, { notify: true });
+
+// Both clients: watch DB → sync to filesystem (with cleanTarget for deletions)
+const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey, { cleanTarget: true });
+const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey, { cleanTarget: true });
 
 // Later: cleanup
 stopAtoDb();
@@ -404,11 +470,13 @@ In production, you'd typically:
 
 ### Socket Implementation
 
-Replace `SocketMock` with real sockets:
+Replace `DirectionalSocketMock` (from `createSocketPair()`) with real sockets:
 
 - WebSocket for browser clients
 - TCP sockets for Node.js clients
 - IPC sockets for same-machine processes
+
+**Note:** Real socket implementations must provide the same bidirectional interface as `DirectionalSocketMock`. The `@rljson/io` package handles the abstraction.
 
 ### Storage Backends
 
@@ -460,7 +528,8 @@ Consider:
 
 - Main architecture documentation: `../../README.architecture.md`
 - FsAgent implementation: `../fs-agent.ts`
-- Test suite: `../../test/client-server-sync.spec.ts`
+- Test suite: `../../test/client-server/full-sync-test.spec.ts`
+- Copilot instructions: `../../.github/copilot-instructions.md`
 - @rljson/server package: External dependency providing Server/Client classes
 - @rljson/bs package: Blob storage abstraction (BsMem, BsMulti, BsPeer, BsServer)
 - @rljson/io package: I/O abstraction (IoMem, Socket, SocketMock)

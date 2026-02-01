@@ -193,11 +193,11 @@ describe('FsDbAdapter', () => {
       // Extract filesystem tree
       const fsTree = await agent.extract();
 
-      // Register notification callback using vi.fn on treeKey+ route for inserts
+      // Register notification callback using vi.fn on treeKey route for inserts
       const callback = vi.fn();
 
       const treeRootRef = fsTree.rootHash;
-      const notifyRoute = Route.fromFlat(`/fsTree+`);
+      const notifyRoute = Route.fromFlat(`/fsTree`);
       db.notify.register(notifyRoute, callback as any);
 
       // Store tree without notification
@@ -207,10 +207,13 @@ describe('FsDbAdapter', () => {
       expect(callback).not.toHaveBeenCalled();
 
       // Now store again with notification enabled
-      const callback2 = vi.fn();
+      const callback2 = vi.fn(async () => {});
       db.notify.register(notifyRoute, callback2 as any);
 
       await dbAdapter.storeFsTree(fsTree, { notify: true });
+
+      // Wait for async notification to complete
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       // Verify notification was received
       expect(callback2).toHaveBeenCalledTimes(1);

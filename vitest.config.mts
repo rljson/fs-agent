@@ -29,11 +29,12 @@ export default defineConfig(({ mode }) => {
           'src/index.ts',
           'src/example.ts',
           'src/live-client-server.ts',
+          'src/client-server/**/*.ts', // Exclude demo/example files from coverage
         ],
         all: true,
         thresholds: {
-          statements: 98,
-          branches: 89,
+          statements: 100,
+          branches: 100,
           functions: 100,
           lines: 100,
         },

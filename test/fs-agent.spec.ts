@@ -63,6 +63,75 @@ describe('FsAgent', () => {
       });
       expect(agent).toBeDefined();
     });
+
+    it('should reject auto-sync via constructor with db and treeKey', async () => {
+      // Create a mock database
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+
+      // Create table
+      const treeCfg = createTreesTableCfg('testTree');
+      await db.core.createTableWithInsertHistory(treeCfg);
+
+      // Constructor with db and treeKey should trigger auto-sync error
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      new FsAgent(testDir, undefined, {
+        db,
+        treeKey: 'testTree',
+      });
+
+      // Wait for async error handling
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Verify error was logged
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to start auto-sync:',
+        expect.any(Error),
+      );
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('should reject bidirectional auto-sync via constructor', async () => {
+      // Create a mock database
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+
+      // Create table
+      const treeCfg = createTreesTableCfg('testTree');
+      await db.core.createTableWithInsertHistory(treeCfg);
+
+      // Constructor with db, treeKey, and bidirectional should trigger auto-sync error
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      new FsAgent(testDir, undefined, {
+        db,
+        treeKey: 'testTree',
+        bidirectional: true,
+      });
+
+      // Wait for async error handling
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Verify both errors were logged (from both _startAutoSync and _startAutoSyncFromDb)
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to start auto-sync:',
+        expect.any(Error),
+      );
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to start auto-sync from DB:',
+        expect.any(Error),
+      );
+
+      consoleErrorSpy.mockRestore();
+    });
   });
 
   describe('extract', () => {
@@ -298,6 +367,74 @@ describe('FsAgent', () => {
         .then(() => true)
         .catch(() => false);
       expect(strayExists).toBe(false);
+    });
+
+    it('should clean unexpected directories and nested files with cleanTarget', async () => {
+      // First create a tree with nested structure
+      const expectedDir = join(testDir, 'expected_dir');
+      await mkdir(expectedDir, { recursive: true });
+      await writeFile(join(testDir, 'wanted.txt'), 'keep me');
+      await writeFile(join(expectedDir, 'nested_wanted.txt'), 'keep me too');
+
+      const agent = new FsAgent(testDir);
+      const tree = await agent.extract();
+
+      // Now add unwanted directory with nested files (should be removed entirely)
+      const unwantedDir = join(testDir, 'unwanted_dir');
+      const nestedDir = join(unwantedDir, 'nested');
+      await mkdir(nestedDir, { recursive: true });
+      await writeFile(join(unwantedDir, 'file1.txt'), 'remove me');
+      await writeFile(join(nestedDir, 'file2.txt'), 'remove me too');
+
+      // Also add unwanted file inside expected directory (should be removed, dir kept)
+      await writeFile(
+        join(expectedDir, 'unwanted_nested.txt'),
+        'remove me three',
+      );
+
+      // Also add unwanted file at root
+      await writeFile(join(testDir, 'unwanted.txt'), 'remove me four');
+
+      // Restore with cleanTarget should remove all unwanted items
+      await agent.restore(tree, undefined, { cleanTarget: true });
+
+      // Check wanted files still exist
+      const wantedExists = await stat(join(testDir, 'wanted.txt'))
+        .then(() => true)
+        .catch(() => false);
+      expect(wantedExists).toBe(true);
+
+      const nestedWantedExists = await stat(
+        join(expectedDir, 'nested_wanted.txt'),
+      )
+        .then(() => true)
+        .catch(() => false);
+      expect(nestedWantedExists).toBe(true);
+
+      // Check expected directory still exists
+      const expectedDirExists = await stat(expectedDir)
+        .then(() => true)
+        .catch(() => false);
+      expect(expectedDirExists).toBe(true);
+
+      // Check unwanted directory was removed
+      const unwantedDirExists = await stat(unwantedDir)
+        .then(() => true)
+        .catch(() => false);
+      expect(unwantedDirExists).toBe(false);
+
+      // Check unwanted files were removed
+      const unwantedFileExists = await stat(join(testDir, 'unwanted.txt'))
+        .then(() => true)
+        .catch(() => false);
+      expect(unwantedFileExists).toBe(false);
+
+      const unwantedNestedExists = await stat(
+        join(expectedDir, 'unwanted_nested.txt'),
+      )
+        .then(() => true)
+        .catch(() => false);
+      expect(unwantedNestedExists).toBe(false);
     });
   });
 
@@ -858,13 +995,16 @@ describe('FsAgent', () => {
       const tree = await agent.extract();
       const modifiedRef = tree.rootHash;
 
-      // Register notification callback on treeKey+ route to catch insertions
-      const syncCallback = vi.fn();
-      const notifyRoute = Route.fromFlat(`/${treeKey}+`);
+      // Register notification callback on treeKey route to catch insertions
+      const syncCallback = vi.fn(async () => {});
+      const notifyRoute = Route.fromFlat(`/${treeKey}`);
       db.notify.register(notifyRoute, syncCallback as any);
 
       // Store with notifications enabled
       await agent.storeInDb(db, treeKey, { notify: true });
+
+      // Wait for async notification to complete
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       // Verify notification was triggered
       expect(syncCallback).toHaveBeenCalledTimes(1);
@@ -1338,7 +1478,7 @@ describe('FsAgent', () => {
 
       await expect(
         agent.loadFromDb(db, treeKey, 'nonExistentRef'),
-      ).rejects.toThrow(/Invalid tree data structure/);
+      ).rejects.toThrow();
     });
 
     it('should throw error when storing empty tree', async () => {

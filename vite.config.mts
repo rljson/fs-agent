@@ -31,6 +31,7 @@ export default defineConfig({
         'fs',
         'fs/promises',
         'path',
+        'node:stream',
       ],
       output: {
         globals: {},

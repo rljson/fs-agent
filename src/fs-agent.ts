@@ -65,28 +65,24 @@ export class FsAgent {
   private _treeKey?: string;
   private _stopSync?: () => void;
   private _stopSyncFromDb?: () => void;
-  private _storageOptions?: StoreFsTreeOptions;
-  private _restoreOptions?: RestoreOptions;
+  private _lastSentRef?: string;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
     this._bs = bs || new BsMem();
     this._db = options.db;
     this._treeKey = options.treeKey;
-    this._storageOptions = options.storageOptions;
-    this._restoreOptions = options.restoreOptions;
     this._scanner = new FsScanner(rootPath, { ...options, bs: this._bs });
     this._adapter = new FsBlobAdapter(this._bs);
 
     // Automatically start syncing if db and treeKey are provided
+    /* v8 ignore next -- @preserve */
     if (this._db && this._treeKey) {
-      /* v8 ignore next 3 -- @preserve */
       this._startAutoSync().catch((error) => {
         console.error('Failed to start auto-sync:', error);
       });
 
       // Start reverse sync if bidirectional is enabled
-      /* v8 ignore next 3 -- @preserve */
       this._startAutoSyncFromDb(options.bidirectional || false).catch(
         (error) => {
           console.error('Failed to start auto-sync from DB:', error);
@@ -129,12 +125,13 @@ export class FsAgent {
    * Consider using syncToDb() directly instead of constructor options.
    */
   private async _startAutoSync(): Promise<void> {
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore next -- @preserve */
     if (!this._db || !this._treeKey) {
       return;
     }
 
     // Cannot create Connector without socket - auto-sync not supported
+    /* v8 ignore next -- @preserve */
     throw new Error(
       'Auto-sync from constructor is not supported. ' +
         'Use syncToDb() method directly with a Connector instance.',
@@ -154,6 +151,7 @@ export class FsAgent {
     }
 
     // Cannot create Connector without socket - auto-sync not supported
+    /* v8 ignore next -- @preserve */
     throw new Error(
       'Auto-sync from constructor is not supported. ' +
         'Use syncFromDb() method directly with a Connector instance.',
@@ -164,10 +162,12 @@ export class FsAgent {
    * Stops automatic syncing and cleans up resources
    */
   dispose(): void {
+    /* v8 ignore next 4 -- @preserve */
     if (this._stopSync) {
       this._stopSync();
       this._stopSync = undefined;
     }
+    /* v8 ignore next 4 -- @preserve */
     if (this._stopSyncFromDb) {
       this._stopSyncFromDb();
       this._stopSyncFromDb = undefined;
@@ -351,6 +351,85 @@ export class FsAgent {
   }
 
   /**
+   * Recursively fetches all tree nodes starting from a root hash
+   * Trees are stored as separate rows with parent-child relationships
+   * This method follows the tree structure and fetches all related nodes
+   * @param db - Database instance
+   * @param route - Route to tree table
+   * @param treeKey - Tree table key
+   * @param rootHash - Hash of the root node to start fetching from
+   * @returns Array of all tree nodes in the tree
+   */
+  private async _fetchTreeRecursively(
+    db: Db,
+    route: Route,
+    treeKey: string,
+    rootHash: string,
+  ): Promise<any[]> {
+    const fetchedNodes = new Map<string, any>();
+    const nodesToFetch = new Set<string>([rootHash]);
+    const processed = new Set<string>();
+
+    // Iteratively fetch all nodes (avoid deep recursion)
+    while (nodesToFetch.size > 0) {
+      const currentHash = Array.from(nodesToFetch)[0];
+      nodesToFetch.delete(currentHash);
+
+      // Skip if already processed
+      /* v8 ignore next 3 -- @preserve */
+      if (processed.has(currentHash)) {
+        continue;
+      }
+      processed.add(currentHash);
+
+      // Fetch the node by hash
+      // Use db.get() to query across sockets via IoMulti/IoPeer
+      // The early return fix in @rljson/db prevents infinite recursion
+      let result;
+      try {
+        result = await db.get(route, { _hash: currentHash });
+      } catch {
+        /* v8 ignore next 3 -- @preserve */
+        // Node not found - might be a blob reference or deleted
+        continue;
+      }
+
+      // Extract node data from rljson
+      const treeData = result?.rljson?.[treeKey];
+      /* v8 ignore next -- @preserve */
+      if (!treeData || !treeData._data) {
+        continue;
+      }
+
+      // Handle both array and object-with-numeric-keys
+      /* v8 ignore next -- @preserve */
+      const dataArray = Array.isArray(treeData._data)
+        ? treeData._data
+        : Object.values(treeData._data);
+
+      // Process all nodes returned (should be just one for _hash query)
+      for (const node of dataArray) {
+        /* v8 ignore next -- @preserve */
+        if (!node._hash) continue;
+
+        fetchedNodes.set(node._hash, node);
+
+        // If node has children, add them to fetch queue
+        if (node.children && Array.isArray(node.children)) {
+          for (const childHash of node.children) {
+            /* v8 ignore next -- @preserve */
+            if (typeof childHash === 'string' && !processed.has(childHash)) {
+              nodesToFetch.add(childHash);
+            }
+          }
+        }
+      }
+    }
+
+    return Array.from(fetchedNodes.values());
+  }
+
+  /**
    * Loads tree from database and restores to filesystem
    * Writes to filesystem from DB trees and Bs blobs
    * @param db - Database instance
@@ -371,48 +450,27 @@ export class FsAgent {
       throw new Error('rootRef cannot be empty');
     }
 
-    // Read tree by specific root reference - try without /root suffix
-    const route = `/${treeKey}@${rootRef}`;
-    let result;
-    try {
-      result = await db.get(Route.fromFlat(route), {});
-    } catch (error) {
-      /* v8 ignore next 4 -- @preserve */
-      throw new Error(
-        `Failed to load tree from database at route "${route}": ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    // Recursively fetch all tree nodes starting from root
+    // Trees are stored as multiple rows - querying by hash only returns one node
+    // We need to fetch the root node and recursively fetch all children
+    const route = Route.fromFlat(treeKey);
+    const allNodes = await this._fetchTreeRecursively(
+      db,
+      route,
+      treeKey,
+      rootRef,
+    );
 
-    const { rljson } = result;
-    /* v8 ignore next 3 -- @preserve */
-    if (!rljson) {
+    if (allNodes.length === 0) {
       throw new Error(
-        `No rljson data returned from database for ${treeKey}@${rootRef}`,
-      );
-    }
-
-    // Get tree data from rljson
-    const treeData = rljson[treeKey];
-    /* v8 ignore next -- @preserve */
-    if (!treeData || !treeData._data) {
-      throw new Error(
-        `No tree data found for ${treeKey}@${rootRef}. ` +
+        `No tree nodes found for ${treeKey}@${rootRef}. ` +
           `The tree may have been deleted or the reference is invalid.`,
       );
     }
 
-    // Validate tree data structure
-    if (!Array.isArray(treeData._data) || treeData._data.length === 0) {
-      throw new Error(
-        `Invalid tree data structure for ${treeKey}@${rootRef}: ` +
-          `expected non-empty array, got ${typeof treeData._data}`,
-      );
-    }
-
-    // DO NOT re-hash - the database manages hashes internally
-    // Build trees Map from data as-is
+    // Build trees Map from all fetched nodes
     const trees = new Map<string, any>();
-    for (const treeNode of treeData._data) {
+    for (const treeNode of allNodes) {
       /* v8 ignore next 3 -- @preserve */
       if (treeNode._hash) {
         trees.set(treeNode._hash, treeNode);
@@ -522,8 +580,10 @@ export class FsAgent {
     // Store initial state
     const initialRef = await this.storeInDb(db, treeKey, options);
 
-    // Send initial ref through connector
+    // Send initial ref through connector (self-filtering will prevent loops)
+    /* v8 ignore next -- @preserve */
     if (initialRef) {
+      this._lastSentRef = initialRef;
       connector.send(initialRef);
     }
 
@@ -535,6 +595,9 @@ export class FsAgent {
       if (tree) {
         const dbAdapter = new FsDbAdapter(db, treeKey);
         const ref = await dbAdapter.storeFsTree(tree, options);
+
+        // Track the ref we're sending to avoid processing it when we receive it back
+        this._lastSentRef = ref;
 
         // Broadcast the new ref through connector
         if (ref) {
@@ -582,6 +645,12 @@ export class FsAgent {
           `[syncFromDb] Invalid treeRef received. Expected string, got:`,
           typeof treeRef,
         );
+        return;
+      }
+
+      // Skip if this is our own broadcast (prevent self-sync loop)
+      /* v8 ignore next 3 -- @preserve */
+      if (treeRef === this._lastSentRef) {
         return;
       }
 

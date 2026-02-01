@@ -63,7 +63,7 @@ const agent = new FsAgent('./my-project', new BsMem(), {
 
 // Create Connector for socket-based synchronization
 const socket = new SocketMock();
-const route = Route.fromFlat(`/${treeKey}+`);
+const route = Route.fromFlat(`/${treeKey}`);
 const connector = new Connector(db, route, socket);
 
 // Start syncing
@@ -95,7 +95,7 @@ const agent = new FsAgent('./my-project', new BsMem(), {
 
 // Create Connector for bidirectional communication
 const socket = new SocketMock();
-const route = Route.fromFlat(`/${treeKey}+`);
+const route = Route.fromFlat(`/${treeKey}`);
 const connector = new Connector(db, route, socket);
 
 // Start filesystem → database sync
@@ -352,15 +352,16 @@ import { SocketMock } from '@rljson/io';
 const agent = new FsAgent('./my-project', new BsMem());
 
 // Create Connector for synchronization
+const treeKey = 'myFilesTree';
 const socket = new SocketMock();
-const route = Route.fromFlat('/myFilesTree+');
+const route = Route.fromFlat(`/${treeKey}`);
 const connector = new Connector(db, route, socket);
 
 // Start filesystem → database sync
-const stopToDb = await agent.syncToDb(db, connector, 'myFilesTree');
+const stopToDb = await agent.syncToDb(db, connector, treeKey);
 
 // Start database → filesystem sync
-const stopFromDb = await agent.syncFromDb(db, connector, 'myFilesTree');
+const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
 
 // Stop when needed
 stopToDb();
