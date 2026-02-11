@@ -141,13 +141,32 @@ await localIo.init();
 const client = new Client(new SocketIoBridge(socket), localIo, new BsMem());
 await client.init();
 
+// Simplified approach using fromClient factory method
+const agent = await FsAgent.fromClient(
+  './my-folder',
+  'sharedTree',
+  client,
+  new SocketIoBridge(socket),
+);
+
+// Simple sync methods - no db/connector/treeKey needed!
+await agent.syncToDbSimple({ notify: true });
+await agent.syncFromDbSimple({ cleanTarget: true });
+
+console.log('Client syncing...');
+```
+
+Alternatively, use the traditional approach:
+
+```typescript
+// Traditional approach (still supported)
 const db = new Db(client.io!);
 const route = Route.fromFlat('/sharedTree');
 const connector = new Connector(db, route, new SocketIoBridge(socket));
 
 const agent = new FsAgent('./my-folder', client.bs);
 
-// Bidirectional sync
+// Bidirectional sync with explicit parameters
 await agent.syncToDb(db, connector, 'sharedTree', { notify: true });
 await agent.syncFromDb(db, connector, 'sharedTree', { cleanTarget: true });
 

@@ -672,6 +672,76 @@ export class FsAgent {
     };
   }
 
+  /**
+   * Creates a fully configured FsAgent from a Client instance.
+   * This factory method provides a simplified API where sync methods don't require
+   * db, connector, and treeKey parameters - they are stored internally.
+   * @param filePath - Directory path to sync
+   * @param treeKey - Tree table key (route will be `/${treeKey}`)
+   * @param client - Client instance with io and bs properties
+   * @param socket - Socket instance for connector communication
+   * @param options - Optional FsAgent options (db and treeKey are set automatically)
+   * @returns Configured FsAgent instance with simplified sync API
+   * @example
+   * ```typescript
+   * const agent = await FsAgent.fromClient('./my-folder', 'sharedTree', client, socket);
+   * // Simplified sync methods - no db/connector/treeKey needed
+   * await agent.syncToDbSimple({ notify: true });
+   * await agent.syncFromDbSimple({ cleanTarget: true });
+   * // Original methods still work
+   * await agent.syncToDb(db, connector, treeKey, { notify: true });
+   * ```
+   */
+  static async fromClient(
+    filePath: string,
+    treeKey: string,
+    client: any, // Client type from \@rljson/server
+    socket: any, // Socket type from \@rljson/io
+    options?: Omit<FsAgentOptions, 'db' | 'treeKey'>,
+  ): Promise<
+    FsAgent & {
+      syncToDbSimple: (options?: StoreFsTreeOptions) => Promise<() => void>;
+      syncFromDbSimple: (options?: RestoreOptions) => Promise<() => void>;
+    }
+  > {
+    // Validate client has required properties
+    if (!client.io) {
+      throw new Error('Client.io is not initialized');
+    }
+
+    if (!client.bs) {
+      throw new Error('Client.bs is not initialized');
+    }
+
+    // Import Db and Connector dynamically to avoid circular deps
+    const { Db, Connector } = await import('@rljson/db');
+
+    // Create Db from client.io
+    const db = new Db(client.io);
+
+    // Create Route from treeKey
+    const route = Route.fromFlat(`/${treeKey}`);
+
+    // Create Connector
+    const connector = new Connector(db, route, socket);
+
+    // Create FsAgent with client's blob storage
+    const agent = new FsAgent(filePath, client.bs, options);
+
+    // Add simplified sync methods
+    const enhancedAgent = agent as any;
+
+    enhancedAgent.syncToDbSimple = async (syncOptions?: StoreFsTreeOptions) => {
+      return agent.syncToDb(db, connector, treeKey, syncOptions);
+    };
+
+    enhancedAgent.syncFromDbSimple = async (restoreOpts?: RestoreOptions) => {
+      return agent.syncFromDb(db, connector, treeKey, restoreOpts);
+    };
+
+    return enhancedAgent;
+  }
+
   /** Example instance for test purposes */
   static get example(): FsAgent {
     return new FsAgent(process.cwd());
