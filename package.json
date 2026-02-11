@@ -34,7 +34,6 @@
     "@typescript-eslint/parser": "^8.55.0",
     "@vitest/coverage-v8": "^4.0.18",
     "cross-env": "^10.1.0",
-    "//": "WARNING: Do NOT update eslint to v10 - eslint-plugin-tsdoc@0.5.0 is incompatible with ESLint v10 API (context.getSourceCode removed)",
     "eslint": "~9.39.2",
     "eslint-plugin-jsdoc": "^62.5.4",
     "eslint-plugin-tsdoc": "^0.5.0",
