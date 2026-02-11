@@ -120,33 +120,72 @@ From [vitest.config.mts](vitest.config.mts):
 **Critical**: The project maintains 100% coverage across all files. When adding new code:
 
 1. Write tests that execute all code paths
-2. Use `/* v8 ignore next N -- @preserve */` ONLY for truly unreachable defensive code
+2. Use v8 ignore hints ONLY for truly unreachable defensive code
 3. Verify coverage with `pnpm test --coverage`
 
-**Valid v8 ignore patterns**:
+**MANDATORY: Vitest 4.0 Ignore Patterns (ast-v8-to-istanbul)**
+
+Since Vitest 4.0, coverage uses `ast-v8-to-istanbul` which supports **semantic** ignore hints.
+**ALWAYS use semantic hints. NEVER use the old `next N` line-counting pattern.**
+
+All comments MUST include `-- @preserve` to survive esbuild transpilation.
+
+**Allowed patterns:**
+
+| Pattern | Meaning |
+|---|---|
+| `/* v8 ignore if -- @preserve */` | Ignore the if-branch |
+| `/* v8 ignore else -- @preserve */` | Ignore the else-branch |
+| `/* v8 ignore next -- @preserve */` | Ignore the next statement/expression |
+| `/* v8 ignore file -- @preserve */` | Ignore the entire file |
+| `/* v8 ignore start -- @preserve */` ... `/* v8 ignore stop -- @preserve */` | Ignore a range of lines |
+
+**FORBIDDEN patterns (NEVER use):**
 
 ```typescript
-// Defensive null checks that should never trigger
+// ❌ WRONG: Line counting — fragile, breaks on refactoring
 /* v8 ignore next 3 -- @preserve */
+/* v8 ignore next 5 -- @preserve */
+
+// ❌ WRONG: Missing @preserve — esbuild strips the comment
+/* v8 ignore next */
+/* v8 ignore start */
+
+// ❌ WRONG: 'end' instead of 'stop'
+/* v8 ignore end */
+```
+
+**Correct examples:**
+
+```typescript
+// Defensive null check — use 'if' to ignore the entire if-block
+/* v8 ignore if -- @preserve */
 if (!meta) {
   continue;
 }
 
-// Error catch blocks for external failures
+// Error catch blocks — use 'start'/'stop' for multi-line ranges
 try {
   result = await db.get(route, { _hash: currentHash });
 } catch {
-  /* v8 ignore next 3 -- @preserve */
+  /* v8 ignore start -- @preserve */
   // Node not found - might be deleted
   continue;
 }
+/* v8 ignore stop -- @preserve */
 
-// Deprecated constructor patterns (documented as unsupported)
+// Ignore one expression
 /* v8 ignore next -- @preserve */
 if (this._db && this._treeKey) {
-  this._startAutoSync().catch((error) => {
-    console.error('Failed to start auto-sync:', error);
-  });
+  // ...
+}
+
+// Ignore else-branch only
+/* v8 ignore else -- @preserve */
+if (isConnected) {
+  handleConnection();
+} else {
+  // defensive fallback
 }
 ```
 
@@ -252,7 +291,7 @@ it('should reject auto-sync via constructor', async () => {
 4. **Self-broadcast loops**: Remember connectors receive own messages locally - filter with `_lastSentRef`
 5. **Golden updates**: Run `pnpm updateGoldens` after intentional output changes
 6. **Wrong socket pattern**: Use `createSocketPair()` for tests, not single `SocketMock`
-7. **Coverage shortcuts**: Don't use `/* v8 ignore */` to avoid writing tests - only for truly unreachable defensive code
+7. **Coverage shortcuts**: Don't use `/* v8 ignore */` to avoid writing tests - only for truly unreachable defensive code. **NEVER use `/* v8 ignore next N */` line-counting** — use semantic hints (`if`, `else`, `start`/`stop`) instead
 8. **Notification routes**: When using `notify: true`, ensure route matches treeKey (`Route.fromFlat(\`/${treeKey}\`)`), not with `+` suffix
 
 ## Critical Implementation Details

@@ -98,11 +98,12 @@ export class FsDbAdapter {
         [this.treeKey]: treeTable,
       });
     } catch (error) {
-      /* v8 ignore next 4 -- @preserve */
+      /* v8 ignore start -- @preserve */
       throw new Error(
         `Failed to import tree data into database: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    /* v8 ignore stop -- @preserve */
 
     // Get root reference (last tree in array per @rljson/server pattern)
     const treeRootRef = trees[trees.length - 1]._hash as string;

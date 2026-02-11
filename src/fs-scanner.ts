@@ -137,28 +137,30 @@ export class FsScanner {
           `Root path "${this._rootPath}" does not exist. Cannot scan non-existent directory.`,
         );
       }
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore start -- @preserve */
       throw new Error(
         `Cannot access root path "${this._rootPath}": ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    /* v8 ignore stop -- @preserve */
 
     const trees = new Map<TreeRef, Tree>();
     let rootTree;
     try {
       rootTree = await this._scanDirectory(this._rootPath, '.', 0, trees);
     } catch (error) {
-      /* v8 ignore next 4 -- @preserve */
+      /* v8 ignore start -- @preserve */
       throw new Error(
         `Failed to scan directory "${this._rootPath}": ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    /* v8 ignore stop -- @preserve */
 
     // Hash root tree in place (content-addressed by JSON)
     hip(rootTree);
     const rootHashStr = rootTree._hash as string;
 
-    /* v8 ignore next 5 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!rootHashStr) {
       throw new Error(
         'Failed to generate hash for root tree. Tree structure may be invalid.',
@@ -406,7 +408,7 @@ export class FsScanner {
 
   private async _notifyChange(change: FsChange): Promise<void> {
     // Don't notify if watching is paused (prevents loops during external updates)
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (this._paused) {
       return;
     }

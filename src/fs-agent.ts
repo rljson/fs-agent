@@ -143,7 +143,7 @@ export class FsAgent {
    * Consider using syncFromDb() directly instead of constructor options.
    */
   private async _startAutoSyncFromDb(bidirectional: boolean): Promise<void> {
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!this._db || !this._treeKey || !bidirectional) {
       return;
     }
@@ -160,12 +160,12 @@ export class FsAgent {
    * Stops automatic syncing and cleans up resources
    */
   dispose(): void {
-    /* v8 ignore next 4 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (this._stopSync) {
       this._stopSync();
       this._stopSync = undefined;
     }
-    /* v8 ignore next 4 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (this._stopSyncFromDb) {
       this._stopSyncFromDb();
       this._stopSyncFromDb = undefined;
@@ -228,7 +228,7 @@ export class FsAgent {
     }
 
     const meta = treeNode.meta as FsNodeMeta | null | undefined;
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!meta) {
       throw new Error(`Tree node is missing meta for hash: ${treeHash}`);
     }
@@ -329,7 +329,7 @@ export class FsAgent {
     const tree = await this.extract();
 
     // Validate tree has content
-    /* v8 ignore next 5 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!tree || !tree.rootHash || !tree.trees) {
       throw new Error(
         'Cannot store empty or invalid tree in database. ' +
@@ -337,7 +337,7 @@ export class FsAgent {
       );
     }
 
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (tree.trees.size === 0) {
       throw new Error(
         'Cannot store tree with no nodes. The tree structure is empty.',
@@ -374,7 +374,7 @@ export class FsAgent {
       nodesToFetch.delete(currentHash);
 
       // Skip if already processed
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore if -- @preserve */
       if (processed.has(currentHash)) {
         continue;
       }
@@ -387,10 +387,11 @@ export class FsAgent {
       try {
         result = await db.get(route, { _hash: currentHash });
       } catch {
-        /* v8 ignore next 3 -- @preserve */
+        /* v8 ignore start -- @preserve */
         // Node not found - might be a blob reference or deleted
         continue;
       }
+      /* v8 ignore stop -- @preserve */
 
       // Extract node data from rljson
       const treeData = result?.rljson?.[treeKey];
@@ -469,14 +470,14 @@ export class FsAgent {
     // Build trees Map from all fetched nodes
     const trees = new Map<string, any>();
     for (const treeNode of allNodes) {
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore if -- @preserve */
       if (treeNode._hash) {
         trees.set(treeNode._hash, treeNode);
       }
     }
 
     // Validate root tree exists
-    /* v8 ignore next 4 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!trees.has(rootRef)) {
       throw new Error(
         `Root tree node "${rootRef}" not found in tree data. ` +
@@ -511,7 +512,7 @@ export class FsAgent {
 
     for (const [, node] of tree.trees) {
       const meta = node?.meta as FsNodeMeta | null | undefined;
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore if -- @preserve */
       if (!meta) {
         continue;
       }
@@ -589,7 +590,7 @@ export class FsAgent {
     const syncCallback = async () => {
       // Use the scanner's already-updated tree instead of extracting again
       const tree = this._scanner.tree;
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore if -- @preserve */
       if (tree) {
         const dbAdapter = new FsDbAdapter(db, treeKey);
         const ref = await dbAdapter.storeFsTree(tree, options);
@@ -643,7 +644,7 @@ export class FsAgent {
       }
 
       // Skip if this is our own broadcast (prevent self-sync loop)
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore if -- @preserve */
       if (treeRef === this._lastSentRef) {
         return;
       }
@@ -655,9 +656,10 @@ export class FsAgent {
         // Load tree from database and restore to filesystem
         await this.loadFromDb(db, treeKey, treeRef, undefined, restoreOptions);
       } catch {
-        /* v8 ignore next 2 -- @preserve */
+        /* v8 ignore start -- @preserve */
         // Don't re-throw - we don't want one sync failure to break the notification system
       } finally {
+        /* v8 ignore stop -- @preserve */
         // Always resume watching, even if there was an error
         this._scanner.resumeWatch();
       }
