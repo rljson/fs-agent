@@ -28,10 +28,16 @@ export default defineConfig({
         // Add all peer depencies from package.json here
         '@rljson/bs',
         '@rljson/db',
+        '@rljson/io',
+        '@rljson/server',
         'fs',
         'fs/promises',
         'path',
         'node:stream',
+        'node:http',
+        'node:net',
+        'socket.io',
+        'socket.io-client',
       ],
       output: {
         globals: {},
