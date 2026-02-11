@@ -988,8 +988,10 @@ describe('FsAgent', () => {
       expect(syncCallback).toHaveBeenCalledTimes(1);
 
       // Verify the callback received correct InsertHistoryRow
-      const receivedHistoryRow = syncCallback.mock
-        .calls[0][0] as InsertHistoryRow<any>;
+      expect(syncCallback.mock.calls[0]).toBeDefined();
+      const firstCall = syncCallback.mock.calls[0] as any[];
+      const receivedHistoryRow = firstCall[0] as InsertHistoryRow<any>;
+      expect(receivedHistoryRow).toBeDefined();
       expect(receivedHistoryRow[`${treeKey}Ref`]).toBe(modifiedRef);
       expect(receivedHistoryRow.route).toBe(`/${treeKey}/${modifiedRef}`);
       expect(receivedHistoryRow.timeId).toBeDefined();
@@ -1754,6 +1756,141 @@ describe('FsAgent', () => {
           trees: new Map(),
         }),
       ).rejects.toThrow(/Cannot store empty tree/);
+    });
+  });
+
+  describe('fromClient', () => {
+    it('should create FsAgent with simplified sync methods', async () => {
+      // Setup test directory with a file
+      await writeFile(join(testDir, 'test.txt'), 'content');
+
+      // Setup mock client
+      const io = new IoMem();
+      await io.init();
+      const bs = new BsMem();
+      const client = { io, bs };
+
+      // Create mock socket
+      const socket = {
+        on: vi.fn(),
+        off: vi.fn(),
+        emit: vi.fn(),
+      };
+
+      // Create agent using fromClient
+      const agent = await FsAgent.fromClient(
+        testDir,
+        'testTree',
+        client,
+        socket,
+      );
+
+      // Verify agent has simplified methods
+      expect(agent.syncToDbSimple).toBeDefined();
+      expect(typeof agent.syncToDbSimple).toBe('function');
+      expect(agent.syncFromDbSimple).toBeDefined();
+      expect(typeof agent.syncFromDbSimple).toBe('function');
+
+      // Verify agent has standard properties
+      expect(agent.scanner).toBeDefined();
+      expect(agent.adapter).toBeDefined();
+    });
+
+    it('should throw error if client.io is not initialized', async () => {
+      const bs = new BsMem();
+      const client = { io: null, bs };
+      const socket = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+
+      await expect(
+        FsAgent.fromClient(testDir, 'testTree', client, socket),
+      ).rejects.toThrow('Client.io is not initialized');
+    });
+
+    it('should throw error if client.bs is not initialized', async () => {
+      const io = new IoMem();
+      await io.init();
+      const client = { io, bs: null };
+      const socket = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+
+      await expect(
+        FsAgent.fromClient(testDir, 'testTree', client, socket),
+      ).rejects.toThrow('Client.bs is not initialized');
+    });
+
+    it('should use syncToDbSimple to sync to database', async () => {
+      // Setup test file
+      await writeFile(join(testDir, 'simple.txt'), 'simple content');
+
+      // Setup client and database
+      const io = new IoMem();
+      await io.init();
+      const bs = new BsMem();
+      const client = { io, bs };
+
+      // Create database and tree table
+      const db = new Db(client.io);
+      const treeKey = 'simpleTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      // Setup mock socket
+      const socket = {
+        on: vi.fn(),
+        off: vi.fn(),
+        emit: vi.fn(),
+      };
+
+      // Create agent
+      const agent = await FsAgent.fromClient(testDir, treeKey, client, socket);
+
+      // Use simplified sync method
+      const stopSync = await agent.syncToDbSimple();
+
+      // Wait for initial sync
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Stop sync
+      stopSync();
+
+      // Verify tree was stored (check via db.getInsertHistory)
+      const history = await db.getInsertHistory(treeKey);
+      expect(history[`${treeKey}InsertHistory`]).toBeDefined();
+      expect(history[`${treeKey}InsertHistory`]._data.length).toBeGreaterThan(
+        0,
+      );
+    });
+
+    it('should use syncFromDbSimple to sync from database', async () => {
+      // Setup client
+      const io = new IoMem();
+      await io.init();
+      const bs = new BsMem();
+      const client = { io, bs };
+
+      // Create database and tree table
+      const db = new Db(client.io);
+      const treeKey = 'fromSimpleTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      // Use real SocketMock
+      const socket = new SocketMock();
+      socket.connect();
+
+      // Create agent using fromClient
+      const agent = await FsAgent.fromClient(testDir, treeKey, client, socket);
+
+      // Verify syncFromDbSimple can be called and returns cleanup function
+      const stopSync = await agent.syncFromDbSimple();
+      expect(stopSync).toBeDefined();
+      expect(typeof stopSync).toBe('function');
+
+      // Call cleanup
+      stopSync();
+
+      // Verify method is still callable after cleanup (should not throw)
+      const stopSync2 = await agent.syncFromDbSimple({ cleanTarget: true });
+      stopSync2();
     });
   });
 });

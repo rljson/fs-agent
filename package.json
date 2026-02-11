@@ -24,7 +24,7 @@
     "test": "cross-env NODE_OPTIONS=--max-old-space-size=8192 pnpx vitest run --coverage && pnpm run lint",
     "prebuild": "npm run test",
     "prepublishOnly": "npm run build",
-    "lint": "pnpx eslint",
+    "lint": "pnpm exec eslint .",
     "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
   },
   "devDependencies": {
@@ -34,7 +34,8 @@
     "@typescript-eslint/parser": "^8.55.0",
     "@vitest/coverage-v8": "^4.0.18",
     "cross-env": "^10.1.0",
-    "eslint": "^10.0.0",
+    "//": "WARNING: Do NOT update eslint to v10 - eslint-plugin-tsdoc@0.5.0 is incompatible with ESLint v10 API (context.getSourceCode removed)",
+    "eslint": "~9.39.2",
     "eslint-plugin-jsdoc": "^62.5.4",
     "eslint-plugin-tsdoc": "^0.5.0",
     "globals": "^17.3.0",

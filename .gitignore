@@ -35,3 +35,6 @@ Thumbs.db
 
 # Demo
 /demo/
+
+# Temporary test files
+/test-tmp/
