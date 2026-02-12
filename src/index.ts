@@ -4,7 +4,12 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-export { FsAgent, type FsAgentOptions } from './fs-agent.ts';
+export {
+  FsAgent,
+  type FsAgentOptions,
+  type RestoreOptions,
+  type TimeoutConfig,
+} from './fs-agent.ts';
 export {
   FsBlobAdapter,
   type BlobToFileOptions,

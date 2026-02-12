@@ -1893,4 +1893,178 @@ describe('FsAgent', () => {
       stopSync2();
     });
   });
+
+  // =========================================================================
+  // Timeout Detection
+  // =========================================================================
+  describe('timeout detection', () => {
+    it('should use default timeout values', () => {
+      const agent = new FsAgent(testDir);
+      expect(agent.timeouts.dbQuery).toBe(10_000);
+      expect(agent.timeouts.fetchTree).toBe(20_000);
+      expect(agent.timeouts.extract).toBe(15_000);
+      expect(agent.timeouts.restore).toBe(15_000);
+      expect(agent.timeouts.syncCallback).toBe(25_000);
+      expect(agent.timeouts.debounceMs).toBe(300);
+    });
+
+    it('should accept custom timeout values', () => {
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: {
+          dbQuery: 1_000,
+          fetchTree: 2_000,
+          extract: 3_000,
+          restore: 4_000,
+          syncCallback: 5_000,
+          debounceMs: 100,
+        },
+      });
+      expect(agent.timeouts.dbQuery).toBe(1_000);
+      expect(agent.timeouts.fetchTree).toBe(2_000);
+      expect(agent.timeouts.extract).toBe(3_000);
+      expect(agent.timeouts.restore).toBe(4_000);
+      expect(agent.timeouts.syncCallback).toBe(5_000);
+      expect(agent.timeouts.debounceMs).toBe(100);
+    });
+
+    it('should allow partial timeout overrides', () => {
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { dbQuery: 500 },
+      });
+      expect(agent.timeouts.dbQuery).toBe(500);
+      // Remaining use defaults
+      expect(agent.timeouts.fetchTree).toBe(20_000);
+      expect(agent.timeouts.extract).toBe(15_000);
+    });
+
+    it('should reject with timeout error when loadFromDb db.get() hangs', async () => {
+      // Create a Db whose get() never resolves
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'timeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      // Monkey-patch db.get to never resolve
+      const originalGet = db.get.bind(db);
+      db.get = () => new Promise(() => {});
+
+      // Create agent with very short timeouts
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { dbQuery: 50, fetchTree: 100 },
+      });
+
+      await expect(
+        agent.loadFromDb(db, treeKey, 'nonexistent-hash'),
+      ).rejects.toThrow(/Timeout after/);
+
+      // Restore
+      db.get = originalGet;
+    });
+
+    it('should reject storeInDb with timeout when io.write hangs', async () => {
+      // Create a valid file to scan
+      await writeFile(join(testDir, 'hello.txt'), 'world');
+
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'storeTimeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { fetchTree: 50 },
+      });
+
+      // Monkey-patch io.write so it never resolves
+      const original = io.write.bind(io);
+      io.write = () => new Promise(() => {});
+
+      const connector = createMockConnector(db, treeKey);
+
+      // syncToDb calls storeInDb which is guarded by fetchTree timeout
+      await expect(agent.syncToDb(db, connector, treeKey)).rejects.toThrow(
+        /Timeout after/,
+      );
+
+      io.write = original;
+    });
+
+    it('should survive syncFromDb timeout without crashing the watcher', async () => {
+      // Setup real DB with tree
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'syncFromTimeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      await writeFile(join(testDir, 'file.txt'), 'content');
+
+      // Agent with very short fetch timeout
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { fetchTree: 50, dbQuery: 25 },
+      });
+
+      const connector = createMockConnector(db, treeKey);
+
+      // Monkey-patch db.get to never resolve (simulates hung socket)
+      const originalGet = db.get.bind(db);
+      db.get = () => new Promise(() => {});
+
+      // syncFromDb should still return a stop function (setup succeeds)
+      const stopSync = await agent.syncFromDb(db, connector, treeKey);
+      expect(stopSync).toBeDefined();
+      expect(typeof stopSync).toBe('function');
+
+      // Simulate incoming ref — callback fires but db.get hangs.
+      // The timeout catches it and the catch block swallows the error.
+      // The watcher should NOT crash.
+      connector.send('fake-ref-that-will-timeout');
+
+      // Give the callback time to fire and timeout
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Cleanup
+      stopSync();
+      db.get = originalGet;
+      agent.dispose();
+    });
+
+    it('should survive syncToDb callback timeout without crashing', async () => {
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'syncToTimeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      await writeFile(join(testDir, 'file.txt'), 'initial');
+
+      // Start syncToDb with real DB (initial store succeeds)
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { fetchTree: 50 },
+      });
+      const connector = createMockConnector(db, treeKey);
+      const stopSync = await agent.syncToDb(db, connector, treeKey);
+
+      // Now break the IO so subsequent stores hang
+      const original = io.write.bind(io);
+      io.write = () => new Promise(() => {});
+
+      // Trigger a filesystem change — the syncToDb callback fires
+      // but storeFsTree hangs and gets caught by the timeout + catch block
+      await writeFile(join(testDir, 'file.txt'), 'changed');
+
+      // Give the watcher + callback time to fire and timeout
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // Cleanup — should not throw
+      stopSync();
+      io.write = original;
+      agent.dispose();
+    });
+  });
 });

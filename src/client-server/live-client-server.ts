@@ -8,7 +8,7 @@ import { BsMem } from '@rljson/bs';
 import { Connector, Db } from '@rljson/db';
 import { createSocketPair, IoMem } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
-import { Client, Server } from '@rljson/server';
+import { Client, ConsoleLogger, Server } from '@rljson/server';
 
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -68,7 +68,9 @@ async function main() {
   // Create table schema on server
   await createSharedTreeTable(serverIo);
 
-  const server = new Server(route, serverIo, serverBs);
+  const logger = new ConsoleLogger();
+
+  const server = new Server(route, serverIo, serverBs, { logger });
   await server.init();
 
   // ---------------------------------------------------------------------------
@@ -85,7 +87,9 @@ async function main() {
   await createSharedTreeTable(localIoA);
 
   const localBsA = new BsMem();
-  const clientA = new Client(clientSocketA, localIoA, localBsA);
+  const clientA = new Client(clientSocketA, localIoA, localBsA, undefined, {
+    logger,
+  });
   await clientA.init();
 
   const clientDbA = new Db(clientA.io!);
@@ -115,7 +119,9 @@ async function main() {
   await createSharedTreeTable(localIoB);
 
   const localBsB = new BsMem();
-  const clientB = new Client(clientSocketB, localIoB, localBsB);
+  const clientB = new Client(clientSocketB, localIoB, localBsB, undefined, {
+    logger,
+  });
   await clientB.init();
 
   const clientDbB = new Db(clientB.io!);
@@ -141,12 +147,18 @@ async function main() {
     'Changes propagate both ways via shared DB + server Bs. Press Ctrl+C to exit.',
   );
 
-  const shutdown = () => {
+  const shutdown = async () => {
+    console.log('\nShutting down...');
     stopAtoDb();
     stopAfromDb();
     stopBtoDb();
     stopBfromDb();
-    console.log('Stopped watchers. Bye.');
+
+    await clientA.tearDown();
+    await clientB.tearDown();
+    await server.tearDown();
+
+    console.log('Stopped watchers and torn down server. Bye.');
     process.exit(0);
   };
 

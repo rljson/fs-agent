@@ -21,9 +21,11 @@ found in the LICENSE file in the root of this package.
 - 💾 **Smart Storage**: Content-addressed blob storage eliminates duplicate file content
 - 📜 **Version History**: Every change is tracked with complete insert history
 - 🔁 **Bidirectional Sync**: Changes in either direction are automatically propagated
-- 🛡️ **Loop Prevention**: Intelligent pause/resume mechanism prevents infinite sync loops
+- 🛡️ **Loop Prevention**: Content-based dedup, ref tracking, and debounce prevent infinite sync loops
+- ⏱️ **Timeout Guards**: Every async operation is bounded to prevent silent hangs
+- 🎯 **Debounce**: Rapid filesystem events are coalesced into a single sync cycle
 - ✅ **Type-Safe**: Full TypeScript support with comprehensive type definitions
-- 🧪 **Battle-Tested**: 100% test coverage with 139 tests
+- 🧪 **Battle-Tested**: 100% test coverage with 204 tests (SocketMock + Socket.IO)
 - 🧹 **Target Cleanup**: Optional `cleanTarget` restore prunes stale files and directories
 
 ## Installation
@@ -700,6 +702,36 @@ try {
 }
 ```
 
+## Timeout & Debounce Configuration
+
+Every async operation in FsAgent is guarded by a timeout to prevent silent hangs.
+Rapid filesystem events are debounced to coalesce into a single sync cycle.
+
+```typescript
+const agent = new FsAgent('./my-project', bs, {
+  timeouts: {
+    dbQuery: 10_000,      // Single db.get() query (default: 10s)
+    fetchTree: 20_000,    // Fetching an entire tree from the DB (default: 20s)
+    extract: 15_000,      // Filesystem extract/scan (default: 15s)
+    restore: 15_000,      // Filesystem restore (default: 15s)
+    syncCallback: 25_000, // Overall syncFromDb callback (default: 25s)
+    debounceMs: 300,      // Coalesce rapid FS events (default: 300ms)
+  },
+});
+```
+
+## Bounce-Back Prevention
+
+Bidirectional sync can cause infinite loops when both clients detect each
+other's restores as changes. FsAgent prevents this with three layers:
+
+1. **Ref tracking** (`_lastSentRef`): Skips re-broadcast if the stored tree
+   produces the same ref as the last one we sent.
+2. **Content-key dedup** (`_lastSentContentKey`): Compares file paths + blobIds
+   (ignoring mtimes) to detect identical content with different tree hashes.
+3. **Content comparison before restore**: `syncFromDb` compares the incoming
+   tree's content with the current filesystem and skips restore if identical.
+
 ## Performance
 
 - **Efficient Scanning**: Only scans changed directories
@@ -707,6 +739,8 @@ try {
 - **Content-Addressed**: Fast lookups via hashes
 - **Optimized Watching**: Uses native filesystem events
 - **Smart Sync**: Only syncs when changes detected
+- **Debounced Events**: Rapid changes coalesced into single operations
+- **Bounded Operations**: All async operations time out to prevent hangs
 
 ## Troubleshooting
 
@@ -762,6 +796,29 @@ ignore: ['*'];
 // Good: specific patterns
 ignore: ['node_modules', '*.log'];
 ```
+
+## Known Constraints
+
+### macOS Finder paste and rename
+
+Bidirectional sync relies on Node.js `fs.watch` (FSEvents on macOS) to detect
+filesystem changes. This works reliably for **programmatic** file operations:
+
+- ✅ `writeFile`, `copyFile`, `rename` from Node.js or shell commands
+- ✅ Editor saves (VS Code, Vim, etc.)
+- ✅ Terminal commands (`echo`, `cp`, `mv`, `touch`, etc.)
+- ✅ Application-generated file changes
+
+However, **macOS Finder's paste-and-rename workflow** generates rapid,
+non-atomic, multi-step event sequences (create temporary file → write → rename →
+delete temporary) that FSEvents may coalesce, reorder, or split unpredictably.
+This can cause intermediate states to be scanned and broadcast before the
+operation completes, leading to sync conflicts.
+
+**This is a known limitation of filesystem watching on macOS and is not
+supported.** If you need to add or rename files in synced folders, use
+programmatic operations or terminal commands instead of Finder drag-and-drop or
+paste-and-rename.
 
 ## Related Packages
 
