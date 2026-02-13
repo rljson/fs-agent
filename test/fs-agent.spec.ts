@@ -979,7 +979,7 @@ describe('FsAgent', () => {
       db.notify.register(notifyRoute, syncCallback as any);
 
       // Store with notifications enabled
-      await agent.storeInDb(db, treeKey, { notify: true });
+      await agent.storeInDb(db, treeKey);
 
       // Wait for async notification to complete
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -993,7 +993,7 @@ describe('FsAgent', () => {
       const receivedHistoryRow = firstCall[0] as InsertHistoryRow<any>;
       expect(receivedHistoryRow).toBeDefined();
       expect(receivedHistoryRow[`${treeKey}Ref`]).toBe(modifiedRef);
-      expect(receivedHistoryRow.route).toBe(`/${treeKey}/${modifiedRef}`);
+      expect(receivedHistoryRow.route).toBe(`/${treeKey}`);
       expect(receivedHistoryRow.timeId).toBeDefined();
 
       // Verify new version created (initial + modified = 2 total)

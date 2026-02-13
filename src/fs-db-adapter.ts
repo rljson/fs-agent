@@ -5,14 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import type { Db } from '@rljson/db';
-import {
-  InsertHistoryRow,
-  InsertHistoryTable,
-  Route,
-  timeId,
-  Tree,
-  TreesTable,
-} from '@rljson/rljson';
+import { Tree } from '@rljson/rljson';
 
 import type { FsTree } from './fs-scanner.js';
 
@@ -21,13 +14,20 @@ import type { FsTree } from './fs-scanner.js';
  */
 export interface StoreFsTreeOptions {
   /**
-   * Whether to trigger notifications after storing (defaults to false)
+   * Whether to skip notifications after storing (defaults to false).
+   * When false, observers (e.g. Connector) are notified automatically
+   * via the standard db.insertTrees() pipeline.
    */
-  notify?: boolean;
+  skipNotification?: boolean;
 }
 
 /**
- * Adapter for storing filesystem trees in a database
+ * Adapter for storing filesystem trees in a database.
+ *
+ * Uses `db.insertTrees()` to go through the standard insert pipeline:
+ * - TreeController writes each node
+ * - InsertHistoryRow is created automatically
+ * - `notify.notify()` fires so Connector observers broadcast the ref
  */
 export class FsDbAdapter {
   constructor(
@@ -45,8 +45,6 @@ export class FsDbAdapter {
     fsTree: FsTree,
     options: StoreFsTreeOptions = {},
   ): Promise<string> {
-    const { notify = false } = options;
-
     // Validate input
     if (!fsTree) {
       throw new Error('fsTree cannot be null or undefined');
@@ -86,53 +84,15 @@ export class FsDbAdapter {
     );
     trees.push(rootTree); // Add root as last element
 
-    // Create TreesTable
-    const treeTable: TreesTable = {
-      _type: 'trees',
-      _data: trees,
-    };
-
-    // Import trees into database
-    try {
-      await this.db.core.import({
-        [this.treeKey]: treeTable,
-      });
-    } catch (error) {
-      /* v8 ignore start -- @preserve */
-      throw new Error(
-        `Failed to import tree data into database: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    /* v8 ignore stop -- @preserve */
-
-    // Get root reference (last tree in array per @rljson/server pattern)
-    const treeRootRef = trees[trees.length - 1]._hash as string;
-
-    // Manually create insert history entry for root tree
-    const historyRow: InsertHistoryRow<any> = {
-      timeId: timeId(),
-      route: `/${this.treeKey}/${treeRootRef}`,
-      [`${this.treeKey}Ref`]: treeRootRef,
-    } as InsertHistoryRow<any>;
-
-    const historyTable: InsertHistoryTable<any> = {
-      _type: 'insertHistory',
-      _data: [historyRow],
-    };
-
-    // Import insert history
-    await this.db.core.import({
-      [`${this.treeKey}InsertHistory`]: historyTable,
+    // Use db.insertTrees() — goes through the full insert pipeline:
+    // 1. TreeController writes each node
+    // 2. InsertHistoryRow created automatically
+    // 3. notify.notify() fires → Connector observers broadcast ref
+    const results = await this.db.insertTrees(this.treeKey, trees, {
+      skipNotification: options.skipNotification,
     });
 
-    // Optionally trigger notification
-    if (notify) {
-      // Notify on the treeKey route (matches table name)
-      const treeKeyRoute = Route.fromFlat(`/${this.treeKey}`);
-      this.db.notify.notify(treeKeyRoute, historyRow);
-    }
-
-    return treeRootRef;
+    return results[0][`${this.treeKey}Ref`] as string;
   }
 
   /**

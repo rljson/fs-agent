@@ -44,7 +44,6 @@ async function startBidirectionalSync(setup: ProductionSetup) {
     setup.dbA,
     setup.connectorA,
     setup.treeKey,
-    { notify: true },
   );
   const stopAfromDb = await setup.agentA.syncFromDb(
     setup.dbA,
@@ -56,7 +55,6 @@ async function startBidirectionalSync(setup: ProductionSetup) {
     setup.dbB,
     setup.connectorB,
     setup.treeKey,
-    { notify: true },
   );
   const stopBfromDb = await setup.agentB.syncFromDb(
     setup.dbB,

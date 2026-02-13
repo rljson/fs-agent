@@ -98,9 +98,7 @@ async function main() {
   const agentA = new FsAgent(folderA, clientA.bs);
 
   // Client A starts syncToDb and syncFromDb immediately
-  const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey, {
-    notify: true,
-  });
+  const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey);
   const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey, {
     cleanTarget: true,
   });
@@ -130,9 +128,7 @@ async function main() {
   const agentB = new FsAgent(folderB, clientB.bs);
 
   // Start bidirectional sync for Client B
-  const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey, {
-    notify: true,
-  });
+  const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey);
   const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey, {
     cleanTarget: true,
   });

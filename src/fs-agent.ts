@@ -664,7 +664,7 @@ export class FsAgent {
    * @param db - Database instance
    * @param connector - Connector instance for socket-based sync
    * @param treeKey - Tree table key
-   * @param options - Storage options (e.g., notify)
+   * @param options - Storage options (e.g., skipNotification)
    * @returns Function to stop watching
    */
   async syncToDb(
@@ -882,9 +882,18 @@ export class FsAgent {
         // tree matches the just-restored state, then store and record the
         // ref.  When the watcher fires (because restore touched files on
         // disk), debouncedSync will produce the same content key → skip.
+        //
+        // IMPORTANT: skipNotification must be true here.  This store is
+        // just bookkeeping — recording the current state after restore.
+        // If we let notify fire, Connector broadcasts a ref, the other
+        // side processes it, stores again (also broadcasting), and we get
+        // an extra bounce-back cycle that can race with real file
+        // mutations happening right after the settling period.
         const postRestoreTree = await this._scanner.scan();
         const dbAdapter = new FsDbAdapter(db, treeKey);
-        const postRestoreRef = await dbAdapter.storeFsTree(postRestoreTree);
+        const postRestoreRef = await dbAdapter.storeFsTree(postRestoreTree, {
+          skipNotification: true,
+        });
         this._lastSentRef = postRestoreRef;
         this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
       } catch {
@@ -949,10 +958,10 @@ export class FsAgent {
    * ```typescript
    * const agent = await FsAgent.fromClient('./my-folder', 'sharedTree', client, socket);
    * // Simplified sync methods - no db/connector/treeKey needed
-   * await agent.syncToDbSimple({ notify: true });
+   * await agent.syncToDbSimple();
    * await agent.syncFromDbSimple({ cleanTarget: true });
    * // Original methods still work
-   * await agent.syncToDb(db, connector, treeKey, { notify: true });
+   * await agent.syncToDb(db, connector, treeKey);
    * ```
    */
   static async fromClient(

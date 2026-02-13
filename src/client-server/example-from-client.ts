@@ -86,7 +86,7 @@ async function main() {
   console.log('FsAgent created with fromClient()');
 
   // ✨ NEW: Simplified sync methods - no db/connector/treeKey parameters!
-  const stopToDb = await agent.syncToDbSimple({ notify: true });
+  const stopToDb = await agent.syncToDbSimple();
   const stopFromDb = await agent.syncFromDbSimple({ cleanTarget: true });
 
   console.log('✓ Bidirectional sync active with simplified API');
@@ -94,7 +94,7 @@ async function main() {
   console.log('  syncFromDbSimple() - watches database → syncs to filesystem');
 
   // Traditional API still works
-  // await agent.syncToDb(db, connector, 'sharedTree', { notify: true });
+  // await agent.syncToDb(db, connector, 'sharedTree');
   // await agent.syncFromDb(db, connector, 'sharedTree', { cleanTarget: true });
 
   // Cleanup after a few seconds
