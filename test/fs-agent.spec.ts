@@ -11,6 +11,7 @@ import {
   createTreesTableCfg,
   InsertHistoryRow,
   Route,
+  type SyncConfig,
   TableCfg,
 } from '@rljson/rljson';
 
@@ -22,12 +23,24 @@ import { FsAgent } from '../src/fs-agent';
 import { FsDbAdapter } from '../src/fs-db-adapter';
 
 /**
- * Creates a mock Connector for tests that don't need real socket communication
+ * Creates a mock Connector for tests that don't need real socket communication.
+ * Also provides a `simulateIncoming` helper to inject a ref as if it arrived
+ * from a remote peer (bypassing origin filtering in listen).
  */
-function createMockConnector(db: Db, treeKey: string) {
+function createMockConnector(db: Db, treeKey: string, syncConfig?: SyncConfig) {
   const route = Route.fromFlat(`/${treeKey}+`);
   const socket = new SocketMock();
-  return new Connector(db, route, socket);
+  const connector = new Connector(db, route, socket, syncConfig);
+
+  /**
+   * Simulates a ref arriving from a remote peer on the same socket.
+   * Uses a different origin than the connector so listen accepts it.
+   */
+  const simulateIncoming = (ref: string) => {
+    socket.emit(connector.events.ref, { o: 'remote-test-origin', r: ref });
+  };
+
+  return Object.assign(connector, { simulateIncoming });
 }
 
 describe('FsAgent', () => {
@@ -868,6 +881,46 @@ describe('FsAgent', () => {
       expect(historyTable._data.length).toBeGreaterThanOrEqual(2);
     });
 
+    it('should use sendWithAck when syncConfig.requireAck is true', async () => {
+      // Setup initial file
+      await writeFile(join(testDir, 'ack-test.txt'), 'initial');
+
+      // Setup database
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      // Create connector with requireAck enabled and short timeout
+      const syncConfig: SyncConfig = { requireAck: true, ackTimeoutMs: 500 };
+      const connector = createMockConnector(db, treeKey, syncConfig);
+
+      // Simulate server ACK: listen for refs, echo matching ACK
+      const socket = connector.socket;
+      socket.on(connector.events.ref, (payload: { r: string }) => {
+        setTimeout(() => {
+          socket.emit(connector.events.ack, { r: payload.r });
+        }, 10);
+      });
+
+      // Spy on sendWithAck
+      const sendWithAckSpy = vi.spyOn(connector, 'sendWithAck');
+
+      const agent = new FsAgent(testDir);
+      const stopSync = await agent.syncToDb(db, connector, treeKey);
+
+      // Wait for initial sync cycle
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Verify sendWithAck was used (not plain send) for initial ref
+      expect(sendWithAckSpy).toHaveBeenCalled();
+
+      stopSync();
+      sendWithAckSpy.mockRestore();
+    });
+
     it('should stop watching when cleanup function is called', async () => {
       // Setup initial file
       await writeFile(join(testDir, 'watched2.txt'), 'initial');
@@ -1155,8 +1208,8 @@ describe('FsAgent', () => {
       const dbAdapter = new FsDbAdapter(db, treeKey);
       const treeRef = await dbAdapter.storeFsTree(newTree);
 
-      // Manually send the ref through connector to trigger sync
-      connector.send(treeRef);
+      // Simulate incoming ref from remote peer to trigger sync
+      connector.simulateIncoming(treeRef);
 
       // Wait for sync to complete
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -1618,9 +1671,9 @@ describe('FsAgent', () => {
       const stopSync = await agent.syncFromDb(db, connector, treeKey);
 
       // Trigger with invalid treeRef types - should be ignored gracefully
-      connector.send(null as any);
-      connector.send(123 as any);
-      connector.send({} as any);
+      connector.simulateIncoming(null as any);
+      connector.simulateIncoming(123 as any);
+      connector.simulateIncoming({} as any);
 
       // Wait a bit
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1645,8 +1698,8 @@ describe('FsAgent', () => {
       const connector = createMockConnector(db, treeKey);
       const stopSync = await agent.syncFromDb(db, connector, treeKey);
 
-      // Manually trigger with missing treeRef by sending empty string via connector
-      connector.send('');
+      // Simulate incoming empty ref from remote peer
+      connector.simulateIncoming('');
 
       // Clean up
       stopSync();
@@ -1668,8 +1721,8 @@ describe('FsAgent', () => {
       const connector = createMockConnector(db, treeKey);
       const stopSync = await agent.syncFromDb(db, connector, treeKey);
 
-      // Trigger with invalid treeRef that will cause loadFromDb to fail
-      connector.send('invalidTreeRef');
+      // Simulate incoming ref from remote peer that will cause loadFromDb to fail
+      connector.simulateIncoming('invalidTreeRef');
 
       // Wait a bit for the async operation
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2019,10 +2072,10 @@ describe('FsAgent', () => {
       expect(stopSync).toBeDefined();
       expect(typeof stopSync).toBe('function');
 
-      // Simulate incoming ref — callback fires but db.get hangs.
-      // The timeout catches it and the catch block swallows the error.
-      // The watcher should NOT crash.
-      connector.send('fake-ref-that-will-timeout');
+      // Simulate incoming ref from remote peer — callback fires but
+      // db.get hangs. The timeout catches it and the catch block swallows
+      // the error. The watcher should NOT crash.
+      connector.simulateIncoming('fake-ref-that-will-timeout');
 
       // Give the callback time to fire and timeout
       await new Promise((resolve) => setTimeout(resolve, 200));

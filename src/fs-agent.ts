@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import { Bs, BsMem } from '@rljson/bs';
-import { Route } from '@rljson/rljson';
+import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 
 import { mkdir, readdir, rm, utimes, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
@@ -43,6 +43,24 @@ export interface FsAgentOptions {
   restoreOptions?: RestoreOptions;
   /** Timeout configuration for async operations */
   timeouts?: TimeoutConfig;
+  /**
+   * Centralized sync protocol configuration.
+   * When provided, this SyncConfig is forwarded to every Connector
+   * created by {@link FsAgent.fromClient}, and governs whether
+   * `sendWithAck()` (when `requireAck` is true) or `send()` is used
+   * in {@link FsAgent.syncToDb}.
+   *
+   * The same SyncConfig should also be passed to the Server and Client
+   * constructors so that every layer uses the same protocol settings.
+   */
+  syncConfig?: SyncConfig;
+  /**
+   * Stable client identity. When provided, it is forwarded to every
+   * Connector created by {@link FsAgent.fromClient}. When omitted but
+   * `syncConfig.includeClientIdentity` is true, each Connector
+   * auto-generates its own identity.
+   */
+  clientIdentity?: ClientId;
 }
 
 /** Restore options */
@@ -106,6 +124,8 @@ export class FsAgent {
   /** Content fingerprint of the last tree we broadcasted (paths+blobIds) */
   private _lastSentContentKey?: string;
   private _timeouts: Required<TimeoutConfig>;
+  private _syncConfig?: SyncConfig;
+  private _clientIdentity?: ClientId;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
@@ -113,6 +133,8 @@ export class FsAgent {
     this._db = options.db;
     this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
+    this._syncConfig = options.syncConfig;
+    this._clientIdentity = options.clientIdentity;
     this._scanner = new FsScanner(rootPath, { ...options, bs: this._bs });
     this._adapter = new FsBlobAdapter(this._bs);
 
@@ -194,6 +216,21 @@ export class FsAgent {
         },
       );
     });
+  }
+
+  /**
+   * Sends a ref through the connector.
+   * Uses `sendWithAck()` when the connector has `requireAck` enabled,
+   * otherwise falls back to fire-and-forget `send()`.
+   * @param connector - The Connector to send through
+   * @param ref - The ref to broadcast
+   */
+  private async _sendRef(connector: Connector, ref: string): Promise<void> {
+    if (connector.syncConfig?.requireAck) {
+      await connector.sendWithAck(ref);
+    } else {
+      connector.send(ref);
+    }
   }
 
   /**
@@ -689,7 +726,7 @@ export class FsAgent {
       if (currentTree) {
         this._lastSentContentKey = this._contentKeyFromTree(currentTree);
       }
-      connector.send(initialRef);
+      await this._sendRef(connector, initialRef);
     }
 
     // Debounced callback: coalesce rapid filesystem events (e.g. macOS
@@ -733,7 +770,7 @@ export class FsAgent {
 
             // Broadcast the new ref through connector
             if (ref) {
-              connector.send(ref);
+              await this._sendRef(connector, ref);
             }
           } catch {
             /* v8 ignore start -- @preserve */
@@ -906,16 +943,13 @@ export class FsAgent {
       }
     };
 
-    // Create callback to sync on DB changes
+    // Create callback to sync on DB changes.
+    // listen() already handles origin-filtering and ref-level dedup,
+    // so we only need content-level bounce-back detection (in processRef)
+    // and debouncing for rapid incoming refs.
     const syncCallback = async (treeRef: string) => {
       // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
-        return;
-      }
-
-      // Skip if this is our own broadcast (prevent self-sync loop)
-      /* v8 ignore if -- @preserve */
-      if (treeRef === this._lastSentRef) {
         return;
       }
 
@@ -934,13 +968,13 @@ export class FsAgent {
       }, this._timeouts.debounceMs);
     };
 
-    // Register callback with Connector
+    // Register callback with Connector using the safe, deduplicated API
     connector.listen(syncCallback);
 
     // Return cleanup function
     return () => {
       if (fromDbTimer) clearTimeout(fromDbTimer);
-      connector.teardown();
+      connector.tearDown();
     };
   }
 
@@ -952,11 +986,16 @@ export class FsAgent {
    * @param treeKey - Tree table key (route will be `/${treeKey}`)
    * @param client - Client instance with io and bs properties
    * @param socket - Socket instance for connector communication
-   * @param options - Optional FsAgent options (db and treeKey are set automatically)
+   * @param options - Optional FsAgent options (db and treeKey are set automatically).
+   *   `syncConfig` and `clientIdentity` from these options are forwarded to
+   *   the Connector so that a single config origin governs all layers.
    * @returns Configured FsAgent instance with simplified sync API
    * @example
    * ```typescript
-   * const agent = await FsAgent.fromClient('./my-folder', 'sharedTree', client, socket);
+   * const syncConfig: SyncConfig = { requireAck: true, maxDedupSetSize: 5000 };
+   * const agent = await FsAgent.fromClient(
+   *   './my-folder', 'sharedTree', client, socket, { syncConfig },
+   * );
    * // Simplified sync methods - no db/connector/treeKey needed
    * await agent.syncToDbSimple();
    * await agent.syncFromDbSimple({ cleanTarget: true });
@@ -994,8 +1033,14 @@ export class FsAgent {
     // Create Route from treeKey
     const route = Route.fromFlat(`/${treeKey}`);
 
-    // Create Connector
-    const connector = new Connector(db, route, socket);
+    // Create Connector with centralized SyncConfig and ClientIdentity
+    const connector = new Connector(
+      db,
+      route,
+      socket,
+      options?.syncConfig,
+      options?.clientIdentity,
+    );
 
     // Create FsAgent with client's blob storage
     const agent = new FsAgent(filePath, client.bs, options);
