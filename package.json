@@ -62,7 +62,11 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
-    ]
+    ],
+    "overrides": {
+      "@rljson/server": "link:../rljson-server",
+      "@rljson/db": "link:../rljson-db"
+    }
   },
   "packageManager": "pnpm@10.11.0"
 }

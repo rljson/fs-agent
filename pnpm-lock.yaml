@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@rljson/server': link:../rljson-server
+
 importers:
 
   .:
@@ -34,8 +37,8 @@ importers:
         version: 4.8.3
     devDependencies:
       '@rljson/server':
-        specifier: ^0.0.5
-        version: 0.0.5
+        specifier: link:../rljson-server
+        version: link:../rljson-server
       '@types/node':
         specifier: ^25.2.3
         version: 25.2.3
@@ -438,10 +441,6 @@ packages:
 
   '@rljson/rljson@0.0.75':
     resolution: {integrity: sha512-WyUdMDsNMEeAyiP7XjUwIl/Xy442YB3ZP75pcK7Ijn3LLAdp4a+vD87nAVUW0udsM1kSGYchxt1pHfGWv8F8dQ==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/server@0.0.5':
-    resolution: {integrity: sha512-n7nDqsDS1hAF1u1iXBb+tSFCFwOsh0Q3NulaQxrWy23B/kI5+StvAgaZwYwc2kaccYkCOYASuiTcqIwzFjPLVg==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/validate@0.0.11':
@@ -2240,15 +2239,6 @@ snapshots:
       '@rljson/hash': 0.0.18
       '@rljson/json': 0.0.23
       nanoid: 5.1.6
-
-  '@rljson/server@0.0.5':
-    dependencies:
-      '@rljson/bs': 0.0.20
-      '@rljson/db': 0.0.13
-      '@rljson/hash': 0.0.18
-      '@rljson/io': 0.0.65
-      '@rljson/json': 0.0.23
-      '@rljson/rljson': 0.0.75
 
   '@rljson/validate@0.0.11':
     dependencies:
