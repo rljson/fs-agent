@@ -124,8 +124,6 @@ export class FsAgent {
   /** Content fingerprint of the last tree we broadcasted (paths+blobIds) */
   private _lastSentContentKey?: string;
   private _timeouts: Required<TimeoutConfig>;
-  private _syncConfig?: SyncConfig;
-  private _clientIdentity?: ClientId;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
@@ -133,8 +131,6 @@ export class FsAgent {
     this._db = options.db;
     this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
-    this._syncConfig = options.syncConfig;
-    this._clientIdentity = options.clientIdentity;
     this._scanner = new FsScanner(rootPath, { ...options, bs: this._bs });
     this._adapter = new FsBlobAdapter(this._bs);
 

@@ -92,7 +92,9 @@ export class FsDbAdapter {
       skipNotification: options.skipNotification,
     });
 
-    return results[0][`${this.treeKey}Ref`] as string;
+    return results[0][
+      `${this.treeKey}Ref` as keyof (typeof results)[0]
+    ] as string;
   }
 
   /**
