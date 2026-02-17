@@ -104,7 +104,7 @@ export async function runClientServerSetup(
   // Write + sync
   const helloPathA = join(folderA, 'hello.txt');
   await writeFile(helloPathA, 'Hello from Client A');
-  const rootRef = await agentA.storeInDb(clientDbA, treeKey, { notify: false });
+  const rootRef = await agentA.storeInDb(clientDbA, treeKey, { skipNotification: true });
   await agentB.loadFromDb(clientDbB, treeKey, rootRef);
   const contentB = await readFile(join(folderB, 'hello.txt'), 'utf8');
 

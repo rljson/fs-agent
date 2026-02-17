@@ -447,3 +447,50 @@ This peer-to-peer pattern with server coordination enables:
 ✅ **Real-world deployment**: Works across networks, not just in-memory mocks
 
 **This is why clients must NEVER access server Io/Bs directly** - it would bypass the entire peer-to-peer mechanism and make the system only work in single-process scenarios.
+
+## Bounce-Back Prevention
+
+Bidirectional sync creates a potential infinite loop:
+
+```
+Client A writes file → syncToDb stores tree → broadcasts ref →
+Client B receives ref → syncFromDb restores file → fs watcher fires →
+syncToDb stores tree → broadcasts ref → Client A receives ref → ...
+```
+
+FsAgent uses three layers of deduplication to break the loop:
+
+1. **Ref-level dedup**: After `syncToDb` stores a tree, it compares the
+   resulting ref against `_lastSentRef`. If identical, no broadcast occurs.
+
+2. **Content-key dedup**: Even when refs differ (e.g. different mtimes produce
+   different hashes), `syncToDb` computes a content key from file paths +
+   blobIds. If the content key matches `_lastSentContentKey`, the broadcast
+   is skipped.
+
+3. **Content comparison before restore**: In `syncFromDb`, before restoring
+   an incoming tree, FsAgent compares its file content map against the current
+   filesystem. If they are equivalent, the restore is skipped entirely,
+   preventing the filesystem watcher from firing.
+
+Additionally, all sync callbacks are **debounced** (default 300ms) to coalesce
+rapid filesystem events (e.g. multi-file saves, editor autosave) into a single
+sync operation.
+
+## Known Constraints
+
+### macOS Finder Paste and Rename
+
+Bidirectional sync relies on Node.js `fs.watch` (FSEvents on macOS). This works
+reliably for programmatic file operations (Node.js `writeFile`/`copyFile`,
+terminal commands, editor saves) but **not** for macOS Finder's paste-and-rename
+workflow.
+
+Finder generates rapid, non-atomic, multi-step event sequences (create temp →
+write → rename → delete temp) that FSEvents may coalesce, reorder, or split
+unpredictably. This causes intermediate filesystem states to be scanned and
+broadcast before the operation completes, leading to sync conflicts.
+
+**This is a known limitation and is not supported.** Use programmatic operations
+or terminal commands instead of Finder drag-and-drop or paste-and-rename for
+files in synced folders.

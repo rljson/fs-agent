@@ -84,7 +84,7 @@ describe('FsDbAdapter', () => {
       expect(historyTable2._type).toBe('insertHistory');
       expect(historyTable2._data.length).toBe(1);
       expect(historyTable2._data[0][`${treeKey}Ref`]).toBe(treeRootRef);
-      expect(historyTable2._data[0].route).toBe(`/fsTree/${treeRootRef}`);
+      expect(historyTable2._data[0].route).toBe(`/fsTree`);
       expect(historyTable2._data[0].timeId).toBeDefined();
     });
 
@@ -117,7 +117,7 @@ describe('FsDbAdapter', () => {
       expect(historyTable2._type).toBe('insertHistory');
       expect(historyTable2._data.length).toBe(1);
       expect(historyTable2._data[0][`${treeKey}Ref`]).toBe(treeRootRef);
-      expect(historyTable2._data[0].route).toBe(`/fsTree/${treeRootRef}`);
+      expect(historyTable2._data[0].route).toBe(`/fsTree`);
       expect(historyTable2._data[0].timeId).toBeDefined();
     });
 
@@ -150,7 +150,7 @@ describe('FsDbAdapter', () => {
       expect(historyTable2._type).toBe('insertHistory');
       expect(historyTable2._data.length).toBe(1);
       expect(historyTable2._data[0][`${treeKey}Ref`]).toBe(treeRootRef);
-      expect(historyTable2._data[0].route).toBe(`/fsTree/${treeRootRef}`);
+      expect(historyTable2._data[0].route).toBe(`/fsTree`);
       expect(historyTable2._data[0].timeId).toBeDefined();
     });
   });
@@ -182,7 +182,7 @@ describe('FsDbAdapter', () => {
       expect(historyTable2._type).toBe('insertHistory');
       expect(historyTable2._data.length).toBe(1);
       expect(historyTable2._data[0][`${treeKey}Ref`]).toBe(treeRootRef);
-      expect(historyTable2._data[0].route).toBe(`/fsTree/${treeRootRef}`);
+      expect(historyTable2._data[0].route).toBe(`/fsTree`);
       expect(historyTable2._data[0].timeId).toBeDefined();
     });
 
@@ -201,16 +201,18 @@ describe('FsDbAdapter', () => {
       db.notify.register(notifyRoute, callback as any);
 
       // Store tree without notification
-      await dbAdapter.storeFsTree(fsTree, { notify: false });
+      await dbAdapter.storeFsTree(fsTree, { skipNotification: true });
 
-      // Verify notification NOT received yet (notify option was false)
+      // Verify notification NOT received (skipNotification was true)
       expect(callback).not.toHaveBeenCalled();
 
       // Now store again with notification enabled
-      const callback2 = vi.fn(async () => {});
+      const callback2 = vi.fn<(row: InsertHistoryRow<any>) => Promise<void>>(
+        async () => {},
+      );
       db.notify.register(notifyRoute, callback2 as any);
 
-      await dbAdapter.storeFsTree(fsTree, { notify: true });
+      await dbAdapter.storeFsTree(fsTree);
 
       // Wait for async notification to complete
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -219,10 +221,9 @@ describe('FsDbAdapter', () => {
       expect(callback2).toHaveBeenCalledTimes(1);
 
       // Verify the callback received the correct data
-      const receivedHistoryRow = callback2.mock
-        .calls[0][0] as InsertHistoryRow<any>;
+      const receivedHistoryRow = callback2.mock.calls[0][0];
       expect(receivedHistoryRow[`${treeKey}Ref`]).toBe(treeRootRef);
-      expect(receivedHistoryRow.route).toBe(`/fsTree/${treeRootRef}`);
+      expect(receivedHistoryRow.route).toBe(`/fsTree`);
       expect(receivedHistoryRow.timeId).toBeDefined();
 
       // Clean up

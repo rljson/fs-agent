@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import { Bs, BsMem } from '@rljson/bs';
-import { Route } from '@rljson/rljson';
+import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 
 import { mkdir, readdir, rm, utimes, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
@@ -41,6 +41,26 @@ export interface FsAgentOptions {
   bidirectional?: boolean;
   /** Restore options applied when syncing from DB */
   restoreOptions?: RestoreOptions;
+  /** Timeout configuration for async operations */
+  timeouts?: TimeoutConfig;
+  /**
+   * Centralized sync protocol configuration.
+   * When provided, this SyncConfig is forwarded to every Connector
+   * created by {@link FsAgent.fromClient}, and governs whether
+   * `sendWithAck()` (when `requireAck` is true) or `send()` is used
+   * in {@link FsAgent.syncToDb}.
+   *
+   * The same SyncConfig should also be passed to the Server and Client
+   * constructors so that every layer uses the same protocol settings.
+   */
+  syncConfig?: SyncConfig;
+  /**
+   * Stable client identity. When provided, it is forwarded to every
+   * Connector created by {@link FsAgent.fromClient}. When omitted but
+   * `syncConfig.includeClientIdentity` is true, each Connector
+   * auto-generates its own identity.
+   */
+  clientIdentity?: ClientId;
 }
 
 /** Restore options */
@@ -48,6 +68,41 @@ export interface RestoreOptions {
   /** Remove files/dirs on target that are not present in the tree */
   cleanTarget?: boolean;
 }
+
+/**
+ * Timeout configuration for async operations (milliseconds).
+ * Every async operation in FsAgent is guarded by a timeout to prevent
+ * silent hangs in socket communication, filesystem I/O, or database queries.
+ */
+export interface TimeoutConfig {
+  /** Timeout for a single db.get() query. Default: 10 000 ms */
+  dbQuery?: number;
+  /** Timeout for fetching an entire tree from the DB. Default: 20 000 ms */
+  fetchTree?: number;
+  /** Timeout for a filesystem extract / scan. Default: 15 000 ms */
+  extract?: number;
+  /** Timeout for a filesystem restore. Default: 15 000 ms */
+  restore?: number;
+  /** Timeout for the overall syncFromDb callback. Default: 25 000 ms */
+  syncCallback?: number;
+  /**
+   * Debounce delay for sync callbacks (milliseconds). Default: 300 ms.
+   * Rapid filesystem events (e.g. macOS Finder "Keep Both" copy+rename)
+   * are coalesced into a single sync operation after this quiet period.
+   * Also applies to incoming database refs in syncFromDb.
+   */
+  debounceMs?: number;
+}
+
+/** Sensible defaults – every operation is bounded */
+const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
+  dbQuery: 10_000,
+  fetchTree: 20_000,
+  extract: 15_000,
+  restore: 15_000,
+  syncCallback: 25_000,
+  debounceMs: 300,
+};
 
 // .............................................................................
 // FsAgent Class
@@ -66,12 +121,16 @@ export class FsAgent {
   private _stopSync?: () => void;
   private _stopSyncFromDb?: () => void;
   private _lastSentRef?: string;
+  /** Content fingerprint of the last tree we broadcasted (paths+blobIds) */
+  private _lastSentContentKey?: string;
+  private _timeouts: Required<TimeoutConfig>;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
     this._bs = bs || new BsMem();
     this._db = options.db;
     this._treeKey = options.treeKey;
+    this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._scanner = new FsScanner(rootPath, { ...options, bs: this._bs });
     this._adapter = new FsBlobAdapter(this._bs);
 
@@ -118,6 +177,59 @@ export class FsAgent {
   }
 
   /**
+   * Gets the current timeout configuration
+   */
+  get timeouts(): Required<TimeoutConfig> {
+    return this._timeouts;
+  }
+
+  /**
+   * Wraps a promise with a timeout.
+   * Rejects with a descriptive error if the promise does not settle
+   * within the given number of milliseconds.
+   * @param promise - The promise to guard
+   * @param ms - Maximum allowed time in milliseconds
+   * @param label - Human-readable label included in the error message
+   */
+  private static _withTimeout<T>(
+    promise: Promise<T>,
+    ms: number,
+    label: string,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Timeout after ${ms}ms: ${label}`));
+      }, ms);
+
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  /**
+   * Sends a ref through the connector.
+   * Uses `sendWithAck()` when the connector has `requireAck` enabled,
+   * otherwise falls back to fire-and-forget `send()`.
+   * @param connector - The Connector to send through
+   * @param ref - The ref to broadcast
+   */
+  private async _sendRef(connector: Connector, ref: string): Promise<void> {
+    if (connector.syncConfig?.requireAck) {
+      await connector.sendWithAck(ref);
+    } else {
+      connector.send(ref);
+    }
+  }
+
+  /**
    * Starts automatic syncing to database
    * Note: Auto-sync requires Connector which is not available in constructor.
    * Consider using syncToDb() directly instead of constructor options.
@@ -143,7 +255,7 @@ export class FsAgent {
    * Consider using syncFromDb() directly instead of constructor options.
    */
   private async _startAutoSyncFromDb(bidirectional: boolean): Promise<void> {
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!this._db || !this._treeKey || !bidirectional) {
       return;
     }
@@ -160,12 +272,12 @@ export class FsAgent {
    * Stops automatic syncing and cleans up resources
    */
   dispose(): void {
-    /* v8 ignore next 4 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (this._stopSync) {
       this._stopSync();
       this._stopSync = undefined;
     }
-    /* v8 ignore next 4 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (this._stopSyncFromDb) {
       this._stopSyncFromDb();
       this._stopSyncFromDb = undefined;
@@ -228,7 +340,7 @@ export class FsAgent {
     }
 
     const meta = treeNode.meta as FsNodeMeta | null | undefined;
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!meta) {
       throw new Error(`Tree node is missing meta for hash: ${treeHash}`);
     }
@@ -329,7 +441,7 @@ export class FsAgent {
     const tree = await this.extract();
 
     // Validate tree has content
-    /* v8 ignore next 5 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (!tree || !tree.rootHash || !tree.trees) {
       throw new Error(
         'Cannot store empty or invalid tree in database. ' +
@@ -337,7 +449,7 @@ export class FsAgent {
       );
     }
 
-    /* v8 ignore next 3 -- @preserve */
+    /* v8 ignore if -- @preserve */
     if (tree.trees.size === 0) {
       throw new Error(
         'Cannot store tree with no nodes. The tree structure is empty.',
@@ -374,7 +486,7 @@ export class FsAgent {
       nodesToFetch.delete(currentHash);
 
       // Skip if already processed
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore if -- @preserve */
       if (processed.has(currentHash)) {
         continue;
       }
@@ -385,12 +497,22 @@ export class FsAgent {
       // The early return fix in @rljson/db prevents infinite recursion
       let result;
       try {
-        result = await db.get(route, { _hash: currentHash });
-      } catch {
-        /* v8 ignore next 3 -- @preserve */
+        result = await FsAgent._withTimeout(
+          db.get(route, { _hash: currentHash }),
+          this._timeouts.dbQuery,
+          `db.get(${treeKey}, _hash=${currentHash.slice(0, 8)}…)`,
+        );
+      } catch (error) {
+        // Re-throw timeout errors — they indicate a systemic problem
+        /* v8 ignore if -- @preserve */
+        if (error instanceof Error && error.message.startsWith('Timeout')) {
+          throw error;
+        }
+        /* v8 ignore start -- @preserve */
         // Node not found - might be a blob reference or deleted
         continue;
       }
+      /* v8 ignore stop -- @preserve */
 
       // Extract node data from rljson
       const treeData = result?.rljson?.[treeKey];
@@ -428,6 +550,62 @@ export class FsAgent {
   }
 
   /**
+   * Fetches tree from database without restoring to filesystem.
+   * Separated from loadFromDb to allow content comparison before restore.
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   * @param rootRef - Root tree reference (hash)
+   * @returns FsTree structure ready for restore
+   */
+  private async _fetchTreeFromDb(
+    db: Db,
+    treeKey: string,
+    rootRef: string,
+  ): Promise<FsTree> {
+    // Validate inputs
+    if (!rootRef || rootRef.trim() === '') {
+      throw new Error('rootRef cannot be empty');
+    }
+
+    // Recursively fetch all tree nodes starting from root
+    // Trees are stored as multiple rows - querying by hash only returns one node
+    // We need to fetch the root node and recursively fetch all children
+    const route = Route.fromFlat(treeKey);
+    const allNodes = await FsAgent._withTimeout(
+      this._fetchTreeRecursively(db, route, treeKey, rootRef),
+      this._timeouts.fetchTree,
+      `fetchTree(${treeKey}@${rootRef.slice(0, 8)}…)`,
+    );
+
+    if (allNodes.length === 0) {
+      throw new Error(
+        `No tree nodes found for ${treeKey}@${rootRef}. ` +
+          `The tree may have been deleted or the reference is invalid.`,
+      );
+    }
+
+    // Build trees Map from all fetched nodes
+    const trees = new Map<string, any>();
+    for (const treeNode of allNodes) {
+      /* v8 ignore if -- @preserve */
+      if (treeNode._hash) {
+        trees.set(treeNode._hash, treeNode);
+      }
+    }
+
+    // Validate root tree exists
+    /* v8 ignore if -- @preserve */
+    if (!trees.has(rootRef)) {
+      throw new Error(
+        `Root tree node "${rootRef}" not found in tree data. ` +
+          `Available hashes: ${Array.from(trees.keys()).slice(0, 5).join(', ')}${trees.size > 5 ? '...' : ''}`,
+      );
+    }
+
+    return { rootHash: rootRef, trees };
+  }
+
+  /**
    * Loads tree from database and restores to filesystem
    * Writes to filesystem from DB trees and Bs blobs
    * @param db - Database instance
@@ -443,54 +621,7 @@ export class FsAgent {
     targetPath?: string,
     options?: RestoreOptions,
   ): Promise<void> {
-    // Validate inputs
-    if (!rootRef || rootRef.trim() === '') {
-      throw new Error('rootRef cannot be empty');
-    }
-
-    // Recursively fetch all tree nodes starting from root
-    // Trees are stored as multiple rows - querying by hash only returns one node
-    // We need to fetch the root node and recursively fetch all children
-    const route = Route.fromFlat(treeKey);
-    const allNodes = await this._fetchTreeRecursively(
-      db,
-      route,
-      treeKey,
-      rootRef,
-    );
-
-    if (allNodes.length === 0) {
-      throw new Error(
-        `No tree nodes found for ${treeKey}@${rootRef}. ` +
-          `The tree may have been deleted or the reference is invalid.`,
-      );
-    }
-
-    // Build trees Map from all fetched nodes
-    const trees = new Map<string, any>();
-    for (const treeNode of allNodes) {
-      /* v8 ignore next 3 -- @preserve */
-      if (treeNode._hash) {
-        trees.set(treeNode._hash, treeNode);
-      }
-    }
-
-    // Validate root tree exists
-    /* v8 ignore next 4 -- @preserve */
-    if (!trees.has(rootRef)) {
-      throw new Error(
-        `Root tree node "${rootRef}" not found in tree data. ` +
-          `Available hashes: ${Array.from(trees.keys()).slice(0, 5).join(', ')}${trees.size > 5 ? '...' : ''}`,
-      );
-    }
-
-    // Use rootRef directly - it identifies the root tree from InsertHistory
-    const fsTree: FsTree = {
-      rootHash: rootRef,
-      trees,
-    };
-
-    // Restore to filesystem
+    const fsTree = await this._fetchTreeFromDb(db, treeKey, rootRef);
     await this.restore(fsTree, targetPath, options);
   }
 
@@ -511,7 +642,7 @@ export class FsAgent {
 
     for (const [, node] of tree.trees) {
       const meta = node?.meta as FsNodeMeta | null | undefined;
-      /* v8 ignore next 3 -- @preserve */
+      /* v8 ignore if -- @preserve */
       if (!meta) {
         continue;
       }
@@ -566,7 +697,7 @@ export class FsAgent {
    * @param db - Database instance
    * @param connector - Connector instance for socket-based sync
    * @param treeKey - Tree table key
-   * @param options - Storage options (e.g., notify)
+   * @param options - Storage options (e.g., skipNotification)
    * @returns Function to stop watching
    */
   async syncToDb(
@@ -576,43 +707,149 @@ export class FsAgent {
     options?: StoreFsTreeOptions,
   ): Promise<() => void> {
     // Store initial state
-    const initialRef = await this.storeInDb(db, treeKey, options);
+    const initialRef = await FsAgent._withTimeout(
+      this.storeInDb(db, treeKey, options),
+      this._timeouts.fetchTree,
+      `syncToDb → initial storeInDb(${treeKey})`,
+    );
 
     // Send initial ref through connector (self-filtering will prevent loops)
     /* v8 ignore next -- @preserve */
     if (initialRef) {
       this._lastSentRef = initialRef;
-      connector.send(initialRef);
+      const currentTree = this._scanner.tree;
+      /* v8 ignore if -- @preserve */
+      if (currentTree) {
+        this._lastSentContentKey = this._contentKeyFromTree(currentTree);
+      }
+      await this._sendRef(connector, initialRef);
     }
 
-    // Create callback to sync on changes
-    const syncCallback = async () => {
-      // Use the scanner's already-updated tree instead of extracting again
-      const tree = this._scanner.tree;
-      /* v8 ignore next 3 -- @preserve */
-      if (tree) {
-        const dbAdapter = new FsDbAdapter(db, treeKey);
-        const ref = await dbAdapter.storeFsTree(tree, options);
+    // Debounced callback: coalesce rapid filesystem events (e.g. macOS
+    // Finder "Keep Both" copy + rename) into a single store+broadcast.
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-        // Track the ref we're sending to avoid processing it when we receive it back
-        this._lastSentRef = ref;
+    const debouncedSync = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(async () => {
+        debounceTimer = null;
+        const tree = this._scanner.tree;
+        /* v8 ignore if -- @preserve */
+        if (tree) {
+          try {
+            // Content-level dedup: if the tree has the exact same files +
+            // blobIds as the last tree we broadcasted, skip entirely.
+            // This catches bounce-backs that have different mtimes (and
+            // therefore different tree hashes / refs) but identical content.
+            const contentKey = this._contentKeyFromTree(tree);
+            if (contentKey === this._lastSentContentKey) {
+              return;
+            }
 
-        // Broadcast the new ref through connector
-        if (ref) {
-          connector.send(ref);
+            const dbAdapter = new FsDbAdapter(db, treeKey);
+            const ref = await FsAgent._withTimeout(
+              dbAdapter.storeFsTree(tree, options),
+              this._timeouts.fetchTree,
+              `syncToDb → storeFsTree(${treeKey})`,
+            );
+
+            // Skip broadcast if the ref matches what we already sent.
+            // This happens after syncFromDb restores files: the watcher
+            // fires, we store the same tree, and get the same ref back.
+            if (ref === this._lastSentRef) {
+              return;
+            }
+
+            // Track the ref and content we're sending
+            this._lastSentRef = ref;
+            this._lastSentContentKey = contentKey;
+
+            // Broadcast the new ref through connector
+            if (ref) {
+              await this._sendRef(connector, ref);
+            }
+          } catch {
+            /* v8 ignore start -- @preserve */
+            // Don't re-throw — one sync failure must not crash the watcher
+          }
+          /* v8 ignore stop -- @preserve */
         }
-      }
+      }, this._timeouts.debounceMs);
     };
 
     // Register callback and start watching
-    this._scanner.onChange(syncCallback);
+    this._scanner.onChange(debouncedSync);
     await this._scanner.watch();
 
     // Return cleanup function
     return () => {
-      this._scanner.offChange(syncCallback);
+      if (debounceTimer) clearTimeout(debounceTimer);
+      this._scanner.offChange(debouncedSync);
       this._scanner.stopWatch();
     };
+  }
+
+  /**
+   * Builds a map of relativePath → blobId for all files in a tree.
+   * Used to compare trees by content rather than by hash (which includes mtime).
+   * @param tree - Tree structure to extract file content map from
+   */
+  private _getFileContentMap(tree: FsTree): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const [, node] of tree.trees) {
+      const meta = node?.meta;
+      if (meta?.type === 'file') {
+        /* v8 ignore next -- @preserve */
+        map.set(meta.relativePath as string, (meta.blobId as string) ?? '');
+      } else if (meta?.type === 'directory' && meta.relativePath !== '.') {
+        // Include directories so that adding/removing empty dirs changes the
+        // content key and is not silently deduplicated.
+        map.set(meta.relativePath as string, '<dir>');
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Derives a deterministic string key from a content map so that two trees
+   * with identical file paths + blobIds produce the same key regardless of
+   * mtime differences.
+   * @param map - Content map (relativePath → blobId)
+   */
+  private _contentKeyFromMap(map: Map<string, string>): string {
+    const sorted = Array.from(map.entries()).sort((a, b) =>
+      a[0].localeCompare(b[0]),
+    );
+    return sorted.map(([p, b]) => `${p}:${b}`).join('\n');
+  }
+
+  /**
+   * Derives a deterministic content key from an FsTree.
+   * @param tree - Tree structure to derive content key from
+   */
+  private _contentKeyFromTree(tree: FsTree): string {
+    return this._contentKeyFromMap(this._getFileContentMap(tree));
+  }
+
+  /**
+   * Compares two trees by file content (relativePath + blobId).
+   * Ignores mtime differences — trees are equivalent if they have the same
+   * files with the same content. This prevents bounce-back restores from
+   * destroying locally-created files during bidirectional sync.
+   * @param a - First tree to compare
+   * @param b - Second tree to compare
+   */
+  private _treesHaveEquivalentContent(a: FsTree, b: FsTree): boolean {
+    const aFiles = this._getFileContentMap(a);
+    const bFiles = this._getFileContentMap(b);
+
+    if (aFiles.size !== bFiles.size) return false;
+
+    for (const [path, blobId] of aFiles) {
+      if (bFiles.get(path) !== blobId) return false;
+    }
+
+    return true;
   }
 
   /**
@@ -635,40 +872,105 @@ export class FsAgent {
       await this._scanner.watch();
     }
 
-    // Create callback to sync on DB changes
+    // Debounced incoming ref handler: when multiple refs arrive in rapid
+    // succession (e.g. the other side is doing a multi-step Finder operation),
+    // only the LAST ref is processed after a quiet period.
+    let pendingRef: string | null = null;
+    let fromDbTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const processRef = async (treeRef: string) => {
+      // Pause filesystem watching to prevent loops
+      this._scanner.pauseWatch();
+
+      try {
+        // Fetch incoming tree from DB (without restoring yet)
+        const incomingTree = await FsAgent._withTimeout(
+          this._fetchTreeFromDb(db, treeKey, treeRef),
+          this._timeouts.fetchTree,
+          `syncFromDb → fetchTree(${treeKey}@${treeRef.slice(0, 8)}…)`,
+        );
+
+        // Extract current filesystem state for content comparison
+        const currentTree = await FsAgent._withTimeout(
+          this.extract(),
+          this._timeouts.extract,
+          `syncFromDb → extract(${this._rootPath})`,
+        );
+
+        // Compare file content (paths + blobIds, ignoring mtime).
+        // If identical, this is a bounce-back — skip restore to avoid
+        // cleanTarget deleting locally-created files.
+        if (this._treesHaveEquivalentContent(currentTree, incomingTree)) {
+          return;
+        }
+
+        // Content differs — restore from incoming tree
+        await FsAgent._withTimeout(
+          this.restore(incomingTree, undefined, restoreOptions),
+          this._timeouts.restore,
+          `syncFromDb → restore(${treeKey})`,
+        );
+
+        // After restore: re-scan the filesystem so the scanner's internal
+        // tree matches the just-restored state, then store and record the
+        // ref.  When the watcher fires (because restore touched files on
+        // disk), debouncedSync will produce the same content key → skip.
+        //
+        // IMPORTANT: skipNotification must be true here.  This store is
+        // just bookkeeping — recording the current state after restore.
+        // If we let notify fire, Connector broadcasts a ref, the other
+        // side processes it, stores again (also broadcasting), and we get
+        // an extra bounce-back cycle that can race with real file
+        // mutations happening right after the settling period.
+        const postRestoreTree = await this._scanner.scan();
+        const dbAdapter = new FsDbAdapter(db, treeKey);
+        const postRestoreRef = await dbAdapter.storeFsTree(postRestoreTree, {
+          skipNotification: true,
+        });
+        this._lastSentRef = postRestoreRef;
+        this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
+      } catch {
+        /* v8 ignore start -- @preserve */
+        // Don't re-throw - we don't want one sync failure to break the notification system
+      } finally {
+        /* v8 ignore stop -- @preserve */
+        // Always resume watching, even if there was an error
+        this._scanner.resumeWatch();
+      }
+    };
+
+    // Create callback to sync on DB changes.
+    // listen() already handles origin-filtering and ref-level dedup,
+    // so we only need content-level bounce-back detection (in processRef)
+    // and debouncing for rapid incoming refs.
     const syncCallback = async (treeRef: string) => {
       // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
         return;
       }
 
-      // Skip if this is our own broadcast (prevent self-sync loop)
-      /* v8 ignore next 3 -- @preserve */
-      if (treeRef === this._lastSentRef) {
-        return;
-      }
-
-      // Pause filesystem watching to prevent loops
-      this._scanner.pauseWatch();
-
-      try {
-        // Load tree from database and restore to filesystem
-        await this.loadFromDb(db, treeKey, treeRef, undefined, restoreOptions);
-      } catch {
-        /* v8 ignore next 2 -- @preserve */
-        // Don't re-throw - we don't want one sync failure to break the notification system
-      } finally {
-        // Always resume watching, even if there was an error
-        this._scanner.resumeWatch();
-      }
+      // Store latest ref and (re)start debounce timer
+      pendingRef = treeRef;
+      /* v8 ignore next -- @preserve */
+      if (fromDbTimer) clearTimeout(fromDbTimer);
+      fromDbTimer = setTimeout(async () => {
+        fromDbTimer = null;
+        const ref = pendingRef;
+        pendingRef = null;
+        /* v8 ignore if -- @preserve */
+        if (ref) {
+          await processRef(ref);
+        }
+      }, this._timeouts.debounceMs);
     };
 
-    // Register callback with Connector
+    // Register callback with Connector using the safe, deduplicated API
     connector.listen(syncCallback);
 
     // Return cleanup function
     return () => {
-      connector.teardown();
+      if (fromDbTimer) clearTimeout(fromDbTimer);
+      connector.tearDown();
     };
   }
 
@@ -680,16 +982,21 @@ export class FsAgent {
    * @param treeKey - Tree table key (route will be `/${treeKey}`)
    * @param client - Client instance with io and bs properties
    * @param socket - Socket instance for connector communication
-   * @param options - Optional FsAgent options (db and treeKey are set automatically)
+   * @param options - Optional FsAgent options (db and treeKey are set automatically).
+   *   `syncConfig` and `clientIdentity` from these options are forwarded to
+   *   the Connector so that a single config origin governs all layers.
    * @returns Configured FsAgent instance with simplified sync API
    * @example
    * ```typescript
-   * const agent = await FsAgent.fromClient('./my-folder', 'sharedTree', client, socket);
+   * const syncConfig: SyncConfig = { requireAck: true, maxDedupSetSize: 5000 };
+   * const agent = await FsAgent.fromClient(
+   *   './my-folder', 'sharedTree', client, socket, { syncConfig },
+   * );
    * // Simplified sync methods - no db/connector/treeKey needed
-   * await agent.syncToDbSimple({ notify: true });
+   * await agent.syncToDbSimple();
    * await agent.syncFromDbSimple({ cleanTarget: true });
    * // Original methods still work
-   * await agent.syncToDb(db, connector, treeKey, { notify: true });
+   * await agent.syncToDb(db, connector, treeKey);
    * ```
    */
   static async fromClient(
@@ -722,8 +1029,14 @@ export class FsAgent {
     // Create Route from treeKey
     const route = Route.fromFlat(`/${treeKey}`);
 
-    // Create Connector
-    const connector = new Connector(db, route, socket);
+    // Create Connector with centralized SyncConfig and ClientIdentity
+    const connector = new Connector(
+      db,
+      route,
+      socket,
+      options?.syncConfig,
+      options?.clientIdentity,
+    );
 
     // Create FsAgent with client's blob storage
     const agent = new FsAgent(filePath, client.bs, options);

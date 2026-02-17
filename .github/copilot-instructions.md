@@ -120,33 +120,72 @@ From [vitest.config.mts](vitest.config.mts):
 **Critical**: The project maintains 100% coverage across all files. When adding new code:
 
 1. Write tests that execute all code paths
-2. Use `/* v8 ignore next N -- @preserve */` ONLY for truly unreachable defensive code
+2. Use v8 ignore hints ONLY for truly unreachable defensive code
 3. Verify coverage with `pnpm test --coverage`
 
-**Valid v8 ignore patterns**:
+**MANDATORY: Vitest 4.0 Ignore Patterns (ast-v8-to-istanbul)**
+
+Since Vitest 4.0, coverage uses `ast-v8-to-istanbul` which supports **semantic** ignore hints.
+**ALWAYS use semantic hints. NEVER use the old `next N` line-counting pattern.**
+
+All comments MUST include `-- @preserve` to survive esbuild transpilation.
+
+**Allowed patterns:**
+
+| Pattern                                                                      | Meaning                              |
+| ---------------------------------------------------------------------------- | ------------------------------------ |
+| `/* v8 ignore if -- @preserve */`                                            | Ignore the if-branch                 |
+| `/* v8 ignore else -- @preserve */`                                          | Ignore the else-branch               |
+| `/* v8 ignore next -- @preserve */`                                          | Ignore the next statement/expression |
+| `/* v8 ignore file -- @preserve */`                                          | Ignore the entire file               |
+| `/* v8 ignore start -- @preserve */` ... `/* v8 ignore stop -- @preserve */` | Ignore a range of lines              |
+
+**FORBIDDEN patterns (NEVER use):**
 
 ```typescript
-// Defensive null checks that should never trigger
+// ❌ WRONG: Line counting — fragile, breaks on refactoring
 /* v8 ignore next 3 -- @preserve */
+/* v8 ignore next 5 -- @preserve */
+
+// ❌ WRONG: Missing @preserve — esbuild strips the comment
+/* v8 ignore next */
+/* v8 ignore start */
+
+// ❌ WRONG: 'end' instead of 'stop'
+/* v8 ignore end */
+```
+
+**Correct examples:**
+
+```typescript
+// Defensive null check — use 'if' to ignore the entire if-block
+/* v8 ignore if -- @preserve */
 if (!meta) {
   continue;
 }
 
-// Error catch blocks for external failures
+// Error catch blocks — use 'start'/'stop' for multi-line ranges
 try {
   result = await db.get(route, { _hash: currentHash });
 } catch {
-  /* v8 ignore next 3 -- @preserve */
+  /* v8 ignore start -- @preserve */
   // Node not found - might be deleted
   continue;
 }
+/* v8 ignore stop -- @preserve */
 
-// Deprecated constructor patterns (documented as unsupported)
+// Ignore one expression
 /* v8 ignore next -- @preserve */
 if (this._db && this._treeKey) {
-  this._startAutoSync().catch((error) => {
-    console.error('Failed to start auto-sync:', error);
-  });
+  // ...
+}
+
+// Ignore else-branch only
+/* v8 ignore else -- @preserve */
+if (isConnected) {
+  handleConnection();
+} else {
+  // defensive fallback
 }
 ```
 
@@ -252,7 +291,7 @@ it('should reject auto-sync via constructor', async () => {
 4. **Self-broadcast loops**: Remember connectors receive own messages locally - filter with `_lastSentRef`
 5. **Golden updates**: Run `pnpm updateGoldens` after intentional output changes
 6. **Wrong socket pattern**: Use `createSocketPair()` for tests, not single `SocketMock`
-7. **Coverage shortcuts**: Don't use `/* v8 ignore */` to avoid writing tests - only for truly unreachable defensive code
+7. **Coverage shortcuts**: Don't use `/* v8 ignore */` to avoid writing tests - only for truly unreachable defensive code. **NEVER use `/* v8 ignore next N */` line-counting** — use semantic hints (`if`, `else`, `start`/`stop`) instead
 8. **Notification routes**: When using `notify: true`, ensure route matches treeKey (`Route.fromFlat(\`/${treeKey}\`)`), not with `+` suffix
 
 ## Critical Implementation Details
@@ -370,7 +409,81 @@ Uses **pnpm** (v10.11.0). Commands:
 - [doc/fast-coding-guide.md](doc/fast-coding-guide.md): VS Code shortcuts (Cmd+P, Ctrl+D)
 - [ROOT-CAUSE.md](ROOT-CAUSE.md): Documents discovered bugs/issues
 
-## Coding Style
+## Post-Edit Validation (MANDATORY)
+
+**ALWAYS run these checks after editing ANY file. No exceptions.**
+
+1. **Check for TypeScript / lint errors** in every file you touched (use the IDE error checker)
+2. **Run `pnpm exec eslint <changed-files>`** to catch lint violations
+3. **Run `pnpm test`** to verify tests pass and coverage stays at 100%
+4. **Fix all errors before moving on** — never leave red squiggles behind
+
+This applies to source files AND test files. A change is not complete until all diagnostics are clean.
+
+## Git Workflow (MANDATORY)
+
+- **NEVER commit directly to `main`.** Always work on a feature branch.
+- When proposing commits, provide a commit message, wait for user approval, then commit.
+- **`pnpm link` is acceptable** during development for local cross-repo dependencies.
+- **Before PR/merge**: unlink all local overrides (`git restore package.json pnpm-lock.yaml`, remove `pnpm.overrides`), verify tests still pass with published versions.
+
+## Publish Workflow (MANDATORY)
+
+All `@rljson/*` packages share the same publish workflow documented in `doc/develop.md` (or `doc/workflows/develop.md`). **Follow these steps in exact order:**
+
+### Pre-publish checklist
+
+1. **Unlink local overrides** — Remove all `pnpm.overrides` entries that use `link:../...` and restore `package.json` and `pnpm-lock.yaml` to use published versions:
+   ```bash
+   # Remove overrides from package.json (set "overrides": {})
+   # Then reinstall to get published versions:
+   pnpm install
+   ```
+2. **Run tests with published deps** — `pnpm test` must pass with 100% coverage using published (not linked) dependencies.
+3. **Rebuild** — `pnpm run build` (which runs tests via `prebuild`).
+4. **Increase version** — `pnpm version patch --no-git-tag-version` then `git commit -am"Increase version"`.
+5. **Commit ALL files** — including `package.json` and `pnpm-lock.yaml`. Nothing should be left uncommitted.
+
+### Merge & publish steps
+
+```bash
+git rebase main
+node scripts/push-branch.js
+gh pr create --base main --title "<PR title>" --body " "
+gh pr merge --auto --squash
+node scripts/wait-for-pr.js
+node scripts/delete-feature-branch.js
+git checkout main && git pull
+pnpm login
+pnpm publish
+```
+
+### Cross-repo publish order
+
+Packages MUST be published bottom-up by dependency order. A downstream package can only be published after its upstream dependency is on npm.
+
+| Order | Package          | Depends on                              |
+|-------|------------------|-----------------------------------------|
+| 1     | `@rljson/rljson` | — (Layer 0, no `@rljson` deps)          |
+| 2     | `@rljson/io`     | `@rljson/rljson`                        |
+| 3     | `@rljson/bs`     | `@rljson/rljson`, `@rljson/io`          |
+| 4     | `@rljson/db`     | `@rljson/rljson`, `@rljson/io`          |
+| 5     | `@rljson/server` | `@rljson/rljson`, `@rljson/io`, `@rljson/bs`, `@rljson/db` |
+| 6     | `@rljson/fs-agent` | all of the above                      |
+
+After publishing an upstream package, downstream packages must `pnpm update --latest` to pick up the new version before their own publish.
+
+## Dependency Pinning (MANDATORY)
+
+- **ESLint**: Pin to `~9.39.2`. ESLint 10+ breaks the build. Never allow `pnpm update --latest` to bump eslint beyond 9.x.
+  ```jsonc
+  // ✅ CORRECT
+  "eslint": "~9.39.2"
+
+  // ❌ WRONG — will pull in v10 which breaks everything
+  "eslint": "^10.0.0"
+  ```
+- After running `pnpm update --latest`, **always verify** eslint stayed on 9.x: `pnpm ls eslint`.
 
 - **TypeScript**: ESM modules (`"type": "module"`)
 - **Node version**: >=22.14.0

@@ -8,7 +8,7 @@ import { BsMem } from '@rljson/bs';
 import { Connector, Db } from '@rljson/db';
 import { IoMem } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
-import { Client, Server, SocketIoBridge } from '@rljson/server';
+import { Client, ConsoleLogger, Server, SocketIoBridge } from '@rljson/server';
 
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { createServer } from 'node:http';
@@ -78,17 +78,15 @@ async function main() {
   // Create table schema on server
   await createSharedTreeTable(serverIo);
 
-  const server = new Server(route, serverIo, serverBs);
+  const logger = new ConsoleLogger();
+
+  const server = new Server(route, serverIo, serverBs, { logger });
   await server.init();
 
   // Register Socket.IO connections
+  // Auto-disconnect handling is built into the server — no manual listener needed.
   socketIoServer.on('connection', async (socket) => {
-    console.log(`Client connected: ${socket.id}`);
     await server.addSocket(new SocketIoBridge(socket));
-
-    socket.on('disconnect', () => {
-      console.log(`Client disconnected: ${socket.id}`);
-    });
   });
 
   // Start HTTP server
@@ -127,6 +125,8 @@ async function main() {
     new SocketIoBridge(clientSocketA),
     localIoA,
     localBsA,
+    undefined,
+    { logger },
   );
   await clientA.init();
 
@@ -140,9 +140,7 @@ async function main() {
   const agentA = new FsAgent(folderA, clientA.bs);
 
   // Client A starts syncToDb and syncFromDb
-  const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey, {
-    notify: true,
-  });
+  const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey);
   const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey, {
     cleanTarget: true,
   });
@@ -172,6 +170,8 @@ async function main() {
     new SocketIoBridge(clientSocketB),
     localIoB,
     localBsB,
+    undefined,
+    { logger },
   );
   await clientB.init();
 
@@ -185,9 +185,7 @@ async function main() {
   const agentB = new FsAgent(folderB, clientB.bs);
 
   // Start bidirectional sync for Client B
-  const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey, {
-    notify: true,
-  });
+  const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey);
   const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey, {
     cleanTarget: true,
   });
@@ -211,6 +209,10 @@ async function main() {
     stopAfromDb();
     stopBtoDb();
     stopBfromDb();
+
+    await clientA.tearDown();
+    await clientB.tearDown();
+    await server.tearDown();
 
     clientSocketA.disconnect();
     clientSocketB.disconnect();

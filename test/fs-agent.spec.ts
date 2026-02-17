@@ -11,6 +11,7 @@ import {
   createTreesTableCfg,
   InsertHistoryRow,
   Route,
+  type SyncConfig,
   TableCfg,
 } from '@rljson/rljson';
 
@@ -22,12 +23,24 @@ import { FsAgent } from '../src/fs-agent';
 import { FsDbAdapter } from '../src/fs-db-adapter';
 
 /**
- * Creates a mock Connector for tests that don't need real socket communication
+ * Creates a mock Connector for tests that don't need real socket communication.
+ * Also provides a `simulateIncoming` helper to inject a ref as if it arrived
+ * from a remote peer (bypassing origin filtering in listen).
  */
-function createMockConnector(db: Db, treeKey: string) {
+function createMockConnector(db: Db, treeKey: string, syncConfig?: SyncConfig) {
   const route = Route.fromFlat(`/${treeKey}+`);
   const socket = new SocketMock();
-  return new Connector(db, route, socket);
+  const connector = new Connector(db, route, socket, syncConfig);
+
+  /**
+   * Simulates a ref arriving from a remote peer on the same socket.
+   * Uses a different origin than the connector so listen accepts it.
+   */
+  const simulateIncoming = (ref: string) => {
+    socket.emit(connector.events.ref, { o: 'remote-test-origin', r: ref });
+  };
+
+  return Object.assign(connector, { simulateIncoming });
 }
 
 describe('FsAgent', () => {
@@ -868,6 +881,46 @@ describe('FsAgent', () => {
       expect(historyTable._data.length).toBeGreaterThanOrEqual(2);
     });
 
+    it('should use sendWithAck when syncConfig.requireAck is true', async () => {
+      // Setup initial file
+      await writeFile(join(testDir, 'ack-test.txt'), 'initial');
+
+      // Setup database
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      // Create connector with requireAck enabled and short timeout
+      const syncConfig: SyncConfig = { requireAck: true, ackTimeoutMs: 500 };
+      const connector = createMockConnector(db, treeKey, syncConfig);
+
+      // Simulate server ACK: listen for refs, echo matching ACK
+      const socket = connector.socket;
+      socket.on(connector.events.ref, (payload: { r: string }) => {
+        setTimeout(() => {
+          socket.emit(connector.events.ack, { r: payload.r });
+        }, 10);
+      });
+
+      // Spy on sendWithAck
+      const sendWithAckSpy = vi.spyOn(connector, 'sendWithAck');
+
+      const agent = new FsAgent(testDir);
+      const stopSync = await agent.syncToDb(db, connector, treeKey);
+
+      // Wait for initial sync cycle
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Verify sendWithAck was used (not plain send) for initial ref
+      expect(sendWithAckSpy).toHaveBeenCalled();
+
+      stopSync();
+      sendWithAckSpy.mockRestore();
+    });
+
     it('should stop watching when cleanup function is called', async () => {
       // Setup initial file
       await writeFile(join(testDir, 'watched2.txt'), 'initial');
@@ -979,7 +1032,7 @@ describe('FsAgent', () => {
       db.notify.register(notifyRoute, syncCallback as any);
 
       // Store with notifications enabled
-      await agent.storeInDb(db, treeKey, { notify: true });
+      await agent.storeInDb(db, treeKey);
 
       // Wait for async notification to complete
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -993,7 +1046,7 @@ describe('FsAgent', () => {
       const receivedHistoryRow = firstCall[0] as InsertHistoryRow<any>;
       expect(receivedHistoryRow).toBeDefined();
       expect(receivedHistoryRow[`${treeKey}Ref`]).toBe(modifiedRef);
-      expect(receivedHistoryRow.route).toBe(`/${treeKey}/${modifiedRef}`);
+      expect(receivedHistoryRow.route).toBe(`/${treeKey}`);
       expect(receivedHistoryRow.timeId).toBeDefined();
 
       // Verify new version created (initial + modified = 2 total)
@@ -1155,8 +1208,8 @@ describe('FsAgent', () => {
       const dbAdapter = new FsDbAdapter(db, treeKey);
       const treeRef = await dbAdapter.storeFsTree(newTree);
 
-      // Manually send the ref through connector to trigger sync
-      connector.send(treeRef);
+      // Simulate incoming ref from remote peer to trigger sync
+      connector.simulateIncoming(treeRef);
 
       // Wait for sync to complete
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -1618,9 +1671,9 @@ describe('FsAgent', () => {
       const stopSync = await agent.syncFromDb(db, connector, treeKey);
 
       // Trigger with invalid treeRef types - should be ignored gracefully
-      connector.send(null as any);
-      connector.send(123 as any);
-      connector.send({} as any);
+      connector.simulateIncoming(null as any);
+      connector.simulateIncoming(123 as any);
+      connector.simulateIncoming({} as any);
 
       // Wait a bit
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1645,8 +1698,8 @@ describe('FsAgent', () => {
       const connector = createMockConnector(db, treeKey);
       const stopSync = await agent.syncFromDb(db, connector, treeKey);
 
-      // Manually trigger with missing treeRef by sending empty string via connector
-      connector.send('');
+      // Simulate incoming empty ref from remote peer
+      connector.simulateIncoming('');
 
       // Clean up
       stopSync();
@@ -1668,8 +1721,8 @@ describe('FsAgent', () => {
       const connector = createMockConnector(db, treeKey);
       const stopSync = await agent.syncFromDb(db, connector, treeKey);
 
-      // Trigger with invalid treeRef that will cause loadFromDb to fail
-      connector.send('invalidTreeRef');
+      // Simulate incoming ref from remote peer that will cause loadFromDb to fail
+      connector.simulateIncoming('invalidTreeRef');
 
       // Wait a bit for the async operation
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1891,6 +1944,180 @@ describe('FsAgent', () => {
       // Verify method is still callable after cleanup (should not throw)
       const stopSync2 = await agent.syncFromDbSimple({ cleanTarget: true });
       stopSync2();
+    });
+  });
+
+  // =========================================================================
+  // Timeout Detection
+  // =========================================================================
+  describe('timeout detection', () => {
+    it('should use default timeout values', () => {
+      const agent = new FsAgent(testDir);
+      expect(agent.timeouts.dbQuery).toBe(10_000);
+      expect(agent.timeouts.fetchTree).toBe(20_000);
+      expect(agent.timeouts.extract).toBe(15_000);
+      expect(agent.timeouts.restore).toBe(15_000);
+      expect(agent.timeouts.syncCallback).toBe(25_000);
+      expect(agent.timeouts.debounceMs).toBe(300);
+    });
+
+    it('should accept custom timeout values', () => {
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: {
+          dbQuery: 1_000,
+          fetchTree: 2_000,
+          extract: 3_000,
+          restore: 4_000,
+          syncCallback: 5_000,
+          debounceMs: 100,
+        },
+      });
+      expect(agent.timeouts.dbQuery).toBe(1_000);
+      expect(agent.timeouts.fetchTree).toBe(2_000);
+      expect(agent.timeouts.extract).toBe(3_000);
+      expect(agent.timeouts.restore).toBe(4_000);
+      expect(agent.timeouts.syncCallback).toBe(5_000);
+      expect(agent.timeouts.debounceMs).toBe(100);
+    });
+
+    it('should allow partial timeout overrides', () => {
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { dbQuery: 500 },
+      });
+      expect(agent.timeouts.dbQuery).toBe(500);
+      // Remaining use defaults
+      expect(agent.timeouts.fetchTree).toBe(20_000);
+      expect(agent.timeouts.extract).toBe(15_000);
+    });
+
+    it('should reject with timeout error when loadFromDb db.get() hangs', async () => {
+      // Create a Db whose get() never resolves
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'timeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      // Monkey-patch db.get to never resolve
+      const originalGet = db.get.bind(db);
+      db.get = () => new Promise(() => {});
+
+      // Create agent with very short timeouts
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { dbQuery: 50, fetchTree: 100 },
+      });
+
+      await expect(
+        agent.loadFromDb(db, treeKey, 'nonexistent-hash'),
+      ).rejects.toThrow(/Timeout after/);
+
+      // Restore
+      db.get = originalGet;
+    });
+
+    it('should reject storeInDb with timeout when io.write hangs', async () => {
+      // Create a valid file to scan
+      await writeFile(join(testDir, 'hello.txt'), 'world');
+
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'storeTimeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { fetchTree: 50 },
+      });
+
+      // Monkey-patch io.write so it never resolves
+      const original = io.write.bind(io);
+      io.write = () => new Promise(() => {});
+
+      const connector = createMockConnector(db, treeKey);
+
+      // syncToDb calls storeInDb which is guarded by fetchTree timeout
+      await expect(agent.syncToDb(db, connector, treeKey)).rejects.toThrow(
+        /Timeout after/,
+      );
+
+      io.write = original;
+    });
+
+    it('should survive syncFromDb timeout without crashing the watcher', async () => {
+      // Setup real DB with tree
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'syncFromTimeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      await writeFile(join(testDir, 'file.txt'), 'content');
+
+      // Agent with very short fetch timeout
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { fetchTree: 50, dbQuery: 25 },
+      });
+
+      const connector = createMockConnector(db, treeKey);
+
+      // Monkey-patch db.get to never resolve (simulates hung socket)
+      const originalGet = db.get.bind(db);
+      db.get = () => new Promise(() => {});
+
+      // syncFromDb should still return a stop function (setup succeeds)
+      const stopSync = await agent.syncFromDb(db, connector, treeKey);
+      expect(stopSync).toBeDefined();
+      expect(typeof stopSync).toBe('function');
+
+      // Simulate incoming ref from remote peer — callback fires but
+      // db.get hangs. The timeout catches it and the catch block swallows
+      // the error. The watcher should NOT crash.
+      connector.simulateIncoming('fake-ref-that-will-timeout');
+
+      // Give the callback time to fire and timeout
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Cleanup
+      stopSync();
+      db.get = originalGet;
+      agent.dispose();
+    });
+
+    it('should survive syncToDb callback timeout without crashing', async () => {
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'syncToTimeoutTree';
+      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
+      await db.core.createTableWithInsertHistory(treeTableCfg);
+
+      await writeFile(join(testDir, 'file.txt'), 'initial');
+
+      // Start syncToDb with real DB (initial store succeeds)
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { fetchTree: 50 },
+      });
+      const connector = createMockConnector(db, treeKey);
+      const stopSync = await agent.syncToDb(db, connector, treeKey);
+
+      // Now break the IO so subsequent stores hang
+      const original = io.write.bind(io);
+      io.write = () => new Promise(() => {});
+
+      // Trigger a filesystem change — the syncToDb callback fires
+      // but storeFsTree hangs and gets caught by the timeout + catch block
+      await writeFile(join(testDir, 'file.txt'), 'changed');
+
+      // Give the watcher + callback time to fire and timeout
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // Cleanup — should not throw
+      stopSync();
+      io.write = original;
+      agent.dispose();
     });
   });
 });
