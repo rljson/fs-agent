@@ -314,6 +314,37 @@ Stops all syncing and cleans up resources.
 agent.dispose();
 ```
 
+##### `static fromClient(filePath, treeKey, client, socket, options?): Promise<FsAgent>`
+
+Factory method that creates an FsAgent wired to a `@rljson/server` Client. Returns an enhanced agent with simplified sync methods:
+
+```typescript
+import { Client } from '@rljson/server';
+
+const agent = await FsAgent.fromClient(
+  './my-project',
+  'sharedTree',
+  client,
+  socket,
+  { ignore: ['node_modules', '.git'] },
+);
+
+// Simplified sync (no need to manage Db/Connector manually)
+const stopToDb = await agent.syncToDbSimple({ notify: true });
+const stopFromDb = await agent.syncFromDbSimple({ cleanTarget: true });
+
+// Stop when done
+stopToDb();
+stopFromDb();
+```
+
+**Reconnect handling:** When the Client supports `onDisconnect` / `onReconnect` (available since `@rljson/server` ≥ 0.0.10), `fromClient()` automatically:
+
+- **Pauses** the filesystem watcher on disconnect (prevents futile sync attempts while the server is unreachable)
+- **Resumes** the watcher on reconnect (the server's bootstrap message triggers a catch-up sync via the Connector)
+
+No application code is needed — the wiring is built into `fromClient()`. Clients created with older server versions that lack these methods continue to work without interruption.
+
 ### FsScanner
 
 Low-level filesystem scanner (usually accessed via `agent.scanner`).
