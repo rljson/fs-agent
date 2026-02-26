@@ -1052,6 +1052,24 @@ export class FsAgent {
       return agent.syncFromDb(db, connector, treeKey, restoreOpts);
     };
 
+    // Register reconnect handling if client supports it.
+    // On disconnect: pause the filesystem watcher to prevent sync attempts
+    // that will fail while the connection is down.
+    // On reconnect: resume the watcher so filesystem changes are processed.
+    // The server automatically sends a bootstrap ref on reconnect, which
+    // triggers syncFromDb to catch up on any missed changes.
+    if (typeof client.onDisconnect === 'function') {
+      client.onDisconnect(() => {
+        agent.scanner.pauseWatch();
+      });
+    }
+
+    if (typeof client.onReconnect === 'function') {
+      client.onReconnect(() => {
+        agent.scanner.resumeWatch();
+      });
+    }
+
     return enhancedAgent;
   }
 

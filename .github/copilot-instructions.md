@@ -420,10 +420,13 @@ Uses **pnpm** (v10.11.0). Commands:
 
 This applies to source files AND test files. A change is not complete until all diagnostics are clean.
 
+5. **Update READMEs** — When adding or changing public API, features, or behavior, update the relevant README files (README.public.md, README.architecture.md, etc.). A feature is not complete until its documentation matches.
+
 ## Git Workflow (MANDATORY)
 
 - **NEVER commit directly to `main`.** Always work on a feature branch.
 - When proposing commits, provide a commit message, wait for user approval, then commit.
+- **GitKraken MCP tools** (`mcp_gitkraken_git_status`, `mcp_gitkraken_git_add_or_commit`, etc.) may timeout in large workspaces. **Always use `run_in_terminal` with raw git commands** (e.g., `git status --short`, `git add .`, `git commit -am"..."`) instead.
 - **`pnpm link` is acceptable** during development for local cross-repo dependencies.
 - **Before PR/merge**: unlink all local overrides (`git restore package.json pnpm-lock.yaml`, remove `pnpm.overrides`), verify tests still pass with published versions.
 
@@ -456,6 +459,17 @@ node scripts/delete-feature-branch.js
 git checkout main && git pull
 pnpm login
 pnpm publish
+```
+
+**CRITICAL: Always use exactly `pnpm publish` — no flags, no piping.**
+
+```bash
+# ✅ CORRECT
+pnpm publish
+
+# ❌ WRONG — never add flags or pipe output
+pnpm publish --no-git-checks
+pnpm publish 2>&1 | tail -15
 ```
 
 ### Cross-repo publish order

@@ -1945,6 +1945,77 @@ describe('FsAgent', () => {
       const stopSync2 = await agent.syncFromDbSimple({ cleanTarget: true });
       stopSync2();
     });
+
+    it('should pause watcher on disconnect when client supports it', async () => {
+      await writeFile(join(testDir, 'reconnect.txt'), 'data');
+
+      const io = new IoMem();
+      await io.init();
+      const bs = new BsMem();
+
+      const disconnectCallbacks: Array<(reason: string) => void> = [];
+      const reconnectCallbacks: Array<() => void> = [];
+
+      const client = {
+        io,
+        bs,
+        onDisconnect: (cb: (reason: string) => void) => {
+          disconnectCallbacks.push(cb);
+        },
+        onReconnect: (cb: () => void) => {
+          reconnectCallbacks.push(cb);
+        },
+      };
+
+      const socket = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+
+      const agent = await FsAgent.fromClient(
+        testDir,
+        'reconnectTree',
+        client,
+        socket,
+      );
+
+      // Verify handlers were registered
+      expect(disconnectCallbacks.length).toBe(1);
+      expect(reconnectCallbacks.length).toBe(1);
+
+      // Spy on scanner methods
+      const pauseSpy = vi.spyOn(agent.scanner, 'pauseWatch');
+      const resumeSpy = vi.spyOn(agent.scanner, 'resumeWatch');
+
+      // Simulate disconnect
+      disconnectCallbacks[0]('transport close');
+      expect(pauseSpy).toHaveBeenCalledTimes(1);
+
+      // Simulate reconnect
+      reconnectCallbacks[0]();
+      expect(resumeSpy).toHaveBeenCalledTimes(1);
+
+      pauseSpy.mockRestore();
+      resumeSpy.mockRestore();
+    });
+
+    it('should work without reconnect methods on client', async () => {
+      await writeFile(join(testDir, 'no-reconnect.txt'), 'data');
+
+      const io = new IoMem();
+      await io.init();
+      const bs = new BsMem();
+      const client = { io, bs }; // No onDisconnect/onReconnect
+
+      const socket = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+
+      // Should not throw — gracefully skips reconnect registration
+      const agent = await FsAgent.fromClient(
+        testDir,
+        'noReconnectTree',
+        client,
+        socket,
+      );
+      expect(agent).toBeDefined();
+      expect(agent.scanner).toBeDefined();
+    });
   });
 
   // =========================================================================
