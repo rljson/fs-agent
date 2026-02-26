@@ -63,7 +63,9 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ],
-    "overrides": {}
+    "overrides": {
+      "@rljson/rljson": "^0.0.78"
+    }
   },
   "packageManager": "pnpm@10.11.0"
 }
