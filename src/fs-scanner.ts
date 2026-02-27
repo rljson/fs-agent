@@ -378,18 +378,36 @@ export class FsScanner {
         });
       }
     } catch {
-      // Check if root directory still exists
+      // stat() or scan() failed.  First check whether the root
+      // directory still exists — only if it's gone should we stop
+      // watching.
+      let rootExists = false;
       try {
         await stat(this._rootPath);
-        // Root exists, so file was deleted
-        await this.scan();
-        await this._notifyChange({
-          type: 'deleted',
-          path: relativePath,
-        });
+        rootExists = true;
       } catch {
         // Root directory no longer exists - stop watching
         this.stopWatch();
+      }
+
+      // Root exists → the failure was a transient scan error (e.g. a
+      // file locked by another process such as Windows Explorer).
+      // Try scan+notify, but if it still fails, just skip this event —
+      // the watcher stays alive for the next change.
+      /* v8 ignore if -- @preserve */
+      if (rootExists) {
+        try {
+          await this.scan();
+          await this._notifyChange({
+            type: 'deleted',
+            path: relativePath,
+          });
+        } catch {
+          // Transient failure (locked file, etc.) — skip this event.
+          // The watcher remains active; the next filesystem event will
+          // trigger a fresh scan that should succeed once the file is
+          // no longer locked.
+        }
       }
     }
   }
