@@ -394,7 +394,6 @@ export class FsScanner {
       // file locked by another process such as Windows Explorer).
       // Try scan+notify, but if it still fails, just skip this event —
       // the watcher stays alive for the next change.
-      /* v8 ignore if -- @preserve */
       if (rootExists) {
         try {
           await this.scan();
