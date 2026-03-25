@@ -7,6 +7,7 @@
 import { Bs, BsMem } from '@rljson/bs';
 import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 
+import { appendFileSync } from 'fs';
 import { mkdir, readdir, rm, utimes, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
@@ -104,6 +105,9 @@ const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
   debounceMs: 300,
 };
 
+/** Filename for sync error log written to the sync folder */
+export const SYNC_ERROR_FILE = '.sync-errors.log';
+
 // .............................................................................
 // FsAgent Class
 // .............................................................................
@@ -131,7 +135,11 @@ export class FsAgent {
     this._db = options.db;
     this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
-    this._scanner = new FsScanner(rootPath, { ...options, bs: this._bs });
+    this._scanner = new FsScanner(rootPath, {
+      ...options,
+      ignore: [...(options.ignore || []), SYNC_ERROR_FILE],
+      bs: this._bs,
+    });
     this._adapter = new FsBlobAdapter(this._bs);
 
     // Automatically start syncing if db and treeKey are provided
@@ -181,6 +189,24 @@ export class FsAgent {
    */
   get timeouts(): Required<TimeoutConfig> {
     return this._timeouts;
+  }
+
+  /**
+   * Appends a sync error entry to the error log file in the sync folder.
+   * Uses synchronous I/O to guarantee the write completes even in catch blocks.
+   * @param context - Label identifying where the error occurred
+   * @param err - The error value caught
+   */
+  _writeSyncError(context: string, err: unknown): void {
+    try {
+      const ts = new Date().toISOString();
+      const msg =
+        err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
+      const entry = `[${ts}] ${context}: ${msg}\n`;
+      appendFileSync(join(this._rootPath, SYNC_ERROR_FILE), entry);
+    } catch {
+      // If writing itself fails (e.g. rootPath gone), silently ignore
+    }
   }
 
   /**
@@ -510,6 +536,16 @@ export class FsAgent {
         }
         /* v8 ignore start -- @preserve */
         // Node not found - might be a blob reference or deleted
+        const errMsg =
+          error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[FsAgent] _fetchTreeRecursively: db.get failed for ` +
+            `hash=${currentHash.slice(0, 8)}…: ${errMsg}`,
+        );
+        this._writeSyncError(
+          `fetchTree/db.get(${currentHash.slice(0, 8)}…)`,
+          error,
+        );
         continue;
       }
       /* v8 ignore stop -- @preserve */
@@ -768,9 +804,11 @@ export class FsAgent {
             if (ref) {
               await this._sendRef(connector, ref);
             }
-          } catch {
+          } catch (err) {
             /* v8 ignore start -- @preserve */
             // Don't re-throw — one sync failure must not crash the watcher
+            console.error('[FsAgent] syncToDb failed:', err);
+            this._writeSyncError('syncToDb', err);
           }
           /* v8 ignore stop -- @preserve */
         }
@@ -890,6 +928,13 @@ export class FsAgent {
           `syncFromDb → fetchTree(${treeKey}@${treeRef.slice(0, 8)}…)`,
         );
 
+        // Log fetch result for diagnostics
+        const incomingNodeCount = incomingTree.trees.size;
+        console.log(
+          `[FsAgent] syncFromDb: fetched tree with ${incomingNodeCount} nodes ` +
+            `for ref=${treeRef.slice(0, 8)}…`,
+        );
+
         // Extract current filesystem state for content comparison
         const currentTree = await FsAgent._withTimeout(
           this.extract(),
@@ -901,6 +946,14 @@ export class FsAgent {
         // If identical, this is a bounce-back — skip restore to avoid
         // cleanTarget deleting locally-created files.
         if (this._treesHaveEquivalentContent(currentTree, incomingTree)) {
+          const incomingFiles = this._getFileContentMap(incomingTree);
+          const currentFiles = this._getFileContentMap(currentTree);
+          console.log(
+            `[FsAgent] syncFromDb: equivalent content, skipping restore ` +
+              `(incoming=${incomingFiles.size} entries, ` +
+              `current=${currentFiles.size} entries, ` +
+              `ref=${treeRef.slice(0, 8)}…)`,
+          );
           return;
         }
 
@@ -929,9 +982,11 @@ export class FsAgent {
         });
         this._lastSentRef = postRestoreRef;
         this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
-      } catch {
+      } catch (err) {
         /* v8 ignore start -- @preserve */
         // Don't re-throw - we don't want one sync failure to break the notification system
+        console.error('[FsAgent] syncFromDb processRef failed:', err);
+        this._writeSyncError('syncFromDb/processRef', err);
       } finally {
         /* v8 ignore stop -- @preserve */
         // Always resume watching, even if there was an error

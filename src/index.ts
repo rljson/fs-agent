@@ -6,6 +6,7 @@
 
 export {
   FsAgent,
+  SYNC_ERROR_FILE,
   type FsAgentOptions,
   type RestoreOptions,
   type TimeoutConfig,
