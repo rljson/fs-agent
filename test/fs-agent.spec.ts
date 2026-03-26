@@ -15,11 +15,12 @@ import {
   TableCfg,
 } from '@rljson/rljson';
 
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { FsAgent } from '../src/fs-agent';
+import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent';
 import { FsDbAdapter } from '../src/fs-db-adapter';
 
 /**
@@ -2189,6 +2190,66 @@ describe('FsAgent', () => {
       stopSync();
       io.write = original;
       agent.dispose();
+    });
+  });
+
+  describe('_writeSyncError', () => {
+    it('should write error to .sync-errors.log file', () => {
+      const agent = new FsAgent(testDir);
+      const error = new Error('blob not found: abc123');
+
+      agent._writeSyncError('syncFromDb/processRef', error);
+
+      const logPath = join(testDir, SYNC_ERROR_FILE);
+      expect(existsSync(logPath)).toBe(true);
+
+      const content = readFileSync(logPath, 'utf-8');
+      expect(content).toContain('syncFromDb/processRef');
+      expect(content).toContain('blob not found: abc123');
+    });
+
+    it('should append multiple errors', () => {
+      const agent = new FsAgent(testDir);
+
+      agent._writeSyncError('syncToDb', new Error('first'));
+      agent._writeSyncError('syncFromDb', new Error('second'));
+
+      const content = readFileSync(join(testDir, SYNC_ERROR_FILE), 'utf-8');
+      expect(content).toContain('first');
+      expect(content).toContain('second');
+    });
+
+    it('should handle non-Error values', () => {
+      const agent = new FsAgent(testDir);
+
+      agent._writeSyncError('test', 'plain string error');
+
+      const content = readFileSync(join(testDir, SYNC_ERROR_FILE), 'utf-8');
+      expect(content).toContain('plain string error');
+    });
+
+    it('should silently ignore write failures', () => {
+      const agent = new FsAgent('/nonexistent/path/that/does/not/exist');
+      // Should not throw
+      agent._writeSyncError('test', new Error('should not crash'));
+    });
+
+    it('should not include .sync-errors.log in scanned tree', async () => {
+      // Create a file and the sync error log
+      await writeFile(join(testDir, 'real-file.txt'), 'content');
+      writeFileSync(join(testDir, SYNC_ERROR_FILE), 'some error\n');
+
+      const agent = new FsAgent(testDir);
+      const tree = await agent.extract();
+
+      // Collect all meta.name values from tree nodes
+      const names: string[] = [];
+      for (const node of tree.trees.values()) {
+        const meta = node.meta as { name?: string } | null;
+        if (meta?.name) names.push(meta.name);
+      }
+      expect(names).toContain('real-file.txt');
+      expect(names).not.toContain(SYNC_ERROR_FILE);
     });
   });
 });
