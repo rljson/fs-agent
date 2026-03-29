@@ -93,6 +93,18 @@ export interface TimeoutConfig {
    * Also applies to incoming database refs in syncFromDb.
    */
   debounceMs?: number;
+  /**
+   * Number of retries for processRef in syncFromDb. Default: 3.
+   * When a ref fails to process (e.g. db.get timeout because the IoPeer
+   * transport hasn't connected yet), the ref is retried this many times
+   * with increasing delay before being dropped.
+   */
+  processRefRetries?: number;
+  /**
+   * Base delay between processRef retries (milliseconds). Default: 5 000 ms.
+   * Each retry waits `attempt * processRefRetryDelayMs` (i.e. 5s, 10s, 15s).
+   */
+  processRefRetryDelayMs?: number;
 }
 
 /** Sensible defaults – every operation is bounded */
@@ -103,6 +115,8 @@ const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
   restore: 15_000,
   syncCallback: 25_000,
   debounceMs: 300,
+  processRefRetries: 3,
+  processRefRetryDelayMs: 5_000,
 };
 
 /** Filename for sync error log written to the sync folder */
@@ -917,80 +931,103 @@ export class FsAgent {
     let fromDbTimer: ReturnType<typeof setTimeout> | null = null;
 
     const processRef = async (treeRef: string) => {
-      // Pause filesystem watching to prevent loops
-      this._scanner.pauseWatch();
+      const maxAttempts = this._timeouts.processRefRetries + 1;
 
-      try {
-        // Fetch incoming tree from DB (without restoring yet)
-        const incomingTree = await FsAgent._withTimeout(
-          this._fetchTreeFromDb(db, treeKey, treeRef),
-          this._timeouts.fetchTree,
-          `syncFromDb → fetchTree(${treeKey}@${treeRef.slice(0, 8)}…)`,
-        );
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        // Pause filesystem watching to prevent loops
+        this._scanner.pauseWatch();
 
-        // Log fetch result for diagnostics
-        const incomingNodeCount = incomingTree.trees.size;
-        console.log(
-          `[FsAgent] syncFromDb: fetched tree with ${incomingNodeCount} nodes ` +
-            `for ref=${treeRef.slice(0, 8)}…`,
-        );
-
-        // Extract current filesystem state for content comparison
-        const currentTree = await FsAgent._withTimeout(
-          this.extract(),
-          this._timeouts.extract,
-          `syncFromDb → extract(${this._rootPath})`,
-        );
-
-        // Compare file content (paths + blobIds, ignoring mtime).
-        // If identical, this is a bounce-back — skip restore to avoid
-        // cleanTarget deleting locally-created files.
-        if (this._treesHaveEquivalentContent(currentTree, incomingTree)) {
-          const incomingFiles = this._getFileContentMap(incomingTree);
-          const currentFiles = this._getFileContentMap(currentTree);
-          console.log(
-            `[FsAgent] syncFromDb: equivalent content, skipping restore ` +
-              `(incoming=${incomingFiles.size} entries, ` +
-              `current=${currentFiles.size} entries, ` +
-              `ref=${treeRef.slice(0, 8)}…)`,
+        try {
+          // Fetch incoming tree from DB (without restoring yet)
+          const incomingTree = await FsAgent._withTimeout(
+            this._fetchTreeFromDb(db, treeKey, treeRef),
+            this._timeouts.fetchTree,
+            `syncFromDb → fetchTree(${treeKey}@${treeRef.slice(0, 8)}…)`,
           );
-          return;
+
+          // Log fetch result for diagnostics
+          const incomingNodeCount = incomingTree.trees.size;
+          console.log(
+            `[FsAgent] syncFromDb: fetched tree with ${incomingNodeCount} nodes ` +
+              `for ref=${treeRef.slice(0, 8)}…`,
+          );
+
+          // Extract current filesystem state for content comparison
+          const currentTree = await FsAgent._withTimeout(
+            this.extract(),
+            this._timeouts.extract,
+            `syncFromDb → extract(${this._rootPath})`,
+          );
+
+          // Compare file content (paths + blobIds, ignoring mtime).
+          // If identical, this is a bounce-back — skip restore to avoid
+          // cleanTarget deleting locally-created files.
+          if (this._treesHaveEquivalentContent(currentTree, incomingTree)) {
+            const incomingFiles = this._getFileContentMap(incomingTree);
+            const currentFiles = this._getFileContentMap(currentTree);
+            console.log(
+              `[FsAgent] syncFromDb: equivalent content, skipping restore ` +
+                `(incoming=${incomingFiles.size} entries, ` +
+                `current=${currentFiles.size} entries, ` +
+                `ref=${treeRef.slice(0, 8)}…)`,
+            );
+            return;
+          }
+
+          // Content differs — restore from incoming tree
+          await FsAgent._withTimeout(
+            this.restore(incomingTree, undefined, restoreOptions),
+            this._timeouts.restore,
+            `syncFromDb → restore(${treeKey})`,
+          );
+
+          // After restore: re-scan the filesystem so the scanner's internal
+          // tree matches the just-restored state, then store and record the
+          // ref.  When the watcher fires (because restore touched files on
+          // disk), debouncedSync will produce the same content key → skip.
+          //
+          // IMPORTANT: skipNotification must be true here.  This store is
+          // just bookkeeping — recording the current state after restore.
+          // If we let notify fire, Connector broadcasts a ref, the other
+          // side processes it, stores again (also broadcasting), and we get
+          // an extra bounce-back cycle that can race with real file
+          // mutations happening right after the settling period.
+          const postRestoreTree = await this._scanner.scan();
+          const dbAdapter = new FsDbAdapter(db, treeKey);
+          const postRestoreRef = await dbAdapter.storeFsTree(postRestoreTree, {
+            skipNotification: true,
+          });
+          this._lastSentRef = postRestoreRef;
+          this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
+          return; // Success — exit retry loop
+        } catch (err) {
+          /* v8 ignore start -- @preserve */
+          if (attempt === maxAttempts) {
+            // Final attempt failed — log and drop
+            console.error(
+              `[FsAgent] syncFromDb processRef failed after ${maxAttempts} attempts:`,
+              err,
+            );
+            this._writeSyncError('syncFromDb/processRef', err);
+          } else {
+            const delaySec = (attempt * this._timeouts.processRefRetryDelayMs) / 1000;
+            console.warn(
+              `[FsAgent] syncFromDb: attempt ${attempt}/${maxAttempts} failed ` +
+                `for ref=${treeRef.slice(0, 8)}…, retrying in ${delaySec}s: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        } finally {
+          /* v8 ignore stop -- @preserve */
+          // Always resume watching, even if there was an error
+          this._scanner.resumeWatch();
         }
 
-        // Content differs — restore from incoming tree
-        await FsAgent._withTimeout(
-          this.restore(incomingTree, undefined, restoreOptions),
-          this._timeouts.restore,
-          `syncFromDb → restore(${treeKey})`,
+        // Wait before next attempt (only reached on non-final failure)
+        /* v8 ignore next -- @preserve */
+        await new Promise((r) =>
+          setTimeout(r, attempt * this._timeouts.processRefRetryDelayMs),
         );
-
-        // After restore: re-scan the filesystem so the scanner's internal
-        // tree matches the just-restored state, then store and record the
-        // ref.  When the watcher fires (because restore touched files on
-        // disk), debouncedSync will produce the same content key → skip.
-        //
-        // IMPORTANT: skipNotification must be true here.  This store is
-        // just bookkeeping — recording the current state after restore.
-        // If we let notify fire, Connector broadcasts a ref, the other
-        // side processes it, stores again (also broadcasting), and we get
-        // an extra bounce-back cycle that can race with real file
-        // mutations happening right after the settling period.
-        const postRestoreTree = await this._scanner.scan();
-        const dbAdapter = new FsDbAdapter(db, treeKey);
-        const postRestoreRef = await dbAdapter.storeFsTree(postRestoreTree, {
-          skipNotification: true,
-        });
-        this._lastSentRef = postRestoreRef;
-        this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
-      } catch (err) {
-        /* v8 ignore start -- @preserve */
-        // Don't re-throw - we don't want one sync failure to break the notification system
-        console.error('[FsAgent] syncFromDb processRef failed:', err);
-        this._writeSyncError('syncFromDb/processRef', err);
-      } finally {
-        /* v8 ignore stop -- @preserve */
-        // Always resume watching, even if there was an error
-        this._scanner.resumeWatch();
       }
     };
 

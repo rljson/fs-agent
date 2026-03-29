@@ -747,9 +747,19 @@ const agent = new FsAgent('./my-project', bs, {
     restore: 15_000,      // Filesystem restore (default: 15s)
     syncCallback: 25_000, // Overall syncFromDb callback (default: 25s)
     debounceMs: 300,      // Coalesce rapid FS events (default: 300ms)
+    processRefRetries: 3,       // Retry failed refs before dropping (default: 3)
+    processRefRetryDelayMs: 5_000, // Base delay between retries (default: 5s)
   },
 });
 ```
+
+### processRef Retry Behavior
+
+When `syncFromDb` receives a tree ref and fails to process it (e.g. `db.get`
+times out because the IoPeer transport hasn't connected yet), the ref is
+retried up to `processRefRetries` times with increasing delay
+(`attempt * processRefRetryDelayMs`). This prevents a single transient
+timeout from permanently breaking the sync pipeline.
 
 ## Bounce-Back Prevention
 
