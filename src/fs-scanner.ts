@@ -98,6 +98,7 @@ export class FsScanner {
   private _options: FsScanOptions;
   private _bs: Bs;
   private _paused: boolean = false;
+  private _missedChangesDuringPause: boolean = false;
 
   constructor(rootPath: string, options: FsScanOptions = {}) {
     this._rootPath = rootPath;
@@ -350,8 +351,9 @@ export class FsScanner {
     _eventType: string,
     filename: string,
   ): Promise<void> {
-    // Skip processing if paused
+    // Skip processing if paused — but record that we missed a change
     if (this._paused) {
+      this._missedChangesDuringPause = true;
       return;
     }
 
@@ -459,13 +461,40 @@ export class FsScanner {
    */
   pauseWatch(): void {
     this._paused = true;
+    this._missedChangesDuringPause = false;
   }
 
   /**
-   * Resume file change notifications
+   * Resume file change notifications.
+   * If any filesystem events were missed during the pause, triggers
+   * an asynchronous rescan so that syncToDb can detect and push the changes.
    */
   resumeWatch(): void {
+    const missedChanges = this._missedChangesDuringPause;
     this._paused = false;
+    this._missedChangesDuringPause = false;
+    if (missedChanges) {
+      void this._rescanAfterPause();
+    }
+  }
+
+  /**
+   * Re-scan the filesystem and fire onChange callbacks to catch modifications
+   * that were missed while watching was paused.
+   */
+  private async _rescanAfterPause(): Promise<void> {
+    try {
+      await this.scan();
+      /* v8 ignore if -- @preserve */
+      if (this._paused) {
+        return;
+      }
+      await this._notifyChange({ type: 'modified', path: '.' });
+    } catch {
+      /* v8 ignore start -- @preserve */
+      // Ignore — the next filesystem event will trigger a fresh scan.
+    }
+    /* v8 ignore stop -- @preserve */
   }
 
   getTreeByHash(treeHash: TreeRef): Tree | undefined {

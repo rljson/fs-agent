@@ -550,8 +550,7 @@ export class FsAgent {
         }
         /* v8 ignore start -- @preserve */
         // Node not found - might be a blob reference or deleted
-        const errMsg =
-          error instanceof Error ? error.message : String(error);
+        const errMsg = error instanceof Error ? error.message : String(error);
         console.warn(
           `[FsAgent] _fetchTreeRecursively: db.get failed for ` +
             `hash=${currentHash.slice(0, 8)}…: ${errMsg}`,
@@ -1010,7 +1009,8 @@ export class FsAgent {
             );
             this._writeSyncError('syncFromDb/processRef', err);
           } else {
-            const delaySec = (attempt * this._timeouts.processRefRetryDelayMs) / 1000;
+            const delaySec =
+              (attempt * this._timeouts.processRefRetryDelayMs) / 1000;
             console.warn(
               `[FsAgent] syncFromDb: attempt ${attempt}/${maxAttempts} failed ` +
                 `for ref=${treeRef.slice(0, 8)}…, retrying in ${delaySec}s: ` +
