@@ -1734,6 +1734,91 @@ describe('FsAgent', () => {
       agent.scanner.stopWatch();
     });
 
+    it('re-queues an unfetchable ref for recovery, then records a sync error once the recovery budget is exhausted', async () => {
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // Tiny budgets so the full retry + recovery cycle runs in milliseconds:
+      // 1 inner retry (exercises the retry-warn path) and 1 recovery re-queue,
+      // after which the ref is given up and a sync error recorded.
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: {
+          debounceMs: 1,
+          processRefRetries: 1,
+          processRefRetryDelayMs: 1,
+          recoveryRetries: 1,
+        },
+      });
+      await agent.scanner.watch();
+      const connector = createMockConnector(db, treeKey);
+      const stopSync = await agent.syncFromDb(db, connector, treeKey);
+
+      // A ref whose tree is not in the db → every fetch fails.
+      connector.simulateIncoming('unfetchableRef');
+
+      // Let all attempts + the single recovery cycle run to exhaustion.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // It re-queued the ref for recovery rather than dropping it immediately…
+      expect(
+        warnSpy.mock.calls.some((c) => String(c[0]).includes('re-queueing')),
+      ).toBe(true);
+      // …and only after the recovery budget was spent did it record the error.
+      const errLog = join(testDir, SYNC_ERROR_FILE);
+      expect(existsSync(errLog)).toBe(true);
+      expect(readFileSync(errLog, 'utf-8')).toContain('syncFromDb/processRef');
+
+      stopSync();
+      agent.scanner.stopWatch();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    it('drops an unfetchable ref immediately when recovery is disabled (recoveryRetries: 0)', async () => {
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // recoveryRetries: 0 restores the old drop-on-exhaustion behaviour.
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: {
+          debounceMs: 1,
+          processRefRetries: 0,
+          processRefRetryDelayMs: 1,
+          recoveryRetries: 0,
+        },
+      });
+      await agent.scanner.watch();
+      const connector = createMockConnector(db, treeKey);
+      const stopSync = await agent.syncFromDb(db, connector, treeKey);
+
+      connector.simulateIncoming('unfetchableRef');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // No recovery re-queue, straight to the recorded error.
+      expect(
+        warnSpy.mock.calls.some((c) => String(c[0]).includes('re-queueing')),
+      ).toBe(false);
+      const errLog = join(testDir, SYNC_ERROR_FILE);
+      expect(existsSync(errLog)).toBe(true);
+
+      stopSync();
+      agent.scanner.stopWatch();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
     it('should handle scanning path that is not a directory', async () => {
       // Create a file instead of directory
       const filePath = join(testDir, 'not-a-dir');

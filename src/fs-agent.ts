@@ -105,6 +105,17 @@ export interface TimeoutConfig {
    * Each retry waits `attempt * processRefRetryDelayMs` (i.e. 5s, 10s, 15s).
    */
   processRefRetryDelayMs?: number;
+  /**
+   * Number of **recovery re-queues** for a ref whose per-cycle retries were
+   * all exhausted (e.g. `db.get` kept timing out because the transport was
+   * disconnected/contended during a hub crash, reconnect or restart). Instead
+   * of permanently dropping the ref — which loses the file written in that
+   * window — it is re-queued up to this many times so it is eventually applied
+   * once the transport recovers. A newer incoming ref supersedes a pending
+   * recovery; `tearDown()` stops it. Default: 10. Set 0 to restore the old
+   * drop-on-exhaustion behaviour.
+   */
+  recoveryRetries?: number;
 }
 
 /** Sensible defaults – every operation is bounded */
@@ -117,6 +128,7 @@ const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
   debounceMs: 300,
   processRefRetries: 3,
   processRefRetryDelayMs: 5_000,
+  recoveryRetries: 10,
 };
 
 /** Filename for sync error log written to the sync folder */
@@ -221,6 +233,17 @@ export class FsAgent {
     } catch {
       // If writing itself fails (e.g. rootPath gone), silently ignore
     }
+  }
+
+  /**
+   * Extracts a human-readable message from a thrown value. The non-`Error`
+   * branch is defensive (the DB/transport always throw `Error`s).
+   * @param err - The caught value.
+   * @returns A message string.
+   */
+  private static _errMessage(err: unknown): string {
+    /* v8 ignore next -- @preserve non-Error throws are defensive */
+    return err instanceof Error ? err.message : String(err);
   }
 
   /**
@@ -928,8 +951,11 @@ export class FsAgent {
     // only the LAST ref is processed after a quiet period.
     let pendingRef: string | null = null;
     let fromDbTimer: ReturnType<typeof setTimeout> | null = null;
+    // Recovery budget carried alongside the pending ref: a freshly-arrived ref
+    // starts at 0; a re-queued (recovered) ref carries its incremented count.
+    let pendingRecoveryAttempt = 0;
 
-    const processRef = async (treeRef: string) => {
+    const processRef = async (treeRef: string, recoveryAttempt = 0) => {
       const maxAttempts = this._timeouts.processRefRetries + 1;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1000,25 +1026,48 @@ export class FsAgent {
           this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
           return; // Success — exit retry loop
         } catch (err) {
-          /* v8 ignore start -- @preserve */
           if (attempt === maxAttempts) {
-            // Final attempt failed — log and drop
-            console.error(
-              `[FsAgent] syncFromDb processRef failed after ${maxAttempts} attempts:`,
-              err,
-            );
-            this._writeSyncError('syncFromDb/processRef', err);
+            if (recoveryAttempt >= this._timeouts.recoveryRetries) {
+              // Recovery budget exhausted (or disabled) — give up and record it.
+              console.error(
+                `[FsAgent] syncFromDb processRef failed after ${maxAttempts} ` +
+                  `attempts and ${recoveryAttempt} recoveries:`,
+                err,
+              );
+              this._writeSyncError('syncFromDb/processRef', err);
+            } else {
+              /* v8 ignore else -- @preserve a newer ref superseding mid-
+                 recovery (pendingRef set while this ref was being processed)
+                 is a timing race that cannot be reproduced deterministically */
+              if (pendingRef === null) {
+                // Per-cycle retries exhausted, but rather than DROP the ref (and
+                // lose the file written during a transport disruption) we
+                // re-queue it for a later recovery cycle. tearDown() stops it.
+                console.warn(
+                  `[FsAgent] syncFromDb: ref=${treeRef.slice(0, 8)}… not yet ` +
+                    `fetchable after ${maxAttempts} attempts, re-queueing ` +
+                    `(recovery ${recoveryAttempt + 1}/${this._timeouts.recoveryRetries}): ` +
+                    `${FsAgent._errMessage(err)}`,
+                );
+                scheduleProcess(
+                  treeRef,
+                  this._timeouts.processRefRetryDelayMs * maxAttempts,
+                  recoveryAttempt + 1,
+                );
+              }
+              // else: a newer ref already arrived (pendingRef set) → it will be
+              // processed and supersedes this one; nothing to do.
+            }
           } else {
             const delaySec =
               (attempt * this._timeouts.processRefRetryDelayMs) / 1000;
             console.warn(
               `[FsAgent] syncFromDb: attempt ${attempt}/${maxAttempts} failed ` +
                 `for ref=${treeRef.slice(0, 8)}…, retrying in ${delaySec}s: ` +
-                `${err instanceof Error ? err.message : String(err)}`,
+                `${FsAgent._errMessage(err)}`,
             );
           }
         } finally {
-          /* v8 ignore stop -- @preserve */
           // Always resume watching, even if there was an error
           this._scanner.resumeWatch();
         }
@@ -1031,29 +1080,40 @@ export class FsAgent {
       }
     };
 
+    // Schedule (or re-schedule) processing of `ref` after `delayMs`, carrying
+    // the recovery-attempt budget. Single-flight: the latest scheduled ref
+    // wins, so a fresh incoming ref supersedes a pending recovery.
+    const scheduleProcess = (
+      ref: string,
+      delayMs: number,
+      recoveryAttempt: number,
+    ) => {
+      pendingRef = ref;
+      pendingRecoveryAttempt = recoveryAttempt;
+      if (fromDbTimer) clearTimeout(fromDbTimer);
+      fromDbTimer = setTimeout(async () => {
+        fromDbTimer = null;
+        const r = pendingRef;
+        const ra = pendingRecoveryAttempt;
+        pendingRef = null;
+        /* v8 ignore if -- @preserve a scheduled timer always has a pending ref */
+        if (r) {
+          await processRef(r, ra);
+        }
+      }, delayMs);
+    };
+
     // Create callback to sync on DB changes.
     // listen() already handles origin-filtering and ref-level dedup,
     // so we only need content-level bounce-back detection (in processRef)
     // and debouncing for rapid incoming refs.
-    const syncCallback = async (treeRef: string) => {
+    const syncCallback = (treeRef: string) => {
       // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
         return;
       }
-
-      // Store latest ref and (re)start debounce timer
-      pendingRef = treeRef;
-      /* v8 ignore next -- @preserve */
-      if (fromDbTimer) clearTimeout(fromDbTimer);
-      fromDbTimer = setTimeout(async () => {
-        fromDbTimer = null;
-        const ref = pendingRef;
-        pendingRef = null;
-        /* v8 ignore if -- @preserve */
-        if (ref) {
-          await processRef(ref);
-        }
-      }, this._timeouts.debounceMs);
+      // A freshly-arrived ref resets the recovery budget to 0.
+      scheduleProcess(treeRef, this._timeouts.debounceMs, 0);
     };
 
     // Register callback with Connector using the safe, deduplicated API
