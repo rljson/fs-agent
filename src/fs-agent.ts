@@ -1107,13 +1107,16 @@ export class FsAgent {
     // listen() already handles origin-filtering and ref-level dedup,
     // so we only need content-level bounce-back detection (in processRef)
     // and debouncing for rapid incoming refs.
-    const syncCallback = (treeRef: string) => {
+    // Returns a Promise to satisfy the Connector's `ConnectorCallback`
+    // ((ref) => Promise<any>); the actual work is debounced via scheduleProcess.
+    const syncCallback = (treeRef: string): Promise<void> => {
       // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
-        return;
+        return Promise.resolve();
       }
       // A freshly-arrived ref resets the recovery budget to 0.
       scheduleProcess(treeRef, this._timeouts.debounceMs, 0);
+      return Promise.resolve();
     };
 
     // Register callback with Connector using the safe, deduplicated API
