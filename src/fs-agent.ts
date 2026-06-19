@@ -12,10 +12,15 @@ import { mkdir, readdir, rm, utimes, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
+import {
+  ConflictResolverDeps,
+  FsConflictResolver,
+} from './fs-conflict-resolver.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
-import type { Connector, Db } from '@rljson/db';
+import type { Conflict, Connector, Db } from '@rljson/db';
+import type { InsertHistoryRow } from '@rljson/rljson';
 import type { FsNodeMeta } from './fs-scanner.ts';
 
 // .............................................................................
@@ -62,6 +67,14 @@ export interface FsAgentOptions {
    * auto-generates its own identity.
    */
   clientIdentity?: ClientId;
+  /**
+   * Enable Nextcloud-style conflict resolution. When true, {@link syncFromDb}
+   * registers a DAG-branch conflict observer that resolves forks into a single
+   * merge revision (winner keeps the path, loser is renamed). This is a
+   * **client-only** behaviour — hubs are dumb relays and must leave it off
+   * (the default). See `doc/conflict-resolution-design.md`.
+   */
+  resolveConflicts?: boolean;
 }
 
 /** Restore options */
@@ -154,6 +167,8 @@ export class FsAgent {
   /** Content fingerprint of the last tree we broadcasted (paths+blobIds) */
   private _lastSentContentKey?: string;
   private _timeouts: Required<TimeoutConfig>;
+  /** Client-only: resolve DAG-branch conflicts into merge revisions. */
+  private _resolveConflicts: boolean;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
@@ -161,6 +176,7 @@ export class FsAgent {
     this._db = options.db;
     this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
+    this._resolveConflicts = options.resolveConflicts ?? false;
     this._scanner = new FsScanner(rootPath, {
       ...options,
       ignore: [...(options.ignore || []), SYNC_ERROR_FILE],
@@ -927,6 +943,77 @@ export class FsAgent {
   }
 
   /**
+   * Builds the dependency surface a {@link FsConflictResolver} needs, wiring it
+   * to this agent's db, blob store, scanner, and working directory.
+   *
+   * The merge store records the merged ref/content key as the last-sent state,
+   * so the watcher-driven re-scan that follows the on-disk materialisation
+   * settles to a no-op instead of re-broadcasting.
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   */
+  private _buildConflictResolverDeps(
+    db: Db,
+    treeKey: string,
+  ): ConflictResolverDeps {
+    return {
+      treeKey,
+      getInsertHistory: async (table) => {
+        const dump = await db.getInsertHistory(table);
+        /* v8 ignore next -- @preserve the history table exists once a conflict fired */
+        const rows = dump[`${table}InsertHistory`]?._data ?? [];
+        return rows as InsertHistoryRow<string>[];
+      },
+      getRefOfTimeId: (table, timeId) => db.getRefOfTimeId(table, timeId),
+      fetchTree: (rootRef) => this._fetchTreeFromDb(db, treeKey, rootRef),
+      getBlobContent: (blobId) => this._adapter.getFileContent(blobId),
+      restoreTree: (tree) =>
+        this.restore(tree, undefined, { cleanTarget: true }),
+      writeFileAt: async (relativePath, content) => {
+        const filePath = join(this._rootPath, relativePath);
+        await mkdir(dirname(filePath), { recursive: true });
+        await writeFile(filePath, content);
+      },
+      deleteFileAt: async (relativePath) => {
+        await rm(join(this._rootPath, relativePath), {
+          force: true,
+          recursive: true,
+        });
+      },
+      scan: () => this._scanner.scan(),
+      storeMerge: async (tree, previous) => {
+        const dbAdapter = new FsDbAdapter(db, treeKey);
+        const ref = await dbAdapter.storeFsTree(tree, { previous });
+        // Echo suppression: the materialisation touched disk, so record the
+        // merged state as last-sent; the watcher's re-scan then settles to a
+        // no-op rather than re-broadcasting the merge.
+        this._lastSentRef = ref;
+        this._lastSentContentKey = this._contentKeyFromTree(tree);
+        return ref;
+      },
+      // Resolution failures are surfaced by `_onConflict`; success is silent.
+    };
+  }
+
+  /**
+   * Resolves a DAG-branch conflict (fire-and-forget). The Connector's
+   * `ConflictCallback` is synchronous, so failures are logged rather than
+   * thrown — a transient resolve failure must not crash the sync loop; the
+   * conflict re-fires on the next insert.
+   * @param resolver - The conflict resolver
+   * @param conflict - The detected conflict
+   */
+  private _onConflict(resolver: FsConflictResolver, conflict: Conflict): void {
+    resolver.resolve(conflict).catch((err) => {
+      this._writeSyncError('syncFromDb/resolveConflict', err);
+      console.error(
+        `[FsAgent] conflict resolution failed for ${conflict.table}: ` +
+          `${FsAgent._errMessage(err)}`,
+      );
+    });
+  }
+
+  /**
    * Watches database for tree changes and syncs to filesystem
    * Uses Connector for socket-based notifications
    * @param db - Database instance
@@ -1122,9 +1209,25 @@ export class FsAgent {
     // Register callback with Connector using the safe, deduplicated API
     connector.listen(syncCallback);
 
+    // Client-only: subscribe to DAG-branch conflicts and resolve them into
+    // merge revisions. Hubs leave `resolveConflicts` off and stay dumb relays.
+    const route = Route.fromFlat(`/${treeKey}`);
+    let onConflict: ((conflict: Conflict) => void) | undefined;
+    if (this._resolveConflicts) {
+      const resolver = new FsConflictResolver(
+        this._buildConflictResolverDeps(db, treeKey),
+      );
+      onConflict = (conflict: Conflict) => this._onConflict(resolver, conflict);
+      db.registerConflictObserver(route, onConflict);
+    }
+
     // Return cleanup function
     return () => {
       if (fromDbTimer) clearTimeout(fromDbTimer);
+      /* v8 ignore next -- @preserve only set when resolveConflicts is enabled */
+      if (onConflict) {
+        db.unregisterConflictObserver(route, onConflict);
+      }
       connector.tearDown();
     };
   }

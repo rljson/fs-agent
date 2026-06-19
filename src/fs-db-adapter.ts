@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import type { Db } from '@rljson/db';
-import { Tree } from '@rljson/rljson';
+import { InsertHistoryTimeId, Tree } from '@rljson/rljson';
 
 import type { FsTree } from './fs-scanner.js';
 
@@ -19,6 +19,14 @@ export interface StoreFsTreeOptions {
    * via the standard db.insertTrees() pipeline.
    */
   skipNotification?: boolean;
+
+  /**
+   * Explicit predecessor override for the InsertHistory row. When set, the
+   * stored revision's `previous` references exactly these timeIds instead of
+   * the controller-derived predecessor. Used to write a **merge revision**
+   * whose parents are both tips of a forked DAG, collapsing the fork.
+   */
+  previous?: InsertHistoryTimeId[];
 }
 
 /**
@@ -90,6 +98,7 @@ export class FsDbAdapter {
     // 3. notify.notify() fires → Connector observers broadcast ref
     const results = await this.db.insertTrees(this.treeKey, trees, {
       skipNotification: options.skipNotification,
+      previous: options.previous,
     });
 
     return results[0][

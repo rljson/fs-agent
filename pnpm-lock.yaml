@@ -15,8 +15,8 @@ importers:
         specifier: ^0.0.21
         version: 0.0.21
       '@rljson/db':
-        specifier: ^0.0.15
-        version: 0.0.15
+        specifier: ^0.0.21
+        version: 0.0.21
       '@rljson/hash':
         specifier: ^0.0.18
         version: 0.0.18
@@ -406,6 +406,10 @@ packages:
 
   '@rljson/db@0.0.15':
     resolution: {integrity: sha512-A8qelir3vFcqWJaI0DXFbLUU5qkc23G4Nu6GezmIX5ZyLWh8rGDHD5D/x0kdLVN9ga4yaXsMHfeFMdNfTr1JnA==}
+    engines: {node: '>=22.14.0'}
+
+  '@rljson/db@0.0.21':
+    resolution: {integrity: sha512-XsS9JqQPU7ZoT3DGjCZNsGcbH7RGc1Nl5pHQoK3QfDh8QC9VUCzIIb0F6Qd9frtU9BGk5K7z8W9EUDAR9tpfng==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/hash@0.0.16':
@@ -2134,6 +2138,17 @@ snapshots:
       '@rljson/rljson': 0.0.78
 
   '@rljson/db@0.0.15':
+    dependencies:
+      '@rljson/hash': 0.0.18
+      '@rljson/io': 0.0.66
+      '@rljson/json': 0.0.23
+      '@rljson/rljson': 0.0.78
+      '@rljson/validate': 0.0.11
+      filtrex: 3.1.0
+      object-traversal: 1.0.1
+      rxjs: 7.8.2
+
+  '@rljson/db@0.0.21':
     dependencies:
       '@rljson/hash': 0.0.18
       '@rljson/io': 0.0.66

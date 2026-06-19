@@ -19,6 +19,22 @@ export {
 } from './fs-blob-adapter.ts';
 export { FsDbAdapter, type StoreFsTreeOptions } from './fs-db-adapter.ts';
 export {
+  compareTips,
+  conflictCopyName,
+  decideWinner,
+  DIR_MARKER,
+  findCommonAncestor,
+  formatConflictTimestamp,
+  FsConflictResolver,
+  fsTreeToContentMap,
+  threeWayMerge,
+  type BranchTip,
+  type ConflictCopy,
+  type ConflictResolverDeps,
+  type ContentMap,
+  type MergePlan,
+} from './fs-conflict-resolver.ts';
+export {
   FsScanner,
   type FsChange,
   type FsChangeCallback,
