@@ -19,7 +19,7 @@ import {
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
-import type { Conflict, Connector, Db } from '@rljson/db';
+import type { Connector, Db } from '@rljson/db';
 import type { InsertHistoryRow } from '@rljson/rljson';
 import type { FsNodeMeta } from './fs-scanner.ts';
 
@@ -306,8 +306,18 @@ export class FsAgent {
    * otherwise falls back to fire-and-forget `send()`.
    * @param connector - The Connector to send through
    * @param ref - The ref to broadcast
+   * @param predecessorRefs - Causal predecessor content refs to attach (for
+   *   conflict ancestry); set explicitly here because the FsAgent broadcasts
+   *   via an explicit send, which pre-empts the Connector's db-observer path.
    */
-  private async _sendRef(connector: Connector, ref: string): Promise<void> {
+  private async _sendRef(
+    connector: Connector,
+    ref: string,
+    predecessorRefs?: string[],
+  ): Promise<void> {
+    if (this._resolveConflicts) {
+      connector.setPredecessors(predecessorRefs ?? []);
+    }
     if (connector.syncConfig?.requireAck) {
       await connector.sendWithAck(ref);
     } else {
@@ -801,11 +811,29 @@ export class FsAgent {
     treeKey: string,
     options?: StoreFsTreeOptions,
   ): Promise<() => void> {
-    // Store initial state
+    // Store initial state. If we already have an ancestry head (e.g. on
+    // reconnect after offline edits), the initial revision descends from it —
+    // chain `previous` and broadcast the predecessor so the divergence is
+    // detectable as a fork rather than an orphan root.
+    const initialParentRef = this._currentRef;
+    const initialTree = await FsAgent._withTimeout(
+      this.extract(),
+      this._timeouts.extract,
+      `syncToDb → initial extract(${treeKey})`,
+    );
+    const initialIsNew =
+      initialParentRef !== undefined &&
+      initialTree.rootHash !== initialParentRef;
+    const initialPrevious = initialIsNew
+      ? await this._ancestryPrevious(db, treeKey, [initialParentRef as string])
+      : undefined;
     const initialRef = await FsAgent._withTimeout(
-      this.storeInDb(db, treeKey, options),
+      new FsDbAdapter(db, treeKey).storeFsTree(initialTree, {
+        ...options,
+        previous: initialPrevious,
+      }),
       this._timeouts.fetchTree,
-      `syncToDb → initial storeInDb(${treeKey})`,
+      `syncToDb → initial storeFsTree(${treeKey})`,
     );
 
     // Send initial ref through connector (self-filtering will prevent loops)
@@ -813,12 +841,12 @@ export class FsAgent {
     if (initialRef) {
       this._lastSentRef = initialRef;
       this._currentRef = initialRef;
-      const currentTree = this._scanner.tree;
-      /* v8 ignore if -- @preserve */
-      if (currentTree) {
-        this._lastSentContentKey = this._contentKeyFromTree(currentTree);
-      }
-      await this._sendRef(connector, initialRef);
+      this._lastSentContentKey = this._contentKeyFromTree(initialTree);
+      await this._sendRef(
+        connector,
+        initialRef,
+        initialIsNew ? [initialParentRef as string] : undefined,
+      );
     }
 
     // Debounced callback: coalesce rapid filesystem events (e.g. macOS
@@ -844,10 +872,11 @@ export class FsAgent {
 
             const dbAdapter = new FsDbAdapter(db, treeKey);
             // Ancestry: this local edit descends from the current head ref.
+            const parentRef = this._currentRef;
             const previous = await this._ancestryPrevious(
               db,
               treeKey,
-              this._currentRef ? [this._currentRef] : undefined,
+              parentRef ? [parentRef] : undefined,
             );
             const ref = await FsAgent._withTimeout(
               dbAdapter.storeFsTree(tree, { ...options, previous }),
@@ -867,9 +896,14 @@ export class FsAgent {
             this._lastSentRef = ref;
             this._lastSentContentKey = contentKey;
 
-            // Broadcast the new ref through connector
+            // Broadcast the new ref, carrying the predecessor ref so peers can
+            // record correct ancestry.
             if (ref) {
-              await this._sendRef(connector, ref);
+              await this._sendRef(
+                connector,
+                ref,
+                parentRef ? [parentRef] : undefined,
+              );
             }
           } catch (err) {
             /* v8 ignore start -- @preserve */
@@ -917,6 +951,112 @@ export class FsAgent {
       timeIds.push(...(await db.getTimeIdsForRef(treeKey, ref)));
     }
     return timeIds.length > 0 ? timeIds : undefined;
+  }
+
+  /**
+   * Classifies an incoming revision relative to our current head using the
+   * local InsertHistory DAG (keyed on shared content refs):
+   *  - `behind`   → incoming descends from our head → fast-forward (restore).
+   *  - `ahead`    → our head descends from incoming (e.g. a reconnect bootstrap
+   *                 re-sending an older ancestor) → ignore; we are newer.
+   *  - `diverged` → siblings produced by concurrent edits → resolve the fork.
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   * @param currentRef - Our current head's content ref
+   * @param incomingRef - The incoming revision's content ref
+   * @param incomingPredecessorRefs - The incoming revision's predecessor refs
+   */
+  private async _ancestryRelation(
+    db: Db,
+    treeKey: string,
+    currentRef: string,
+    incomingRef: string,
+    incomingPredecessorRefs: string[],
+  ): Promise<'behind' | 'ahead' | 'diverged'> {
+    const dump = await db.getInsertHistory(treeKey);
+    /* v8 ignore next -- @preserve the history table exists once revisions stored */
+    const rows = (dump[`${treeKey}InsertHistory`]?._data ?? []) as Array<
+      InsertHistoryRow<string> & Record<string, string>
+    >;
+    const refKey = `${treeKey}Ref`;
+    const refOfTimeId = new Map<string, string>();
+    for (const r of rows) {
+      refOfTimeId.set(r.timeId, r[refKey]);
+    }
+    // ref → predecessor refs (translate the per-db timeIds to shared refs).
+    const prevRefsOf = new Map<string, string[]>();
+    for (const r of rows) {
+      const prev = (r.previous ?? [])
+        .map((t) => refOfTimeId.get(t))
+        .filter((x): x is string => x !== undefined);
+      prevRefsOf.set(r[refKey], prev);
+    }
+    const ancestorsOf = (startRefs: string[]): Set<string> => {
+      const seen = new Set<string>();
+      const stack = [...startRefs];
+      while (stack.length > 0) {
+        const ref = stack.pop() as string;
+        if (seen.has(ref)) {
+          continue;
+        }
+        seen.add(ref);
+        for (const p of prevRefsOf.get(ref) ?? []) {
+          stack.push(p);
+        }
+      }
+      return seen;
+    };
+
+    if (ancestorsOf(incomingPredecessorRefs).has(currentRef)) {
+      return 'behind';
+    }
+    if (ancestorsOf([currentRef]).has(incomingRef)) {
+      return 'ahead';
+    }
+    return 'diverged';
+  }
+
+  /**
+   * Resolves a divergent incoming revision inline (called from `processRef`
+   * with the watcher paused, so resolution cannot race the sync loop). Records
+   * the incoming revision as a fork tip without clobbering local content, then
+   * merges our head and the incoming tip into a single merge revision D that is
+   * materialised to disk and broadcast.
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   * @param incomingRef - The incoming revision's content ref
+   * @param incomingTree - The fetched incoming tree
+   * @param predecessorRefs - The incoming revision's predecessor content refs
+   */
+  private async _resolveConflictInline(
+    db: Db,
+    treeKey: string,
+    incomingRef: string,
+    incomingTree: FsTree,
+    predecessorRefs: string[],
+  ): Promise<void> {
+    const dbAdapter = new FsDbAdapter(db, treeKey);
+    const incomingPrevious = await this._ancestryPrevious(
+      db,
+      treeKey,
+      predecessorRefs,
+    );
+    await dbAdapter.storeFsTree(incomingTree, {
+      skipNotification: true,
+      previous: incomingPrevious,
+    });
+
+    const headTimeIds = await db.getTimeIdsForRef(treeKey, this._currentRef!);
+    const incomingTimeIds = await db.getTimeIdsForRef(treeKey, incomingRef);
+    const resolver = new FsConflictResolver(
+      this._buildConflictResolverDeps(db, treeKey),
+    );
+    await resolver.resolve({
+      table: treeKey,
+      type: 'dagBranch',
+      detectedAt: Date.now(),
+      branches: [...headTimeIds, ...incomingTimeIds],
+    });
   }
 
   /**
@@ -1037,23 +1177,6 @@ export class FsAgent {
     };
   }
 
-  /**
-   * Resolves a DAG-branch conflict (fire-and-forget). The Connector's
-   * `ConflictCallback` is synchronous, so failures are logged rather than
-   * thrown — a transient resolve failure must not crash the sync loop; the
-   * conflict re-fires on the next insert.
-   * @param resolver - The conflict resolver
-   * @param conflict - The detected conflict
-   */
-  private _onConflict(resolver: FsConflictResolver, conflict: Conflict): void {
-    resolver.resolve(conflict).catch((err) => {
-      this._writeSyncError('syncFromDb/resolveConflict', err);
-      console.error(
-        `[FsAgent] conflict resolution failed for ${conflict.table}: ` +
-          `${FsAgent._errMessage(err)}`,
-      );
-    });
-  }
 
   /**
    * Watches database for tree changes and syncs to filesystem
@@ -1132,6 +1255,41 @@ export class FsAgent {
                 `ref=${treeRef.slice(0, 8)}…)`,
             );
             return;
+          }
+
+          // Client-only conflict handling: classify the incoming revision
+          // against our head via the shared-ref DAG. `ahead` (an older ancestor,
+          // e.g. a reconnect bootstrap) is ignored; `diverged` (concurrent
+          // edits) is resolved inline — a 3-way merge into a merge revision D —
+          // *before* the destructive restore could clobber local changes, all
+          // while the watcher is paused; `behind` falls through to fast-forward.
+          if (
+            this._resolveConflicts &&
+            this._currentRef &&
+            predecessorRefs &&
+            predecessorRefs.length > 0
+          ) {
+            const relation = await this._ancestryRelation(
+              db,
+              treeKey,
+              this._currentRef,
+              treeRef,
+              predecessorRefs,
+            );
+            if (relation === 'ahead') {
+              return; // We already have a newer revision; ignore the ancestor.
+            }
+            /* v8 ignore else -- @preserve 'behind' falls through to restore */
+            if (relation === 'diverged') {
+              await this._resolveConflictInline(
+                db,
+                treeKey,
+                treeRef,
+                incomingTree,
+                predecessorRefs,
+              );
+              return;
+            }
           }
 
           // Content differs — restore from incoming tree
@@ -1271,28 +1429,15 @@ export class FsAgent {
       return Promise.resolve();
     };
 
-    // Register callback with Connector using the safe, deduplicated API
+    // Register callback with Connector using the safe, deduplicated API.
+    // Client-only conflict resolution happens inline in processRef (see
+    // `_resolveConflictInline`), so it runs with the watcher paused and cannot
+    // race the sync loop; hubs leave `resolveConflicts` off and stay dumb relays.
     connector.listen(syncCallback);
-
-    // Client-only: subscribe to DAG-branch conflicts and resolve them into
-    // merge revisions. Hubs leave `resolveConflicts` off and stay dumb relays.
-    const route = Route.fromFlat(`/${treeKey}`);
-    let onConflict: ((conflict: Conflict) => void) | undefined;
-    if (this._resolveConflicts) {
-      const resolver = new FsConflictResolver(
-        this._buildConflictResolverDeps(db, treeKey),
-      );
-      onConflict = (conflict: Conflict) => this._onConflict(resolver, conflict);
-      db.registerConflictObserver(route, onConflict);
-    }
 
     // Return cleanup function
     return () => {
       if (fromDbTimer) clearTimeout(fromDbTimer);
-      /* v8 ignore next -- @preserve only set when resolveConflicts is enabled */
-      if (onConflict) {
-        db.unregisterConflictObserver(route, onConflict);
-      }
       connector.tearDown();
     };
   }

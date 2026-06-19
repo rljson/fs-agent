@@ -20,6 +20,8 @@ const TREE = 'sharedTree';
 const SYNC: SyncConfig = { causalOrdering: true, includeClientIdentity: true };
 
 interface Node {
+  localIo: IoMem;
+  bs: BsMem;
   db: Db;
   connector: Connector;
   agent: FsAgent;
@@ -41,11 +43,25 @@ async function until<T>(fn: () => Promise<T> | T, timeout = 8000): Promise<T> {
 
 describe('end-to-end offline-edit conflict resolution (two clients)', () => {
   const root = join(process.cwd(), 'test-temp-conflict-e2e');
+  const route = Route.fromFlat(`/${TREE}`);
   let server: Server;
   let a: Node;
   let b: Node;
 
+  // Open a fresh socket + Client + Connector for a node, reusing its persistent
+  // local io/bs/agent. Models a real (re)connect — the agent's ancestry head and
+  // local InsertHistory survive across disconnects.
+  const connect = async (n: Node) => {
+    const [serverSocket, clientSocket] = createSocketPair();
+    serverSocket.connect();
+    await server.addSocket(serverSocket);
+    const client = new Client(clientSocket, n.localIo, n.bs);
+    await client.init();
+    n.db = new Db(client.io!);
+    n.connector = new Connector(n.db, route, clientSocket, SYNC);
+  };
   const startSync = async (n: Node) => {
+    await connect(n);
     n.stops.push(await n.agent.syncToDb(n.db, n.connector, TREE));
     n.stops.push(
       await n.agent.syncFromDb(n.db, n.connector, TREE, { cleanTarget: true }),
@@ -58,33 +74,42 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
 
   beforeEach(async () => {
     await rm(root, { recursive: true, force: true });
-    const route = Route.fromFlat(`/${TREE}`);
     const treeCfg = createTreesTableCfg(TREE);
+
+    // One shared blob store across both peers + server. Blob *replication* is
+    // a separate, already-tested concern (advanced-sync.spec); sharing it here
+    // isolates the conflict-resolution logic so a divergent merge can read
+    // both versions' blobs regardless of replication timing.
+    const sharedBs = new BsMem();
 
     const serverIo = new IoMem();
     await serverIo.init();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-    server = new Server(route, serverIo, new BsMem(), { syncConfig: SYNC });
+    server = new Server(route, serverIo, sharedBs, { syncConfig: SYNC });
     await server.init();
 
     const mkNode = async (name: string): Promise<Node> => {
       const folder = join(root, name);
       await mkdir(folder, { recursive: true });
-      const [serverSocket, clientSocket] = createSocketPair();
-      serverSocket.connect();
-      await server.addSocket(serverSocket);
       const localIo = new IoMem();
       await localIo.init();
       await localIo.isReady();
       await new Db(localIo).core.createTableWithInsertHistory(treeCfg);
-      const client = new Client(clientSocket, localIo, new BsMem());
-      await client.init();
-      const db = new Db(client.io!);
-      const connector = new Connector(db, route, clientSocket, SYNC);
       // Both peers are clients → both resolve conflicts (the server/hub never
       // runs an FsAgent resolver).
-      const agent = new FsAgent(folder, client.bs, { resolveConflicts: true });
-      return { db, connector, agent, folder, stops: [] };
+      const agent = new FsAgent(folder, sharedBs, {
+        resolveConflicts: true,
+        timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
+      });
+      return {
+        localIo,
+        bs: agent.bs,
+        db: undefined as unknown as Db,
+        connector: undefined as unknown as Connector,
+        agent,
+        folder,
+        stops: [],
+      };
     };
 
     a = await mkNode('A');
@@ -118,14 +143,7 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
     expect(await b.db.detectDagBranch(TREE)).toBeNull();
   });
 
-  // KNOWN LIMITATION (tracked): full live-loop convergence of a real offline
-  // divergent edit is not yet achieved. The detection substrate works (see the
-  // passing test above), and the resolver works in isolation
-  // (fs-conflict-integration.spec), but resolving through the live sync loop
-  // still needs: conflict interception before syncFromDb's destructive
-  // cleanTarget restore, robust causal chaining under out-of-order delivery,
-  // and resolver/watcher concurrency control. See conflict-resolution-design.md.
-  it.skip('resolves a real offline divergent edit, preserving both versions', async () => {
+  it('resolves a real offline divergent edit, preserving both versions', async () => {
     await startSync(a);
     await startSync(b);
     await new Promise((r) => setTimeout(r, 400));
