@@ -133,11 +133,11 @@ describe('FsAgent conflict resolution (integration)', () => {
 
     // Branch B deletes a.txt (descends from A).
     await putFiles({ 'b.txt': 'b0' });
-    const tipB = await storeRevision([tipO]);
+    await storeRevision([tipO]);
 
     // Branch C deletes b.txt, forking from A.
     await putFiles({ 'a.txt': 'a0' });
-    const tipC = await storeRevision([tipO]);
+    await storeRevision([tipO]);
 
     const conflict = await db.detectDagBranch(TREE);
     const resolver = new FsConflictResolver(
@@ -151,7 +151,6 @@ describe('FsAgent conflict resolution (integration)', () => {
     // Each branch's deletion wins for its own file → both removed, no copies.
     expect(existsSync(join(testDir, 'a.txt'))).toBe(false);
     expect(existsSync(join(testDir, 'b.txt'))).toBe(false);
-    void tipB;
   });
 
   it('resolves through the observer registered by syncFromDb, then tears down', async () => {

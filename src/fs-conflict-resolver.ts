@@ -36,6 +36,8 @@ export const DIR_MARKER = '<dir>';
  * Builds a {@link ContentMap} (relativePath → blobId) from an FsTree, ignoring
  * mtime so two trees with identical content compare equal regardless of when
  * they were written.
+ * @param tree - The FsTree to flatten
+ * @returns A map of relativePath → blobId (directories use {@link DIR_MARKER})
  */
 export function fsTreeToContentMap(tree: FsTree): ContentMap {
   const map: ContentMap = new Map();
@@ -66,9 +68,12 @@ export interface BranchTip {
 }
 
 /**
- * Total, deterministic order over two tips. Returns > 0 when `a` outranks `b`.
- * Greater timestamp wins; ties broken by greater clientId, then greater timeId.
- * Symmetric and identical on every peer.
+ * Total, deterministic order over two tips. Returns a positive number when `a`
+ * outranks `b`. Greater timestamp wins; ties broken by greater clientId, then
+ * greater timeId. Symmetric and identical on every peer.
+ * @param a - First tip
+ * @param b - Second tip
+ * @returns Positive if `a` outranks `b`, negative if `b` outranks `a`, else 0
  */
 export function compareTips(a: BranchTip, b: BranchTip): number {
   if (a.timestamp !== b.timestamp) {
@@ -87,6 +92,9 @@ export function compareTips(a: BranchTip, b: BranchTip): number {
  * Picks the path-owning winner of a conflict. Per design decision §11.1 the
  * revision with the greater InsertHistory timestamp keeps the original path;
  * the loser's content is preserved under a renamed conflict copy.
+ * @param a - First tip
+ * @param b - Second tip
+ * @returns The winning and losing tips
  */
 export function decideWinner(
   a: BranchTip,
@@ -101,6 +109,10 @@ export function decideWinner(
  * Finds the nearest common ancestor timeId of two tips by walking the
  * InsertHistory `previous` chains. Returns null when the tips share no
  * ancestor (treat as an empty ancestor — everything is an add/add).
+ * @param rows - All InsertHistory rows for the table
+ * @param tipA - First tip timeId
+ * @param tipB - Second tip timeId
+ * @returns The nearest common ancestor timeId, or null if none
  */
 export function findCommonAncestor(
   rows: InsertHistoryRow<string>[],
@@ -151,6 +163,8 @@ export function findCommonAncestor(
 /**
  * Formats a timestamp as a stable UTC `YYYY-MM-DD HHMMSS` string. UTC keeps the
  * conflict-copy name identical across peers in different timezones.
+ * @param ms - Milliseconds since the epoch
+ * @returns The formatted UTC timestamp
  */
 export function formatConflictTimestamp(ms: number): string {
   const d = new Date(ms);
@@ -170,6 +184,11 @@ export function formatConflictTimestamp(ms: number): string {
  *   the same name (determinism).
  * - If the candidate name is already taken, a numeric ` (n)` is appended; the
  *   chosen name is added to `taken`.
+ * @param relativePath - The original conflicting path
+ * @param clientId - The losing revision's client id
+ * @param timestamp - The losing revision's InsertHistory timestamp (ms)
+ * @param taken - Set of already-used paths; the chosen name is added to it
+ * @returns A unique conflict-copy path
  */
 export function conflictCopyName(
   relativePath: string,
@@ -226,6 +245,13 @@ export interface MergePlan {
  * - only theirs changed (`ours === o`) → take theirs
  * - only ours changed (`theirs === o`) → take ours
  * - both changed differently → CONFLICT: winner keeps path, loser renamed
+ * @param o - Ancestor content map
+ * @param ours - Our branch content map
+ * @param theirs - Their branch content map
+ * @param winnerSide - Which side keeps the path on a real conflict
+ * @param loserClientId - The losing revision's client id (for copy names)
+ * @param loserTimestamp - The losing revision's timestamp (for copy names)
+ * @returns The merge plan (merged set, conflict copies, conflicting paths)
  */
 export function threeWayMerge(
   o: ContentMap,
@@ -331,9 +357,9 @@ export interface ConflictResolverDeps {
 }
 
 /**
- * Resolves a single `dagBranch` conflict into a merge revision. For >2 tips it
- * merges the two lowest-identity tips per call; the resulting smaller fork
- * re-fires the observer and converges in further rounds.
+ * Resolves a single `dagBranch` conflict into a merge revision. For more than
+ * two tips it merges the two lowest-identity tips per call; the resulting
+ * smaller fork re-fires the observer and converges in further rounds.
  */
 export class FsConflictResolver {
   constructor(private readonly deps: ConflictResolverDeps) {}
@@ -346,6 +372,8 @@ export class FsConflictResolver {
   /**
    * Resolves the conflict, returning the stored merge ref, or null when the
    * conflict is not ours / not actionable.
+   * @param conflict - The detected DAG-branch conflict
+   * @returns The stored merge revision's root ref, or null
    */
   async resolve(conflict: Conflict): Promise<string | null> {
     const { treeKey } = this.deps;
