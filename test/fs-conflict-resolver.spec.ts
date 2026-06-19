@@ -87,18 +87,22 @@ describe('fsTreeToContentMap', () => {
 
 // ...........................................................................
 describe('compareTips / decideWinner', () => {
-  const tip = (timeId: string, clientId: string, timestamp: number) => ({
-    timeId,
-    clientId,
-    timestamp,
-  });
+  const tip = (
+    ref: string,
+    clientId: string,
+    timestamp: number,
+    timeId = 't',
+  ) => ({ timeId, ref, clientId, timestamp });
 
-  it('orders by timestamp, then clientId, then timeId', () => {
+  it('orders by timestamp, then clientId, then content ref (not per-db timeId)', () => {
     expect(compareTips(tip('a', 'c', 2), tip('b', 'c', 1))).toBeGreaterThan(0);
     expect(compareTips(tip('a', 'z', 1), tip('b', 'a', 1))).toBeGreaterThan(0);
     expect(compareTips(tip('a', 'a', 1), tip('b', 'z', 1))).toBeLessThan(0);
+    // Final tiebreak is the shared ref; timeId is ignored even when it differs.
     expect(compareTips(tip('a', 'a', 1), tip('z', 'a', 1))).toBeLessThan(0);
-    expect(compareTips(tip('a', 'a', 1), tip('a', 'a', 1))).toBe(0);
+    expect(
+      compareTips(tip('a', 'a', 1, 'X'), tip('a', 'a', 1, 'Y')),
+    ).toBe(0);
   });
 
   it('decideWinner picks the higher-ranked tip on either side', () => {

@@ -177,6 +177,21 @@ describe('FsAgent conflict resolution (integration)', () => {
     teardown();
   });
 
+  it('_ancestryPrevious yields undefined when a parent ref is not stored locally', async () => {
+    // A predecessor ref that has no local InsertHistory row (causal gap) maps to
+    // no timeId, so the new revision gets no `previous` (becomes a root).
+    const prev = await (
+      agent as unknown as {
+        _ancestryPrevious: (
+          db: Db,
+          t: string,
+          refs: string[] | undefined,
+        ) => Promise<string[] | undefined>;
+      }
+    )._ancestryPrevious(db, TREE, ['ref-not-in-this-db']);
+    expect(prev).toBeUndefined();
+  });
+
   it('records a sync error when conflict resolution rejects (fire-and-forget)', async () => {
     const failing = {
       resolve: () => Promise.reject(new Error('boom')),

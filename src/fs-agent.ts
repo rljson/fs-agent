@@ -169,6 +169,13 @@ export class FsAgent {
   private _timeouts: Required<TimeoutConfig>;
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
+  /**
+   * Ancestry head: the content ref of the revision currently representing the
+   * filesystem state. New local revisions descend from it; received revisions
+   * advance it. Only tracked when `resolveConflicts` is enabled, so the
+   * InsertHistory predecessor DAG forms only where conflict resolution is on.
+   */
+  private _currentRef?: string;
 
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
@@ -805,6 +812,7 @@ export class FsAgent {
     /* v8 ignore next -- @preserve */
     if (initialRef) {
       this._lastSentRef = initialRef;
+      this._currentRef = initialRef;
       const currentTree = this._scanner.tree;
       /* v8 ignore if -- @preserve */
       if (currentTree) {
@@ -835,11 +843,18 @@ export class FsAgent {
             }
 
             const dbAdapter = new FsDbAdapter(db, treeKey);
+            // Ancestry: this local edit descends from the current head ref.
+            const previous = await this._ancestryPrevious(
+              db,
+              treeKey,
+              this._currentRef ? [this._currentRef] : undefined,
+            );
             const ref = await FsAgent._withTimeout(
-              dbAdapter.storeFsTree(tree, options),
+              dbAdapter.storeFsTree(tree, { ...options, previous }),
               this._timeouts.fetchTree,
               `syncToDb → storeFsTree(${treeKey})`,
             );
+            this._currentRef = ref;
 
             // Skip broadcast if the ref matches what we already sent.
             // This happens after syncFromDb restores files: the watcher
@@ -877,6 +892,31 @@ export class FsAgent {
       this._scanner.offChange(debouncedSync);
       this._scanner.stopWatch();
     };
+  }
+
+  /**
+   * Resolves the `previous` (InsertHistory predecessor timeIds) for a new
+   * revision from the parent's shared content refs. timeIds are per-db, so we
+   * map each shared parent ref to *this* db's local timeId(s). Returns undefined
+   * when ancestry tracking is off (default) or no parent is known — in which
+   * case the store behaves exactly as before.
+   * @param db - Database instance
+   * @param treeKey - Tree table key
+   * @param parentRefs - Parent content refs (local head, or received predecessors)
+   */
+  private async _ancestryPrevious(
+    db: Db,
+    treeKey: string,
+    parentRefs: string[] | undefined,
+  ): Promise<string[] | undefined> {
+    if (!this._resolveConflicts || !parentRefs || parentRefs.length === 0) {
+      return undefined;
+    }
+    const timeIds: string[] = [];
+    for (const ref of parentRefs) {
+      timeIds.push(...(await db.getTimeIdsForRef(treeKey, ref)));
+    }
+    return timeIds.length > 0 ? timeIds : undefined;
   }
 
   /**
@@ -986,9 +1026,11 @@ export class FsAgent {
         const ref = await dbAdapter.storeFsTree(tree, { previous });
         // Echo suppression: the materialisation touched disk, so record the
         // merged state as last-sent; the watcher's re-scan then settles to a
-        // no-op rather than re-broadcasting the merge.
+        // no-op rather than re-broadcasting the merge. The merge revision D is
+        // also the new ancestry head.
         this._lastSentRef = ref;
         this._lastSentContentKey = this._contentKeyFromTree(tree);
+        this._currentRef = ref;
         return ref;
       },
       // Resolution failures are surfaced by `_onConflict`; success is silent.
@@ -1041,8 +1083,14 @@ export class FsAgent {
     // Recovery budget carried alongside the pending ref: a freshly-arrived ref
     // starts at 0; a re-queued (recovered) ref carries its incremented count.
     let pendingRecoveryAttempt = 0;
+    // Predecessor content refs carried with the pending ref (causalOrdering).
+    let pendingPredecessorRefs: string[] | undefined;
 
-    const processRef = async (treeRef: string, recoveryAttempt = 0) => {
+    const processRef = async (
+      treeRef: string,
+      recoveryAttempt = 0,
+      predecessorRefs?: string[],
+    ) => {
       const maxAttempts = this._timeouts.processRefRetries + 1;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1106,11 +1154,21 @@ export class FsAgent {
           // mutations happening right after the settling period.
           const postRestoreTree = await this._scanner.scan();
           const dbAdapter = new FsDbAdapter(db, treeKey);
+          // Ancestry: this revision descends from the sender's predecessor refs
+          // (mapped to local timeIds). restore preserves mtime, so the stored
+          // ref equals the incoming ref — shared identity across clients.
+          const previous = await this._ancestryPrevious(
+            db,
+            treeKey,
+            predecessorRefs,
+          );
           const postRestoreRef = await dbAdapter.storeFsTree(postRestoreTree, {
             skipNotification: true,
+            previous,
           });
           this._lastSentRef = postRestoreRef;
           this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
+          this._currentRef = postRestoreRef;
           return; // Success — exit retry loop
         } catch (err) {
           if (attempt === maxAttempts) {
@@ -1140,6 +1198,7 @@ export class FsAgent {
                   treeRef,
                   this._timeouts.processRefRetryDelayMs * maxAttempts,
                   recoveryAttempt + 1,
+                  predecessorRefs,
                 );
               }
               // else: a newer ref already arrived (pendingRef set) → it will be
@@ -1174,18 +1233,21 @@ export class FsAgent {
       ref: string,
       delayMs: number,
       recoveryAttempt: number,
+      predecessorRefs?: string[],
     ) => {
       pendingRef = ref;
       pendingRecoveryAttempt = recoveryAttempt;
+      pendingPredecessorRefs = predecessorRefs;
       if (fromDbTimer) clearTimeout(fromDbTimer);
       fromDbTimer = setTimeout(async () => {
         fromDbTimer = null;
         const r = pendingRef;
         const ra = pendingRecoveryAttempt;
+        const pr = pendingPredecessorRefs;
         pendingRef = null;
         /* v8 ignore if -- @preserve a scheduled timer always has a pending ref */
         if (r) {
-          await processRef(r, ra);
+          await processRef(r, ra, pr);
         }
       }, delayMs);
     };
@@ -1196,13 +1258,16 @@ export class FsAgent {
     // and debouncing for rapid incoming refs.
     // Returns a Promise to satisfy the Connector's `ConnectorCallback`
     // ((ref) => Promise<any>); the actual work is debounced via scheduleProcess.
-    const syncCallback = (treeRef: string): Promise<void> => {
+    const syncCallback = (
+      treeRef: string,
+      predecessorRefs?: string[],
+    ): Promise<void> => {
       // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
         return Promise.resolve();
       }
       // A freshly-arrived ref resets the recovery budget to 0.
-      scheduleProcess(treeRef, this._timeouts.debounceMs, 0);
+      scheduleProcess(treeRef, this._timeouts.debounceMs, 0, predecessorRefs);
       return Promise.resolve();
     };
 
