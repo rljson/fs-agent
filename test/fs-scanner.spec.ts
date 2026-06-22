@@ -585,6 +585,11 @@ describe('FsScanner', () => {
       expect(
         (scanner as unknown as { _safetyTimer: unknown })._safetyTimer,
       ).toBeNull();
+      // Idempotent: a second stop with no timer is a no-op.
+      scanner.stopWatch();
+      expect(
+        (scanner as unknown as { _safetyTimer: unknown })._safetyTimer,
+      ).toBeNull();
     });
   });
 });

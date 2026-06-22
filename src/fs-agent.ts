@@ -155,6 +155,13 @@ const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
 /** Filename for sync error log written to the sync folder */
 export const SYNC_ERROR_FILE = '.sync-errors.log';
 
+/**
+ * Filename prefix for the staging files used by atomic writes. The scanner
+ * ignores anything starting with this so the transient temp + rename never
+ * pollutes the tree or churns the watcher.
+ */
+export const ATOMIC_TMP_PREFIX = '.fsagent-tmp-';
+
 // .............................................................................
 // FsAgent Class
 // .............................................................................
@@ -194,7 +201,7 @@ export class FsAgent {
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._scanner = new FsScanner(rootPath, {
       ...options,
-      ignore: [...(options.ignore || []), SYNC_ERROR_FILE],
+      ignore: [...(options.ignore || []), SYNC_ERROR_FILE, ATOMIC_TMP_PREFIX],
       bs: this._bs,
     });
     this._adapter = new FsBlobAdapter(this._bs);
@@ -333,7 +340,11 @@ export class FsAgent {
     const rnd = `${Date.now().toString(36)}-${Math.floor(
       Math.random() * 1e9,
     ).toString(36)}`;
-    const tmp = `${filePath}.${rnd}.tmp`;
+    // Temp lives in the same directory (so the rename is atomic on one
+    // filesystem) but uses the ATOMIC_TMP_PREFIX, which the scanner ignores —
+    // otherwise the native watcher (esp. Linux inotify) would catch the
+    // transient temp/rename and churn the sync state.
+    const tmp = join(dirname(filePath), `${ATOMIC_TMP_PREFIX}${rnd}`);
     try {
       await writeFile(tmp, content);
       await rename(tmp, filePath);
