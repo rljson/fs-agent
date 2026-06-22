@@ -10,7 +10,6 @@ import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 import { appendFileSync } from 'fs';
 import {
   mkdir,
-  open,
   readdir,
   rename,
   rm,
@@ -318,9 +317,12 @@ export class FsAgent {
 
   /**
    * Atomically writes a file: stages the content in a sibling `.<rand>.tmp`,
-   * fsyncs it, then renames over the target. A crash mid-write leaves only the
-   * temp behind — never a half-written target file. The random suffix keeps
-   * concurrent restores of the same path from trampling each other.
+   * then renames over the target. The rename is atomic, so a crash mid-write
+   * leaves only the temp behind — never a half-written target file. (We do not
+   * `fsync` the temp: it adds significant per-file latency under bursty
+   * restores, and durability-on-power-loss is secondary here since the content
+   * is replicated and re-synced.) The random suffix keeps concurrent restores
+   * of the same path from trampling each other.
    * @param filePath - Destination path
    * @param content - Bytes to write
    */
@@ -334,18 +336,6 @@ export class FsAgent {
     const tmp = `${filePath}.${rnd}.tmp`;
     try {
       await writeFile(tmp, content);
-      try {
-        const fh = await open(tmp, 'r+');
-        try {
-          await fh.sync();
-        } finally {
-          await fh.close();
-        }
-        /* v8 ignore start -- @preserve fsync is best-effort; rename is atomic */
-      } catch {
-        // fsync unsupported/failed — the rename below is still atomic.
-      }
-      /* v8 ignore stop -- @preserve */
       await rename(tmp, filePath);
     } catch (err) {
       /* v8 ignore start -- @preserve temp cleanup on a failed write */
