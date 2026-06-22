@@ -59,8 +59,10 @@ export function fsTreeToContentMap(tree: FsTree): ContentMap {
 
 /** A branch tip's identity, used for deterministic winner selection. */
 export interface BranchTip {
-  /** InsertHistory timeId of the tip. */
+  /** InsertHistory timeId of the tip (per-db; used only for local lookups). */
   timeId: string;
+  /** Shared content ref of the tip — the cross-client deterministic tiebreak. */
+  ref: string;
   /** Originating client id (InsertHistory `origin`). Empty string if unknown. */
   clientId: string;
   /** InsertHistory client timestamp (ms). 0 if unknown. */
@@ -70,7 +72,9 @@ export interface BranchTip {
 /**
  * Total, deterministic order over two tips. Returns a positive number when `a`
  * outranks `b`. Greater timestamp wins; ties broken by greater clientId, then
- * greater timeId. Symmetric and identical on every peer.
+ * greater **content ref**. The final tiebreak is the ref (not the timeId)
+ * because timeIds are per-db — using them would make different peers pick
+ * different winners and never converge; the ref is shared, so every peer agrees.
  * @param a - First tip
  * @param b - Second tip
  * @returns Positive if `a` outranks `b`, negative if `b` outranks `a`, else 0
@@ -82,8 +86,8 @@ export function compareTips(a: BranchTip, b: BranchTip): number {
   if (a.clientId !== b.clientId) {
     return a.clientId > b.clientId ? 1 : -1;
   }
-  if (a.timeId !== b.timeId) {
-    return a.timeId > b.timeId ? 1 : -1;
+  if (a.ref !== b.ref) {
+    return a.ref > b.ref ? 1 : -1;
   }
   return 0;
 }
@@ -390,35 +394,40 @@ export class FsConflictResolver {
       rows.map((r) => [r.timeId, r]),
     );
 
-    const toTip = (timeId: string): BranchTip => {
+    // Resolve every tip to its shared content ref up front, so the winner is
+    // chosen on cross-client-stable data (refs), not per-db timeIds.
+    const branchTips: BranchTip[] = [];
+    for (const timeId of tips) {
       const row = rowByTimeId.get(timeId);
-      return {
+      const ref = await this.deps.getRefOfTimeId(treeKey, timeId);
+      branchTips.push({
         timeId,
+        ref: ref ?? '',
         clientId: (row?.origin as string | undefined) ?? '',
         timestamp: row?.clientTimestamp ?? 0,
-      };
-    };
+      });
+    }
 
-    // Resolve the two lowest-identity tips this round (deterministic; ensures
-    // progress when there are 3+ tips — the rest re-fire and converge). Sorted
-    // ascending by {@link compareTips}, so `loser` (lower timestamp) is first and
-    // `winner` (greater timestamp — keeps the path, per design §11.1) is second.
-    const orderedTips = [...tips].sort((x, y) => compareTips(toTip(x), toTip(y)));
-    const loserTipId = orderedTips[0];
-    const winnerTipId = orderedTips[1];
+    // Resolve the two lowest tips this round (deterministic; ensures progress
+    // when there are 3+ tips — the rest re-fire and converge). Sorted ascending
+    // by {@link compareTips}, so `loser` is first and `winner` (keeps the path,
+    // per design §11.1) is second.
+    const ordered = [...branchTips].sort((x, y) => compareTips(x, y));
+    const loserTip = ordered[0];
+    const winnerTip = ordered[1];
 
-    const loserRef = await this.deps.getRefOfTimeId(treeKey, loserTipId);
-    const winnerRef = await this.deps.getRefOfTimeId(treeKey, winnerTipId);
-    if (!loserRef || !winnerRef) {
+    if (!loserTip.ref || !winnerTip.ref) {
       this._log(
         'warn',
-        `missing tree ref for a tip (loser=${loserRef}, winner=${winnerRef})`,
+        `missing tree ref for a tip (loser=${loserTip.ref}, winner=${winnerTip.ref})`,
       );
       return null;
     }
 
-    const loserTree = await this.deps.fetchTree(loserRef);
-    const winnerTree = await this.deps.fetchTree(winnerRef);
+    const loserTipId = loserTip.timeId;
+    const winnerTipId = winnerTip.timeId;
+    const loserTree = await this.deps.fetchTree(loserTip.ref);
+    const winnerTree = await this.deps.fetchTree(winnerTip.ref);
     const loserMap = fsTreeToContentMap(loserTree);
     const winnerMap = fsTreeToContentMap(winnerTree);
 
@@ -433,10 +442,7 @@ export class FsConflictResolver {
       }
     }
 
-    // Winner keeps the path; loser's content survives as a renamed copy. The
-    // copy name derives from the loser's stable identity for cross-peer
-    // determinism.
-    const loserTip = toTip(loserTipId);
+    // Winner keeps the path; loser's content survives as a renamed copy.
     const plan = threeWayMerge(
       ancestorMap,
       loserMap,

@@ -6,21 +6,16 @@
 
 import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
-import { createTreesTableCfg, Route } from '@rljson/rljson';
+import { createTreesTableCfg, Route, type SyncConfig } from '@rljson/rljson';
 
 import { existsSync, readFileSync } from 'fs';
-import { mkdir, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Conflict } from '@rljson/db';
-
-import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
+import { FsAgent } from '../src/fs-agent.ts';
 import { FsConflictResolver } from '../src/fs-conflict-resolver.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
-
-/** Lets a microtask-deferred `.catch()`/`.then()` settle. */
-const flush = () => new Promise((r) => setTimeout(r, 20));
 
 /**
  * End-to-end conflict resolution against a real Db + real filesystem. Exercises
@@ -153,56 +148,114 @@ describe('FsAgent conflict resolution (integration)', () => {
     expect(existsSync(join(testDir, 'b.txt'))).toBe(false);
   });
 
-  it('resolves through the observer registered by syncFromDb, then tears down', async () => {
-    const route = Route.fromFlat(`/${TREE}`);
+  it('_ancestryPrevious yields undefined when a parent ref is not stored locally', async () => {
+    // A predecessor ref that has no local InsertHistory row (causal gap) maps to
+    // no timeId, so the new revision gets no `previous` (becomes a root).
+    const prev = await (
+      agent as unknown as {
+        _ancestryPrevious: (
+          db: Db,
+          t: string,
+          refs: string[] | undefined,
+        ) => Promise<string[] | undefined>;
+      }
+    )._ancestryPrevious(db, TREE, ['ref-not-in-this-db']);
+    expect(prev).toBeUndefined();
+  });
+
+  it('_ancestryRelation classifies behind / ahead / diverged (incl. a diamond)', async () => {
+    const adapter = new FsDbAdapter(db, TREE);
+    const store = async (
+      files: Record<string, string>,
+      previous?: string[],
+    ): Promise<string> => {
+      await putFiles(files);
+      return adapter.storeFsTree(await agent.extract(), {
+        skipNotification: true,
+        previous,
+      });
+    };
+    const tid = async (ref: string) =>
+      (await db.getTimeIdsForRef(TREE, ref))[0];
+
+    const baseRef = await store({ 'f.txt': 'base' });
+    const aRef = await store({ 'f.txt': 'A' }, [await tid(baseRef)]);
+    const cRef = await store({ 'f.txt': 'C' }, [await tid(baseRef)]);
+    // Diamond: D descends from both A and C (which both descend from base).
+    const dRef = await store({ 'f.txt': 'D' }, [
+      await tid(aRef),
+      await tid(cRef),
+    ]);
+
+    const rel = (cur: string, inc: string, pred: string[]) =>
+      (
+        agent as unknown as {
+          _ancestryRelation: (
+            db: Db,
+            t: string,
+            cur: string,
+            inc: string,
+            pred: string[],
+          ) => Promise<'behind' | 'ahead' | 'diverged'>;
+        }
+      )._ancestryRelation(db, TREE, cur, inc, pred);
+
+    // A descends from our head (base) → fast-forward.
+    expect(await rel(baseRef, aRef, [baseRef])).toBe('behind');
+    // base is our ancestor; the diamond walk from D revisits base → ahead.
+    expect(await rel(dRef, baseRef, [])).toBe('ahead');
+    // A and C are siblings → diverged.
+    expect(await rel(aRef, cRef, [baseRef])).toBe('diverged');
+  });
+
+  it('ignores an incoming ancestor (relation ahead) without clobbering local state', async () => {
+    const SYNC: SyncConfig = {
+      causalOrdering: true,
+      includeClientIdentity: true,
+    };
+    const adapter = new FsDbAdapter(db, TREE);
+    const store = async (
+      files: Record<string, string>,
+      previous?: string[],
+    ): Promise<string> => {
+      await putFiles(files);
+      return adapter.storeFsTree(await agent.extract(), {
+        skipNotification: true,
+        previous,
+      });
+    };
+    const tid = async (ref: string) =>
+      (await db.getTimeIdsForRef(TREE, ref))[0];
+
+    // base → A → D ; our head is D, disk holds D's content.
+    const baseRef = await store({ 'f.txt': 'base' });
+    const aRef = await store({ 'f.txt': 'AAA' }, [await tid(baseRef)]);
+    const dRef = await store({ 'f.txt': 'DDD' }, [await tid(aRef)]);
+    (agent as unknown as { _currentRef: string })._currentRef = dRef;
+
     const socket = new SocketMock();
-    const connector = new Connector(db, route, socket);
+    const connector = new Connector(
+      db,
+      Route.fromFlat(`/${TREE}`),
+      socket,
+      SYNC,
+    );
+    const teardown = await agent.syncFromDb(db, connector, TREE, {
+      cleanTarget: true,
+    });
 
-    // Ancestor + one branch (no fork yet).
-    await putFiles({ 'doc.txt': 'v0' });
-    const tipO = await storeRevision();
-    await putFiles({ 'doc.txt': 'vB' });
-    await storeRevision([tipO]); // tipB
+    // Inject A — an ancestor of our head D, carrying its predecessor ref. It
+    // must be ignored (relation 'ahead'), leaving D's content on disk intact.
+    socket.emit(connector.events.ref, {
+      o: 'remote-origin',
+      r: aRef,
+      c: 'peer',
+      seq: 1,
+      p: [baseRef],
+    });
+    await new Promise((r) => setTimeout(r, 400));
 
-    // Register the client conflict observer, THEN insert the forking tip — the
-    // insert fires the observer, which resolves the fork end-to-end.
-    const teardown = await agent.syncFromDb(db, connector, TREE);
-    await putFiles({ 'doc.txt': 'vC' });
-    await storeRevision([tipO]); // tipC → fork → observer → resolve
-
-    await flush();
-    expect(await db.detectDagBranch(TREE)).toBeNull(); // collapsed to one tip
-
-    // Teardown unregisters the observer (idempotent, no throw).
+    expect(await readFile(join(testDir, 'f.txt'), 'utf8')).toBe('DDD');
     teardown();
-  });
-
-  it('records a sync error when conflict resolution rejects (fire-and-forget)', async () => {
-    const failing = {
-      resolve: () => Promise.reject(new Error('boom')),
-    } as unknown as FsConflictResolver;
-    (
-      agent as unknown as {
-        _onConflict: (r: FsConflictResolver, c: Conflict) => void;
-      }
-    )._onConflict(failing, { table: TREE } as Conflict);
-
-    await flush();
-    const log = readFileSync(join(testDir, SYNC_ERROR_FILE), 'utf8');
-    expect(log).toContain('syncFromDb/resolveConflict');
-  });
-
-  it('stays quiet when conflict resolution succeeds', async () => {
-    const ok = {
-      resolve: () => Promise.resolve('ref'),
-    } as unknown as FsConflictResolver;
-    (
-      agent as unknown as {
-        _onConflict: (r: FsConflictResolver, c: Conflict) => void;
-      }
-    )._onConflict(ok, { table: TREE } as Conflict);
-
-    await flush();
-    expect(existsSync(join(testDir, SYNC_ERROR_FILE))).toBe(false);
   });
 });

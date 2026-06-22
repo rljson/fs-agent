@@ -11,7 +11,7 @@ import { Tree, TreeRef } from '@rljson/rljson';
 
 import { FSWatcher, watch } from 'fs';
 import { readdir, readFile, stat } from 'fs/promises';
-import { join, sep } from 'path';
+import { join } from 'path';
 
 // .............................................................................
 // Types
@@ -25,16 +25,23 @@ export interface FsNodeMeta extends Json {
   name: string;
   /** Type of node */
   type: 'file' | 'directory';
-  /** Absolute path */
-  path: string;
-  /** Relative path from scan root */
+  /** Relative path from scan root (the cross-client-stable content identity) */
   relativePath: string;
   /** File size in bytes (for files) */
   size?: number;
-  /** Last modified timestamp (milliseconds since epoch) */
-  mtime: number;
   /** Blob ID for file content (files only) */
   blobId?: string;
+  /**
+   * Absolute path — informational only, NOT part of the content identity.
+   * Excluded from stored meta so tree refs are folder-independent (shared
+   * across clients). Retained in the type for back-compat.
+   */
+  path?: string;
+  /**
+   * Last modified timestamp — NOT part of the content identity (environment-
+   * specific). Excluded from stored meta so refs are mtime-independent.
+   */
+  mtime?: number;
 }
 
 /**
@@ -185,7 +192,6 @@ export class FsScanner {
     depth: number,
     trees: Map<TreeRef, Tree>,
   ): Promise<Tree> {
-    const stats = await stat(absolutePath);
     const entries = await readdir(absolutePath, { withFileTypes: true });
     const childTrees: Tree[] = [];
     const childRefs: TreeRef[] = [];
@@ -260,9 +266,12 @@ export class FsScanner {
         const fileMeta: FsNodeMeta = {
           name: entry.name,
           type: 'file',
-          path: childPath,
           relativePath: childRelPath,
           size: childStats.size,
+          // mtime is kept for files (restore preserves it, so it round-trips to
+          // the same ref on every client) but NOT for directories (a folder's
+          // mtime is per-machine and does not round-trip). The absolute `path`
+          // is excluded everywhere — it is folder-specific.
           mtime: childStats.mtime.getTime(),
           blobId: blobProps.blobId, // Link to content in Bs
         };
@@ -286,20 +295,19 @@ export class FsScanner {
       }
     }
 
-    // Create directory tree node
+    // Create directory tree node. The root's name is normalised to '.' (the
+    // mount-point folder name is environment-specific and would otherwise make
+    // the root hash folder-dependent, breaking shared cross-client refs).
     const dirName =
       relativePath === '.'
-        ? /* v8 ignore next -- @preserve */
-          this._rootPath.split(sep).pop() || ''
+        ? '.'
         : /* v8 ignore next -- @preserve */
           relativePath.split('/').pop() || '';
 
     const dirMeta: FsNodeMeta = {
       name: dirName,
       type: 'directory',
-      path: absolutePath,
       relativePath,
-      mtime: stats.mtime.getTime(),
     };
 
     const dirTree: Tree = {
