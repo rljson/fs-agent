@@ -57,7 +57,11 @@ export interface FsTree {
 /**
  * Type of file system change
  */
-export type FsChangeType = 'added' | 'modified' | 'deleted';
+export type FsChangeType =
+  | 'added'
+  | 'modified'
+  | 'deleted'
+  | 'safety-rescan';
 
 /**
  * File system change event
@@ -106,6 +110,10 @@ export class FsScanner {
   private _bs: Bs;
   private _paused: boolean = false;
   private _missedChangesDuringPause: boolean = false;
+  /** Periodic full-rescan timer that catches events the native watcher drops. */
+  private _safetyTimer: ReturnType<typeof setInterval> | null = null;
+  /** Set by stopWatch() so a pending watcher reinstall / rescan bails out. */
+  private _stopRequested: boolean = false;
 
   constructor(rootPath: string, options: FsScanOptions = {}) {
     this._rootPath = rootPath;
@@ -341,18 +349,120 @@ export class FsScanner {
     if (!this._tree) {
       await this.scan();
     }
-    this._watcher = watch(
-      this._rootPath,
-      { recursive: true },
-      /* v8 ignore next -- @preserve */
-      async (eventType, filename) => {
-        if (!filename) return;
-        if (this._shouldIgnore(filename)) {
-          return;
+    /* v8 ignore start -- @preserve native watcher wiring is not unit-testable */
+    const onEvent = async (eventType: string, filename: string | null) => {
+      if (!filename) return;
+      if (this._shouldIgnore(filename)) {
+        return;
+      }
+      await this._handleFileChange(eventType, filename);
+    };
+    // Native fs.watch on Windows surfaces EPERM/ENOBUFS via 'error' when its
+    // internal change buffer overflows under a burst (renaming a whole folder,
+    // antivirus rescan). The handle is dead at that point — close and reinstall
+    // a fresh watcher; events lost in the gap are recovered by the safety scan.
+    const onError = (err: unknown): void => {
+      console.warn(
+        `[fs-scanner] watcher error: ${FsScanner._errMessage(err)} — reinstalling`,
+      );
+      try {
+        this._watcher?.close();
+      } catch {
+        // already closed
+      }
+      this._watcher = null;
+      setTimeout(() => {
+        if (this._stopRequested) return;
+        try {
+          this._watcher = watch(this._rootPath, { recursive: true }, onEvent);
+          this._watcher.on('error', onError);
+        } catch (e) {
+          console.warn(
+            `[fs-scanner] watcher reinstall failed: ${FsScanner._errMessage(e)}`,
+          );
         }
-        await this._handleFileChange(eventType, filename);
-      },
-    );
+      }, 500);
+    };
+    this._stopRequested = false;
+    this._watcher = watch(this._rootPath, { recursive: true }, onEvent);
+    this._watcher.on('error', onError);
+    /* v8 ignore stop -- @preserve */
+
+    // Periodic safety net: native fs.watch drops events under burst load
+    // (especially Windows ReadDirectoryChangesW). A periodic full rescan +
+    // notify catches drift the watcher missed — one O(N) scan every 30 s.
+    /* v8 ignore next -- @preserve stopWatch clears the timer with the watcher, so it is always null here */
+    if (!this._safetyTimer) {
+      this._safetyTimer = setInterval(() => {
+        /* v8 ignore next -- @preserve timer firing is exercised via _runSafetyRescan */
+        void this._runSafetyRescan();
+      }, 30_000);
+      this._safetyTimer.unref?.();
+    }
+  }
+
+  /**
+   * One safety-rescan pass: rescans the tree and, if its content differs from
+   * the previous scan (the native watcher dropped an event), emits a sync
+   * notification so syncToDb reconciles the drift. Paused/stopped scanners and
+   * scan failures are no-ops.
+   */
+  private async _runSafetyRescan(): Promise<void> {
+    if (this._paused || this._stopRequested) return;
+    /* v8 ignore next -- @preserve _tree is set before the timer ever fires */
+    const prevKey = this._tree ? this._safetyContentKey(this._tree) : null;
+    try {
+      await this.scan();
+    } catch (err) {
+      console.warn(
+        `[fs-scanner] safety rescan failed: ${FsScanner._errMessage(err)}`,
+      );
+      return;
+    }
+    /* v8 ignore next -- @preserve defensive: pause/stop racing the scan */
+    if (this._paused || this._stopRequested) return;
+    /* v8 ignore next -- @preserve scan() always sets _tree on success */
+    const nextKey = this._tree ? this._safetyContentKey(this._tree) : null;
+    if (prevKey !== nextKey) {
+      console.warn(
+        `[fs-scanner] safety rescan detected drift on ${this._rootPath} — notifying`,
+      );
+      await this._notifyChange({ type: 'safety-rescan', path: '.' });
+    }
+  }
+
+  /**
+   * Path+blobId content fingerprint used by the safety rescan to detect drift
+   * the native watcher missed (mtime-independent, same idea as the agent's
+   * content key but local to the scanner).
+   * @param tree - The tree to fingerprint
+   * @returns A stable content key
+   */
+  private _safetyContentKey(tree: FsTree): string {
+    const parts: string[] = [];
+    for (const [, node] of tree.trees) {
+      const meta = node.meta as FsNodeMeta | null;
+      /* v8 ignore next -- @preserve scanned nodes always carry meta */
+      if (!meta) continue;
+      if (meta.type === 'file') {
+        /* v8 ignore next -- @preserve scanned files always carry a blobId */
+        parts.push(`${meta.relativePath}:${meta.blobId ?? ''}`);
+      } else if (meta.type === 'directory' && meta.relativePath !== '.') {
+        parts.push(`d:${meta.relativePath}`);
+      }
+    }
+    parts.sort();
+    return parts.join('\n');
+  }
+
+  /**
+   * Extracts a readable message from a thrown value.
+   * @param err - The caught value
+   * @returns A message string
+   */
+  private static _errMessage(err: unknown): string {
+    /* v8 ignore next -- @preserve non-Error throws are defensive */
+    return err instanceof Error ? err.message : String(err);
   }
 
   private async _handleFileChange(
@@ -366,58 +476,52 @@ export class FsScanner {
     }
 
     const relativePath = filename.replace(/\\/g, '/');
+    const fullPath = join(this._rootPath, filename);
+
+    // Windows briefly reports ENOENT/EBUSY for a file that was just written or
+    // renamed (antivirus, indexer, save-and-rename editors). A single stat()
+    // failure is not proof of deletion — retry a few times with a short backoff
+    // before concluding the file is gone.
+    let exists = false;
+    for (let i = 0; i < 4; i++) {
+      try {
+        await stat(fullPath);
+        exists = true;
+        break;
+      } catch {
+        /* v8 ignore next -- @preserve last iteration falls through */
+        if (i < 3) await new Promise((r) => setTimeout(r, 80 + i * 80));
+      }
+    }
 
     try {
-      await stat(join(this._rootPath, filename));
-      const existingTree = this._findTreeByPath(relativePath);
-
-      /* v8 ignore next -- @preserve */
-      if (!existingTree) {
-        // File was added - rescan to rebuild tree
+      if (exists) {
+        // File added or modified — rescan to update the tree, then notify.
+        const existingTree = this._findTreeByPath(relativePath);
         await this.scan();
         await this._notifyChange({
-          type: 'added',
+          type: existingTree ? 'modified' : 'added',
           path: relativePath,
         });
-      } else {
-        // File was modified - rescan to update hashes
-        await this.scan();
-        await this._notifyChange({
-          type: 'modified',
-          path: relativePath,
-        });
+        return;
       }
-    } catch {
-      // stat() or scan() failed.  First check whether the root
-      // directory still exists — only if it's gone should we stop
-      // watching.
+
+      // Gone after retries. Only stop watching if the root itself disappeared;
+      // otherwise emit a delete for this path.
       let rootExists = false;
       try {
         await stat(this._rootPath);
         rootExists = true;
       } catch {
-        // Root directory no longer exists - stop watching
         this.stopWatch();
       }
-
-      // Root exists → the failure was a transient scan error (e.g. a
-      // file locked by another process such as Windows Explorer).
-      // Try scan+notify, but if it still fails, just skip this event —
-      // the watcher stays alive for the next change.
       if (rootExists) {
-        try {
-          await this.scan();
-          await this._notifyChange({
-            type: 'deleted',
-            path: relativePath,
-          });
-        } catch {
-          // Transient failure (locked file, etc.) — skip this event.
-          // The watcher remains active; the next filesystem event will
-          // trigger a fresh scan that should succeed once the file is
-          // no longer locked.
-        }
+        await this.scan();
+        await this._notifyChange({ type: 'deleted', path: relativePath });
       }
+    } catch {
+      // Transient scan/notify failure (locked file, etc.) — skip this event;
+      // the watcher stays alive and the next change triggers a fresh scan.
     }
   }
 
@@ -456,6 +560,11 @@ export class FsScanner {
   }
 
   stopWatch(): void {
+    this._stopRequested = true;
+    if (this._safetyTimer) {
+      clearInterval(this._safetyTimer);
+      this._safetyTimer = null;
+    }
     /* v8 ignore next -- @preserve */
     if (this._watcher) {
       this._watcher.close();

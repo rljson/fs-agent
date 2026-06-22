@@ -8,7 +8,16 @@ import { Bs, BsMem } from '@rljson/bs';
 import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 
 import { appendFileSync } from 'fs';
-import { mkdir, readdir, rm, utimes, writeFile } from 'fs/promises';
+import {
+  mkdir,
+  open,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  utimes,
+  writeFile,
+} from 'fs/promises';
 import { dirname, join } from 'path';
 
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
@@ -270,6 +279,87 @@ export class FsAgent {
   }
 
   /**
+   * Retries an async operation up to `attempts` times with exponential backoff
+   * (each delay doubles from `baseDelayMs`). For transient failures — a file
+   * briefly locked by antivirus or a save-and-rename editor, a peer briefly
+   * unreachable. Non-final failures are logged once at warn level so retry
+   * pressure is visible without log-spam.
+   * @param fn - The operation to run
+   * @param attempts - Maximum number of attempts
+   * @param baseDelayMs - Initial backoff delay (doubles each retry)
+   * @param label - Human-readable label for log messages
+   * @returns The operation's resolved value
+   */
+  private static async _withRetry<T>(
+    fn: () => Promise<T>,
+    attempts: number,
+    baseDelayMs: number,
+    label: string,
+  ): Promise<T> {
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (i === attempts - 1) {
+          break;
+        }
+        const delay = baseDelayMs * Math.pow(2, i);
+        console.warn(
+          `[FsAgent] ${label} attempt ${i + 1}/${attempts} failed: ` +
+            `${FsAgent._errMessage(err)} — retry in ${delay}ms`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Atomically writes a file: stages the content in a sibling `.<rand>.tmp`,
+   * fsyncs it, then renames over the target. A crash mid-write leaves only the
+   * temp behind — never a half-written target file. The random suffix keeps
+   * concurrent restores of the same path from trampling each other.
+   * @param filePath - Destination path
+   * @param content - Bytes to write
+   */
+  private static async _atomicWriteFile(
+    filePath: string,
+    content: Buffer | string,
+  ): Promise<void> {
+    const rnd = `${Date.now().toString(36)}-${Math.floor(
+      Math.random() * 1e9,
+    ).toString(36)}`;
+    const tmp = `${filePath}.${rnd}.tmp`;
+    try {
+      await writeFile(tmp, content);
+      try {
+        const fh = await open(tmp, 'r+');
+        try {
+          await fh.sync();
+        } finally {
+          await fh.close();
+        }
+        /* v8 ignore start -- @preserve fsync is best-effort; rename is atomic */
+      } catch {
+        // fsync unsupported/failed — the rename below is still atomic.
+      }
+      /* v8 ignore stop -- @preserve */
+      await rename(tmp, filePath);
+    } catch (err) {
+      /* v8 ignore start -- @preserve temp cleanup on a failed write */
+      try {
+        await unlink(tmp);
+      } catch {
+        // temp may not exist
+      }
+      throw err;
+      /* v8 ignore stop -- @preserve */
+    }
+  }
+
+  /**
    * Wraps a promise with a timeout.
    * Rejects with a descriptive error if the promise does not settle
    * within the given number of milliseconds.
@@ -318,11 +408,20 @@ export class FsAgent {
     if (this._resolveConflicts) {
       connector.setPredecessors(predecessorRefs ?? []);
     }
-    if (connector.syncConfig?.requireAck) {
-      await connector.sendWithAck(ref);
-    } else {
-      connector.send(ref);
-    }
+    // Retry on a transient socket-layer failure (e.g. a dropped packet or a
+    // reconnect blip) so a single hiccup doesn't lose an entire ref.
+    await FsAgent._withRetry(
+      async () => {
+        if (connector.syncConfig?.requireAck) {
+          await connector.sendWithAck(ref);
+        } else {
+          connector.send(ref);
+        }
+      },
+      3,
+      100,
+      `sendRef(${ref.slice(0, 12)}…)`,
+    );
   }
 
   /**
@@ -410,12 +509,55 @@ export class FsAgent {
       target,
     );
 
+    // Capture the file set present BEFORE the restore. cleanTarget may only
+    // prune files that already existed pre-restore — any file that appears
+    // *during* the restore is a fresh user write and must be preserved
+    // (protects against the user saving while a restore is in flight).
+    const preRestore = options?.cleanTarget
+      ? await this._collectAllFiles(target)
+      : new Set<string>();
+
     // Recursively restore from tree structure
     await this._restoreTree(tree.rootHash, tree.trees, target);
 
     if (options?.cleanTarget) {
-      await this._pruneExtraneous(target, expectedDirs, expectedFiles);
+      await this._pruneExtraneous(
+        target,
+        expectedDirs,
+        expectedFiles,
+        preRestore,
+      );
     }
+  }
+
+  /**
+   * Recursively collects the absolute paths of all files under `currentDir`.
+   * Used to snapshot the pre-restore file set for prune race-protection.
+   * @param currentDir - Directory to walk
+   * @param out - Accumulator set (created if omitted)
+   * @returns The set of absolute file paths
+   */
+  private async _collectAllFiles(
+    currentDir: string,
+    out?: Set<string>,
+  ): Promise<Set<string>> {
+    const result = out ?? new Set<string>();
+    let entries;
+    try {
+      entries = await readdir(currentDir, { withFileTypes: true });
+    } catch {
+      /* v8 ignore next -- @preserve unreadable dir → nothing to collect */
+      return result;
+    }
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        await this._collectAllFiles(fullPath, result);
+      } else {
+        result.add(fullPath);
+      }
+    }
+    return result;
   }
 
   /**
@@ -469,8 +611,9 @@ export class FsAgent {
         // Create parent directories
         await mkdir(dirname(filePath), { recursive: true });
 
-        // Write file
-        await writeFile(filePath, fileBlob.content);
+        // Write file atomically (temp + fsync + rename) so a crash mid-restore
+        // never leaves a half-written, corrupt file on disk.
+        await FsAgent._atomicWriteFile(filePath, fileBlob.content);
 
         // Preserve mtime
         /* v8 ignore else -- @preserve */
@@ -766,32 +909,53 @@ export class FsAgent {
   }
 
   /**
-   * Remove files/dirs not present in the expected sets
+   * Remove files/dirs not present in the expected sets, preserving any file
+   * that appeared *during* the restore (not in `preRestore`) — a fresh user
+   * write that must not be clobbered.
    * @param currentDir - Directory currently being inspected
    * @param expectedDirs - Allowed directory paths
    * @param expectedFiles - Allowed file paths
+   * @param preRestore - Files present before the restore (prune candidates)
    */
   private async _pruneExtraneous(
     currentDir: string,
     expectedDirs: Set<string>,
     expectedFiles: Set<string>,
+    preRestore: Set<string>,
   ): Promise<void> {
-    const entries = await readdir(currentDir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(currentDir, { withFileTypes: true });
+    } catch {
+      /* v8 ignore next -- @preserve unreadable dir → nothing to prune */
+      return;
+    }
 
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
 
       if (entry.isDirectory()) {
+        // Recurse first (pruning contents with the same protection), then
+        // remove the directory only if it is unexpected AND now empty — so a
+        // fresh file inside an otherwise-extraneous dir is never lost.
+        await this._pruneExtraneous(
+          fullPath,
+          expectedDirs,
+          expectedFiles,
+          preRestore,
+        );
         if (!expectedDirs.has(fullPath)) {
-          await rm(fullPath, { recursive: true, force: true });
-          continue;
+          const remaining = await readdir(fullPath);
+          if (remaining.length === 0) {
+            await rm(fullPath, { recursive: true, force: true });
+          }
         }
-
-        await this._pruneExtraneous(fullPath, expectedDirs, expectedFiles);
-      } else {
-        if (!expectedFiles.has(fullPath)) {
-          await rm(fullPath, { force: true });
-        }
+      } else if (!expectedFiles.has(fullPath) && preRestore.has(fullPath)) {
+        // A file may be pruned only when it existed BEFORE the restore (it's in
+        // `preRestore`). A file that appeared *during* the restore is a fresh
+        // user write — preserve it so cleanTarget can't delete something the
+        // user saved while a restore was in flight.
+        await rm(fullPath, { force: true });
       }
     }
   }
@@ -878,10 +1042,16 @@ export class FsAgent {
               treeKey,
               parentRef ? [parentRef] : undefined,
             );
-            const ref = await FsAgent._withTimeout(
-              dbAdapter.storeFsTree(tree, { ...options, previous }),
-              this._timeouts.fetchTree,
-              `syncToDb → storeFsTree(${treeKey})`,
+            const ref = await FsAgent._withRetry(
+              () =>
+                FsAgent._withTimeout(
+                  dbAdapter.storeFsTree(tree, { ...options, previous }),
+                  this._timeouts.fetchTree,
+                  `syncToDb → storeFsTree(${treeKey})`,
+                ),
+              3,
+              200,
+              `syncToDb storeFsTree(${treeKey})`,
             );
             this._currentRef = ref;
 
@@ -1152,7 +1322,7 @@ export class FsAgent {
       writeFileAt: async (relativePath, content) => {
         const filePath = join(this._rootPath, relativePath);
         await mkdir(dirname(filePath), { recursive: true });
-        await writeFile(filePath, content);
+        await FsAgent._atomicWriteFile(filePath, content);
       },
       deleteFileAt: async (relativePath) => {
         await rm(join(this._rootPath, relativePath), {
