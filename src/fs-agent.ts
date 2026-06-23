@@ -337,6 +337,17 @@ export class FsAgent {
     filePath: string,
     content: Buffer | string,
   ): Promise<void> {
+    // Windows-only. On Windows the temp+rename is atomic AND
+    // ReadDirectoryChangesW keeps watching the path across the rename. On
+    // Linux/macOS a rename replaces the file's inode, which fs.watch can lose —
+    // dropping subsequent change events for that file — so write in place there
+    // (still safe enough: content is replicated and re-synced on any crash).
+    /* v8 ignore next -- @preserve win32 branch not exercised on Linux/macOS CI */
+    if (process.platform !== 'win32') {
+      await writeFile(filePath, content);
+      return;
+    }
+    /* v8 ignore start -- @preserve Windows-only atomic path; CI runs on Linux */
     const rnd = `${Date.now().toString(36)}-${Math.floor(
       Math.random() * 1e9,
     ).toString(36)}`;
@@ -356,8 +367,8 @@ export class FsAgent {
         // temp may not exist
       }
       throw err;
-      /* v8 ignore stop -- @preserve */
     }
+    /* v8 ignore stop -- @preserve */
   }
 
   /**
