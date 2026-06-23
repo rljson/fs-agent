@@ -529,4 +529,67 @@ describe('FsScanner', () => {
       expect(ignoredEvent).toBeUndefined();
     });
   });
+
+  describe('safety rescan', () => {
+    const runRescan = (s: FsScanner) =>
+      (
+        s as unknown as { _runSafetyRescan: () => Promise<void> }
+      )._runSafetyRescan();
+
+    it('emits a safety-rescan notification when it detects drift', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'a');
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => {
+        changes.push(c.type);
+      });
+
+      // No change on disk → no drift → no notification.
+      await runRescan(scanner);
+      expect(changes).toEqual([]);
+
+      // A file in a new subdir the native watcher "missed" → drift → notify.
+      await mkdir(join(testDir, 'sub'));
+      await writeFile(join(testDir, 'sub', 'b.txt'), 'b');
+      await runRescan(scanner);
+      expect(changes).toContain('safety-rescan');
+    });
+
+    it('is a no-op while paused', async () => {
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+      scanner.pauseWatch();
+      await writeFile(join(testDir, 'c.txt'), 'c');
+      await runRescan(scanner);
+      expect(changes).toEqual([]);
+    });
+
+    it('survives a scan failure (root removed) without throwing', async () => {
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      await rm(testDir, { recursive: true, force: true });
+      await expect(runRescan(scanner)).resolves.toBeUndefined();
+    });
+
+    it('stopWatch clears the safety timer', async () => {
+      await writeFile(join(testDir, 'd.txt'), 'd');
+      const scanner = new FsScanner(testDir);
+      await scanner.watch();
+      expect(
+        (scanner as unknown as { _safetyTimer: unknown })._safetyTimer,
+      ).not.toBeNull();
+      scanner.stopWatch();
+      expect(
+        (scanner as unknown as { _safetyTimer: unknown })._safetyTimer,
+      ).toBeNull();
+      // Idempotent: a second stop with no timer is a no-op.
+      scanner.stopWatch();
+      expect(
+        (scanner as unknown as { _safetyTimer: unknown })._safetyTimer,
+      ).toBeNull();
+    });
+  });
 });

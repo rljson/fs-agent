@@ -98,7 +98,8 @@ describe('compareTips / decideWinner', () => {
     expect(compareTips(tip('a', 'c', 2), tip('b', 'c', 1))).toBeGreaterThan(0);
     expect(compareTips(tip('a', 'z', 1), tip('b', 'a', 1))).toBeGreaterThan(0);
     expect(compareTips(tip('a', 'a', 1), tip('b', 'z', 1))).toBeLessThan(0);
-    // Final tiebreak is the shared ref; timeId is ignored even when it differs.
+    // Final tiebreak is the shared ref (timeId is ignored even when it differs).
+    expect(compareTips(tip('z', 'a', 1), tip('a', 'a', 1))).toBeGreaterThan(0);
     expect(compareTips(tip('a', 'a', 1), tip('z', 'a', 1))).toBeLessThan(0);
     expect(
       compareTips(tip('a', 'a', 1, 'X'), tip('a', 'a', 1, 'Y')),

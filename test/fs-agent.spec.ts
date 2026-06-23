@@ -2337,4 +2337,82 @@ describe('FsAgent', () => {
       expect(names).not.toContain(SYNC_ERROR_FILE);
     });
   });
+
+  describe('_withRetry', () => {
+    const withRetry = (
+      FsAgent as unknown as {
+        _withRetry: <T>(
+          fn: () => Promise<T>,
+          attempts: number,
+          baseDelayMs: number,
+          label: string,
+        ) => Promise<T>;
+      }
+    )._withRetry;
+
+    it('retries a transient failure then succeeds', async () => {
+      let calls = 0;
+      const result = await withRetry(
+        async () => {
+          calls++;
+          if (calls < 3) throw new Error('transient');
+          return 'ok';
+        },
+        5,
+        1,
+        'test',
+      );
+      expect(result).toBe('ok');
+      expect(calls).toBe(3);
+    });
+
+    it('rethrows after exhausting all attempts', async () => {
+      let calls = 0;
+      await expect(
+        withRetry(
+          async () => {
+            calls++;
+            throw new Error('permanent');
+          },
+          2,
+          1,
+          'test',
+        ),
+      ).rejects.toThrow('permanent');
+      expect(calls).toBe(2);
+    });
+  });
+
+  describe('_pruneExtraneous race protection', () => {
+    it('prunes pre-existing extraneous files but preserves ones that appeared during restore', async () => {
+      await writeFile(join(testDir, 'old.txt'), 'o'); // existed before restore
+      await writeFile(join(testDir, 'new.txt'), 'n'); // "appeared during" restore
+      await mkdir(join(testDir, 'emptyDir'));
+      await mkdir(join(testDir, 'dirWithFresh'));
+      await writeFile(join(testDir, 'dirWithFresh', 'fresh.txt'), 'f');
+
+      const agent = new FsAgent(testDir);
+      // Baseline captured before the (simulated) restore: only old.txt existed.
+      const preRestore = new Set([join(testDir, 'old.txt')]);
+      await (
+        agent as unknown as {
+          _pruneExtraneous: (
+            dir: string,
+            ed: Set<string>,
+            ef: Set<string>,
+            pr: Set<string>,
+          ) => Promise<void>;
+        }
+      )._pruneExtraneous(testDir, new Set(), new Set(), preRestore);
+
+      // In the baseline + not expected → pruned.
+      expect(existsSync(join(testDir, 'old.txt'))).toBe(false);
+      // Appeared during restore (not in baseline) → preserved (no data loss).
+      expect(existsSync(join(testDir, 'new.txt'))).toBe(true);
+      // Unexpected + empty → removed.
+      expect(existsSync(join(testDir, 'emptyDir'))).toBe(false);
+      // Unexpected dir but holds a fresh file → kept.
+      expect(existsSync(join(testDir, 'dirWithFresh', 'fresh.txt'))).toBe(true);
+    });
+  });
 });
