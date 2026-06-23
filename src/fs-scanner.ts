@@ -361,6 +361,10 @@ export class FsScanner {
     // internal change buffer overflows under a burst (renaming a whole folder,
     // antivirus rescan). The handle is dead at that point — close and reinstall
     // a fresh watcher; events lost in the gap are recovered by the safety scan.
+    //
+    // Windows-only: on Linux inotify this error path can fire spuriously under a
+    // write burst and reinstall the watcher, opening a brief gap that drops a
+    // genuine change. The periodic safety rescan below covers all platforms.
     const onError = (err: unknown): void => {
       console.warn(
         `[fs-scanner] watcher error: ${FsScanner._errMessage(err)} — reinstalling`,
@@ -375,7 +379,7 @@ export class FsScanner {
         if (this._stopRequested) return;
         try {
           this._watcher = watch(this._rootPath, { recursive: true }, onEvent);
-          this._watcher.on('error', onError);
+          if (FsScanner._isWindows) this._watcher.on('error', onError);
         } catch (e) {
           console.warn(
             `[fs-scanner] watcher reinstall failed: ${FsScanner._errMessage(e)}`,
@@ -385,7 +389,7 @@ export class FsScanner {
     };
     this._stopRequested = false;
     this._watcher = watch(this._rootPath, { recursive: true }, onEvent);
-    this._watcher.on('error', onError);
+    if (FsScanner._isWindows) this._watcher.on('error', onError);
     /* v8 ignore stop -- @preserve */
 
     // Periodic safety net: native fs.watch drops events under burst load
@@ -465,6 +469,11 @@ export class FsScanner {
     return err instanceof Error ? err.message : String(err);
   }
 
+  /** Whether the host is Windows — gates Windows-specific watcher hardening. */
+  private static get _isWindows(): boolean {
+    return process.platform === 'win32';
+  }
+
   private async _handleFileChange(
     _eventType: string,
     filename: string,
@@ -478,19 +487,31 @@ export class FsScanner {
     const relativePath = filename.replace(/\\/g, '/');
     const fullPath = join(this._rootPath, filename);
 
-    // Windows briefly reports ENOENT/EBUSY for a file that was just written or
-    // renamed (antivirus, indexer, save-and-rename editors). A single stat()
-    // failure is not proof of deletion — retry a few times with a short backoff
-    // before concluding the file is gone.
+    // Determine whether the file still exists. On Windows a just-written or
+    // renamed file briefly reports ENOENT/EBUSY (antivirus, indexer,
+    // save-and-rename editors), so a single stat() failure is not proof of
+    // deletion — retry a few times. On Linux/macOS a single stat is accurate
+    // (and the retry would needlessly delay delete handling).
     let exists = false;
-    for (let i = 0; i < 4; i++) {
+    /* v8 ignore next -- @preserve Windows-only branch; CI runs on Linux */
+    if (FsScanner._isWindows) {
+      /* v8 ignore start -- @preserve Windows-only; CI runs on Linux */
+      for (let i = 0; i < 4; i++) {
+        try {
+          await stat(fullPath);
+          exists = true;
+          break;
+        } catch {
+          if (i < 3) await new Promise((r) => setTimeout(r, 80 + i * 80));
+        }
+      }
+      /* v8 ignore stop -- @preserve */
+    } else {
       try {
         await stat(fullPath);
         exists = true;
-        break;
       } catch {
-        /* v8 ignore next -- @preserve last iteration falls through */
-        if (i < 3) await new Promise((r) => setTimeout(r, 80 + i * 80));
+        // File is gone.
       }
     }
 
