@@ -1520,6 +1520,14 @@ export class FsAgent {
                 err,
               );
               this._writeSyncError('syncFromDb/processRef', err);
+              // Don't make the loss permanent. The ref was added to the
+              // Connector's received-dedup set the moment it arrived, so the
+              // server's bootstrap heartbeat (which re-advertises the latest
+              // ref) is suppressed as a duplicate and can never re-trigger this
+              // failed apply once the transient fetch/blob-pull condition
+              // clears. Invalidating it lets the next heartbeat re-deliver the
+              // ref, turning permanent loss into eventually-consistent recovery.
+              connector.invalidateReceived(treeRef);
             } else {
               /* v8 ignore else -- @preserve a newer ref superseding mid-
                  recovery (pendingRef set while this ref was being processed)
