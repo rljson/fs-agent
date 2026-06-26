@@ -1780,6 +1780,45 @@ describe('FsAgent', () => {
       errorSpy.mockRestore();
     });
 
+    it('invalidates the ref in the Connector once the recovery budget is exhausted so the bootstrap heartbeat can re-deliver it', async () => {
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: {
+          debounceMs: 1,
+          processRefRetries: 0,
+          processRefRetryDelayMs: 1,
+          recoveryRetries: 1,
+        },
+      });
+      await agent.scanner.watch();
+      const connector = createMockConnector(db, treeKey);
+      const invalidateSpy = vi.spyOn(connector, 'invalidateReceived');
+      const stopSync = await agent.syncFromDb(db, connector, treeKey);
+
+      // A ref whose tree is not in the db → every fetch fails to exhaustion.
+      connector.simulateIncoming('unfetchableRef');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Without invalidation the ref stays in the received-dedup set forever and
+      // the server's heartbeat (which re-advertises the latest ref) can never
+      // re-trigger the failed apply. We must hand the ref back for re-delivery.
+      expect(invalidateSpy).toHaveBeenCalledWith('unfetchableRef');
+
+      stopSync();
+      agent.scanner.stopWatch();
+      invalidateSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
     it('drops an unfetchable ref immediately when recovery is disabled (recoveryRetries: 0)', async () => {
       const io = new IoMem();
       await io.init();
