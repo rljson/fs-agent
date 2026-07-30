@@ -10,8 +10,8 @@ import { Json } from '@rljson/json';
 import { Tree, TreeRef } from '@rljson/rljson';
 
 import { FSWatcher, watch } from 'fs';
-import { readdir, readFile, stat } from 'fs/promises';
-import { join } from 'path';
+import { mkdir, readdir, readFile, rename, stat, writeFile } from 'fs/promises';
+import { dirname, join } from 'path';
 
 // .............................................................................
 // Types
@@ -92,6 +92,17 @@ export interface FsScanOptions {
   followSymlinks?: boolean;
   /** Blob storage implementation (defaults to BsMem) */
   bs?: Bs;
+  /**
+   * Persist a path→{mtime,size,blobId} scan cache at this file path. When set,
+   * a file whose mtime AND size are unchanged since the last scan is NOT re-read
+   * or re-hashed — its cached `blobId` is reused. The cache is loaded once on the
+   * first {@link FsScanner.scan} and re-written after every scan, so a RESTART
+   * does not re-read the whole folder (a cold scan of an 80 GB catalog is ~48
+   * min) and the periodic safety-rescan stays cheap. Requires a PERSISTENT blob
+   * store (e.g. `@rljson/bs-fs`) — with an in-RAM store the cached blob is gone
+   * after a restart. Omit to disable (default: full read+hash every scan).
+   */
+  scanCachePath?: string;
 }
 
 // .............................................................................
@@ -115,6 +126,21 @@ export class FsScanner {
   /** Set by stopWatch() so a pending watcher reinstall / rescan bails out. */
   private _stopRequested: boolean = false;
 
+  /** Path→content cache backing {@link FsScanOptions.scanCachePath} (unused when unset). */
+  private _scanCachePath?: string;
+  /** Last-scan cache (loaded from disk); consulted to skip re-read/re-hash. */
+  private _blobCache = new Map<
+    string,
+    { mtime: number; size: number; blobId: string }
+  >();
+  /** Cache rebuilt during the CURRENT scan; becomes `_blobCache` at the end (self-pruning). */
+  private _nextBlobCache = new Map<
+    string,
+    { mtime: number; size: number; blobId: string }
+  >();
+  /** Ensures the persisted cache is read from disk only once. */
+  private _cacheLoaded = false;
+
   constructor(rootPath: string, options: FsScanOptions = {}) {
     this._rootPath = rootPath;
     this._options = {
@@ -122,8 +148,10 @@ export class FsScanner {
       maxDepth: options.maxDepth,
       followSymlinks: options.followSymlinks ?? false,
       bs: options.bs,
+      scanCachePath: options.scanCachePath,
     };
     this._bs = options.bs || new BsMem();
+    this._scanCachePath = options.scanCachePath;
   }
 
   get tree(): FsTree | null {
@@ -160,6 +188,13 @@ export class FsScanner {
     }
     /* v8 ignore stop -- @preserve */
 
+    // Load the persisted scan cache once, and start a fresh cache for this scan
+    // (only files still present are re-added → the cache self-prunes deletions).
+    if (this._scanCachePath) {
+      await this._loadPersistedCache();
+      this._nextBlobCache = new Map();
+    }
+
     const trees = new Map<TreeRef, Tree>();
     let rootTree;
     try {
@@ -190,6 +225,12 @@ export class FsScanner {
       rootHash: rootHashStr,
       trees,
     };
+
+    // Swap in the freshly-built cache and persist it (best-effort).
+    if (this._scanCachePath) {
+      this._blobCache = this._nextBlobCache;
+      await this._persistCache();
+    }
 
     return this._tree;
   }
@@ -246,29 +287,57 @@ export class FsScanner {
         childRefs.push(childHashStr);
       } else if (entry.isFile()) {
         /* v8 ignore else -- @preserve */
-        // Store ONLY file content in blob storage (NOT tree node)
-        let fileContent: Buffer;
-        try {
-          fileContent = await readFile(childPath);
-        } catch (error) {
-          throw new Error(
-            `Failed to read file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
-          );
+        const mtimeMs = childStats.mtime.getTime();
+
+        // Scan cache: if this file's mtime AND size are unchanged since the last
+        // scan, reuse its cached blobId instead of re-reading + re-hashing the
+        // content. (mtime+size is the rsync-style heuristic; a same-size edit
+        // within the same mtime tick is not detected — acceptable in practice.)
+        const cached = this._scanCachePath
+          ? this._blobCache.get(childRelPath)
+          : undefined;
+
+        let blobId: string;
+        if (
+          cached &&
+          cached.mtime === mtimeMs &&
+          cached.size === childStats.size
+        ) {
+          blobId = cached.blobId;
+        } else {
+          // Store ONLY file content in blob storage (NOT tree node)
+          let fileContent: Buffer;
+          try {
+            fileContent = await readFile(childPath);
+          } catch (error) {
+            throw new Error(
+              `Failed to read file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+
+          let blobProps;
+          try {
+            blobProps = await this._bs.setBlob(fileContent);
+          } catch (error) {
+            throw new Error(
+              `Failed to store blob for file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+
+          if (!blobProps || !blobProps.blobId) {
+            throw new Error(
+              `Blob storage returned invalid blobId for file "${childRelPath}"`,
+            );
+          }
+          blobId = blobProps.blobId;
         }
 
-        let blobProps;
-        try {
-          blobProps = await this._bs.setBlob(fileContent);
-        } catch (error) {
-          throw new Error(
-            `Failed to store blob for file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-
-        if (!blobProps || !blobProps.blobId) {
-          throw new Error(
-            `Blob storage returned invalid blobId for file "${childRelPath}"`,
-          );
+        if (this._scanCachePath) {
+          this._nextBlobCache.set(childRelPath, {
+            mtime: mtimeMs,
+            size: childStats.size,
+            blobId,
+          });
         }
 
         const fileMeta: FsNodeMeta = {
@@ -280,8 +349,8 @@ export class FsScanner {
           // the same ref on every client) but NOT for directories (a folder's
           // mtime is per-machine and does not round-trip). The absolute `path`
           // is excluded everywhere — it is folder-specific.
-          mtime: childStats.mtime.getTime(),
-          blobId: blobProps.blobId, // Link to content in Bs
+          mtime: mtimeMs,
+          blobId, // Link to content in Bs
         };
 
         const fileTree: Tree = {
@@ -326,6 +395,52 @@ export class FsScanner {
     };
 
     return dirTree;
+  }
+
+  /**
+   * Load the persisted scan cache from {@link FsScanOptions.scanCachePath} once.
+   * A missing or corrupt cache file is tolerated (the scan just starts cold).
+   */
+  private async _loadPersistedCache(): Promise<void> {
+    if (this._cacheLoaded) return;
+    this._cacheLoaded = true;
+    /* v8 ignore next -- @preserve: only called when scanCachePath is set */
+    if (!this._scanCachePath) return;
+    try {
+      const raw = await readFile(this._scanCachePath, 'utf8');
+      const parsed = JSON.parse(raw) as {
+        entries?: [string, { mtime: number; size: number; blobId: string }][];
+      };
+      if (Array.isArray(parsed.entries)) {
+        this._blobCache = new Map(parsed.entries);
+      }
+    } catch {
+      // No cache yet, or unreadable/corrupt → start from an empty cache.
+    }
+  }
+
+  /**
+   * Write the current scan cache to {@link FsScanOptions.scanCachePath} atomically
+   * (temp + rename). Best-effort: a failed cache write never fails the scan.
+   */
+  private async _persistCache(): Promise<void> {
+    /* v8 ignore next -- @preserve: only called when scanCachePath is set */
+    if (!this._scanCachePath) return;
+    const body = JSON.stringify({
+      version: 1,
+      entries: [...this._blobCache.entries()],
+    });
+    const tmp = `${this._scanCachePath}.${Date.now().toString(36)}.tmp`;
+    /* v8 ignore start -- @preserve: cache persistence is best-effort; a write
+       failure (e.g. read-only dir) must never fail the scan itself. */
+    try {
+      await mkdir(dirname(this._scanCachePath), { recursive: true });
+      await writeFile(tmp, body);
+      await rename(tmp, this._scanCachePath);
+    } catch {
+      // ignore — the next scan simply re-reads and re-writes the cache.
+    }
+    /* v8 ignore stop */
   }
 
   private _shouldIgnore(name: string): boolean {
