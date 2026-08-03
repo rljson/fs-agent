@@ -46,7 +46,7 @@ export interface FsAgentOptions {
   /** Follow symlinks (default: false) */
   followSymlinks?: boolean;
   /**
-   * Persist a path→{mtime,size,blobId} scan cache at this file path so a RESTART
+   * Persist a path→(mtime, size, blobId) scan cache at this file path so a RESTART
    * does not re-read + re-hash the whole folder (a cold scan of an 80 GB catalog
    * is ~48 min). Forwarded to the {@link FsScanner}. Requires a PERSISTENT blob
    * store (e.g. `@rljson/bs-fs`). See {@link FsScanOptions.scanCachePath}.

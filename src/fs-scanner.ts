@@ -93,7 +93,7 @@ export interface FsScanOptions {
   /** Blob storage implementation (defaults to BsMem) */
   bs?: Bs;
   /**
-   * Persist a path→{mtime,size,blobId} scan cache at this file path. When set,
+   * Persist a path→(mtime, size, blobId) scan cache at this file path. When set,
    * a file whose mtime AND size are unchanged since the last scan is NOT re-read
    * or re-hashed — its cached `blobId` is reused. The cache is loaded once on the
    * first {@link FsScanner.scan} and re-written after every scan, so a RESTART
