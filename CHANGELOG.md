@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent scan cache (`scanCachePath`)**: `FsScanOptions` / `FsAgentOptions`
+  gain an opt-in `scanCachePath`. When set, a file whose `mtime` **and** `size`
+  are unchanged since the last scan is no longer re-read or re-hashed — its
+  cached `blobId` is reused. The cache is loaded once on the first `scan()` and
+  re-written (atomically) after every scan, and self-prunes deleted paths, so a
+  RESTART does not re-read the whole folder (a cold scan of an 80 GB catalog is
+  ~48 min) and the periodic safety-rescan stays cheap. Opt-in: with no
+  `scanCachePath` behaviour is unchanged. Requires a persistent blob store
+  (e.g. `@rljson/bs-fs`). A missing/corrupt cache file is tolerated (cold scan).
+
 ### Breaking Changes
 
 - **API Refactoring**: `syncToDb()` and `syncFromDb()` now require explicit `Connector` parameter

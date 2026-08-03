@@ -4,9 +4,11 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { mkdir, rm, writeFile } from 'fs/promises';
+import { access, mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { BsMem } from '@rljson/bs';
 
 import { FsScanner } from '../src/fs-scanner.ts';
 
@@ -590,6 +592,95 @@ describe('FsScanner', () => {
       expect(
         (scanner as unknown as { _safetyTimer: unknown })._safetyTimer,
       ).toBeNull();
+    });
+  });
+
+  describe('scanCachePath (persistent scan cache)', () => {
+    // OUTSIDE the scanned folder (real callers put it in the blob-store dir),
+    // so the cache file itself is never part of the scanned tree.
+    const cachePath = join(process.cwd(), 'test-temp-fs-scanner-cache.json');
+    afterEach(async () => {
+      await rm(cachePath, { force: true });
+    });
+
+    it('persists a cache and skips re-hashing unchanged files on re-scan', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'hello');
+      const bs = new BsMem();
+      const setBlob = vi.spyOn(bs, 'setBlob');
+      const scanner = new FsScanner(testDir, { bs, scanCachePath: cachePath });
+
+      const t1 = await scanner.scan();
+      expect(setBlob).toHaveBeenCalledTimes(1); // read + hashed once
+      await expect(access(cachePath)).resolves.toBeUndefined(); // cache written
+
+      // Second scan of the SAME (unchanged) file → cache hit, no re-hash.
+      const t2 = await scanner.scan();
+      expect(setBlob).toHaveBeenCalledTimes(1); // still 1 — reused the cache
+      expect(t2.rootHash).toBe(t1.rootHash);
+    });
+
+    it('re-reads a file whose size/mtime changed', async () => {
+      const file = join(testDir, 'a.txt');
+      await writeFile(file, 'hello');
+      const bs = new BsMem();
+      const setBlob = vi.spyOn(bs, 'setBlob');
+      const scanner = new FsScanner(testDir, { bs, scanCachePath: cachePath });
+      await scanner.scan();
+      expect(setBlob).toHaveBeenCalledTimes(1);
+
+      // Change the content (different size) → cache miss → re-hash.
+      await writeFile(file, 'hello world, now longer');
+      await scanner.scan();
+      expect(setBlob).toHaveBeenCalledTimes(2);
+    });
+
+    it('a fresh scanner loads the persisted cache (restart)', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'hello');
+      const bs = new BsMem(); // shared store survives the "restart"
+      const first = new FsScanner(testDir, { bs, scanCachePath: cachePath });
+      const t1 = await first.scan();
+
+      // New scanner instance, same cache file + same store → loads the cache.
+      const setBlob = vi.spyOn(bs, 'setBlob');
+      const second = new FsScanner(testDir, { bs, scanCachePath: cachePath });
+      const t2 = await second.scan();
+      expect(setBlob).not.toHaveBeenCalled(); // everything served from the cache
+      expect(t2.rootHash).toBe(t1.rootHash);
+    });
+
+    it('self-prunes deleted files from the persisted cache', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'aaa');
+      await writeFile(join(testDir, 'b.txt'), 'bbb');
+      const scanner = new FsScanner(testDir, { scanCachePath: cachePath });
+      await scanner.scan();
+      await rm(join(testDir, 'a.txt'));
+      await scanner.scan();
+      const cache = JSON.parse(await readFile(cachePath, 'utf8'));
+      const paths = cache.entries.map((e: [string, unknown]) => e[0]);
+      expect(paths).toContain('b.txt');
+      expect(paths).not.toContain('a.txt');
+    });
+
+    it('tolerates a corrupt or incompatible cache file (cold scan)', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'hello');
+      // Garbage JSON → JSON.parse throws → caught → starts cold.
+      await writeFile(cachePath, 'not json {{{');
+      const bs = new BsMem();
+      const setBlob = vi.spyOn(bs, 'setBlob');
+      const scanner = new FsScanner(testDir, { bs, scanCachePath: cachePath });
+      await scanner.scan();
+      expect(setBlob).toHaveBeenCalledTimes(1);
+
+      // Valid JSON but no `entries` array → ignored, still a cold scan.
+      const bs2 = new BsMem();
+      const setBlob2 = vi.spyOn(bs2, 'setBlob');
+      await writeFile(cachePath, JSON.stringify({ version: 1 }));
+      const scanner2 = new FsScanner(testDir, {
+        bs: bs2,
+        scanCachePath: cachePath,
+      });
+      await scanner2.scan();
+      expect(setBlob2).toHaveBeenCalledTimes(1);
     });
   });
 });
