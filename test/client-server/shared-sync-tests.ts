@@ -286,6 +286,37 @@ export function defineProductionSyncTests(
 
         await teardown();
       });
+
+      it('should propagate a deletion of a file created DURING the session', async () => {
+        // The case above seeds both folders before sync starts, so the file is
+        // part of the initial tree. A file that is created, modified and then
+        // deleted while syncing is a different path — and the one the lab's
+        // `modify-delete` recipe exercises. There, A's watcher reported
+        // `deleted:` and A emitted no ref at all, so B was never told.
+        await writeFile(join(folderA, 'seed.txt'), 'seed');
+        await writeFile(join(folderB, 'seed.txt'), 'seed');
+
+        const setup = await createSetup({ folderA, folderB });
+        const { teardown } = await startBidirectionalSync(setup);
+
+        // try/finally: a failing assertion here must still tear the agents
+        // down. Leaked watchers kept syncing into the next test's folders and
+        // turned one red test into seven.
+        try {
+          await writeFile(join(folderA, 'mod.txt'), 'v1');
+          await waitForFile(join(folderB, 'mod.txt'), 'v1');
+
+          await writeFile(join(folderA, 'mod.txt'), 'v2');
+          await waitForFile(join(folderB, 'mod.txt'), 'v2');
+
+          await rm(join(folderA, 'mod.txt'));
+
+          await waitForGone(join(folderB, 'mod.txt'));
+          expect(await readFileSafe(join(folderB, 'seed.txt'))).toBe('seed');
+        } finally {
+          await teardown();
+        }
+      });
     });
 
     // =========================================================================
