@@ -186,6 +186,13 @@ export class FsAgent {
   private _stopSync?: () => void;
   private _stopSyncFromDb?: () => void;
   private _lastSentRef?: string;
+
+  /**
+   * The incoming ref most recently applied. Retired from the connector's dedup
+   * sets when the next one supersedes it, so a peer returning the tree to that
+   * state can still reach this agent.
+   */
+  private _lastAppliedRef?: string;
   /** Content fingerprint of the last tree we broadcasted (paths+blobIds) */
   private _lastSentContentKey?: string;
   private _timeouts: Required<TimeoutConfig>;
@@ -419,28 +426,24 @@ export class FsAgent {
    *   conflict ancestry); set explicitly here because the FsAgent broadcasts
    *   via an explicit send, which pre-empts the Connector's db-observer path.
    */
-  /**
-   * Drop a superseded ref from the connector's received-dedup set.
-   *
-   * Refs are content hashes, so a folder that returns to an earlier state
-   * re-emits that state's ref. Ref-level dedup then discards it as
-   * already-seen and the change is lost — which is what made a deletion
-   * invisible to every peer. A ref that no longer describes the current state
-   * must be deliverable again; one that still does stays deduped, so
-   * bounce-back suppression is unaffected.
-   * @param connector - The connector holding the dedup set.
-   * @param ref - The ref that has just been superseded, if any.
-   */
-  private _retireRef(connector: Connector, ref: string | undefined): void {
-    if (!ref) return;
-    connector.invalidateReceived?.(ref);
-  }
-
   private async _sendRef(
     connector: Connector,
     ref: string,
     predecessorRefs?: string[],
   ): Promise<void> {
+    // A tree ref is a pure content hash, so a folder that returns to a state
+    // it broadcast earlier re-derives that state's exact ref — and
+    // Connector.send() discards it, because it has sent (or received) that ref
+    // before. Deleting a file created during the same session is precisely
+    // that shape: the folder goes A → B → A, and the deletion reached no peer
+    // at all.
+    //
+    // Every call here has already established that this is genuinely new local
+    // state: the caller compares content keys, not refs, and returns early on
+    // a match. That decision outranks the connector's ref history, so the ref
+    // is cleared from both dedup sets before it goes out. Bounce-backs are
+    // still suppressed — they never reach this point.
+    connector.invalidateSent?.(ref);
     if (this._resolveConflicts) {
       connector.setPredecessors(predecessorRefs ?? []);
     }
@@ -1099,14 +1102,6 @@ export class FsAgent {
             }
 
             // Track the ref and content we're sending
-            // The tree ref is a pure content hash, so a folder that returns
-            // to an earlier state reproduces that state's ref — and the
-            // connector's ref-level dedup drops it as already-seen. Deleting a
-            // file created during the session is exactly that case, and the
-            // deletion reached nobody. Ref-level dedup is only sound while the
-            // deduped ref still describes the current state; once it does not,
-            // it has to become deliverable again.
-            this._retireRef(connector, this._lastSentRef);
             this._lastSentRef = ref;
             this._lastSentContentKey = contentKey;
 
@@ -1538,10 +1533,17 @@ export class FsAgent {
             skipNotification: true,
             previous,
           });
-          // Same reason as on the send side: the ref we just moved away from
-          // no longer describes this folder, so a peer that later returns the
-          // tree to that state must be able to reach us with it.
-          this._retireRef(connector, this._lastSentRef);
+          // The receiving half of the same problem. The ref applied BEFORE this
+          // one no longer describes this folder, and a peer that later returns
+          // the tree to that state — by deleting what it just added — would be
+          // discarded here as already-received. Retiring the superseded one
+          // keeps the return trip deliverable; the ref just applied stays
+          // deduped, so a repeated advertisement of the CURRENT state is still
+          // suppressed.
+          if (this._lastAppliedRef && this._lastAppliedRef !== treeRef) {
+            connector.invalidateSent?.(this._lastAppliedRef);
+          }
+          this._lastAppliedRef = treeRef;
           this._lastSentRef = postRestoreRef;
           this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
           this._currentRef = postRestoreRef;
