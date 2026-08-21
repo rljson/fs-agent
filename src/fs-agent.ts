@@ -419,6 +419,23 @@ export class FsAgent {
    *   conflict ancestry); set explicitly here because the FsAgent broadcasts
    *   via an explicit send, which pre-empts the Connector's db-observer path.
    */
+  /**
+   * Drop a superseded ref from the connector's received-dedup set.
+   *
+   * Refs are content hashes, so a folder that returns to an earlier state
+   * re-emits that state's ref. Ref-level dedup then discards it as
+   * already-seen and the change is lost — which is what made a deletion
+   * invisible to every peer. A ref that no longer describes the current state
+   * must be deliverable again; one that still does stays deduped, so
+   * bounce-back suppression is unaffected.
+   * @param connector - The connector holding the dedup set.
+   * @param ref - The ref that has just been superseded, if any.
+   */
+  private _retireRef(connector: Connector, ref: string | undefined): void {
+    if (!ref) return;
+    connector.invalidateReceived?.(ref);
+  }
+
   private async _sendRef(
     connector: Connector,
     ref: string,
@@ -1082,6 +1099,14 @@ export class FsAgent {
             }
 
             // Track the ref and content we're sending
+            // The tree ref is a pure content hash, so a folder that returns
+            // to an earlier state reproduces that state's ref — and the
+            // connector's ref-level dedup drops it as already-seen. Deleting a
+            // file created during the session is exactly that case, and the
+            // deletion reached nobody. Ref-level dedup is only sound while the
+            // deduped ref still describes the current state; once it does not,
+            // it has to become deliverable again.
+            this._retireRef(connector, this._lastSentRef);
             this._lastSentRef = ref;
             this._lastSentContentKey = contentKey;
 
@@ -1513,6 +1538,10 @@ export class FsAgent {
             skipNotification: true,
             previous,
           });
+          // Same reason as on the send side: the ref we just moved away from
+          // no longer describes this folder, so a peer that later returns the
+          // tree to that state must be able to reach us with it.
+          this._retireRef(connector, this._lastSentRef);
           this._lastSentRef = postRestoreRef;
           this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
           this._currentRef = postRestoreRef;
