@@ -1,6 +1,6 @@
 {
   "name": "@rljson/fs-agent",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "description": "Rljson fs-agent description",
   "homepage": "https://github.com/rljson/fs-agent",
   "bugs": "https://github.com/rljson/fs-agent/issues",
@@ -28,7 +28,7 @@
     "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
   },
   "devDependencies": {
-    "@rljson/server": "^0.0.10",
+    "@rljson/server": "^0.0.43",
     "@types/node": "^25.3.1",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
@@ -51,7 +51,7 @@
   },
   "dependencies": {
     "@rljson/bs": "^0.0.21",
-    "@rljson/db": "^0.0.23",
+    "@rljson/db": "^0.0.30",
     "@rljson/hash": "^0.0.18",
     "@rljson/io": "^0.0.66",
     "@rljson/json": "^0.0.23",
