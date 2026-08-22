@@ -235,6 +235,45 @@ describe('Advanced Sync Tests', () => {
       }
     });
 
+    it('should propagate a deletion to BOTH peers, not just one', async () => {
+      // The two-agent version of this passes. On the four-machine lab exactly
+      // one of three peers applied the deletion and the other two kept the
+      // file, so a mesh reaches a ref by more paths than a pair does and the
+      // dedup retirement has to cover all of them.
+      const folderA = join(baseDir, 'a');
+      const folderB = join(baseDir, 'b');
+      const folderC = join(baseDir, 'c');
+      await mkdir(folderA, { recursive: true });
+      await mkdir(folderB, { recursive: true });
+      await mkdir(folderC, { recursive: true });
+
+      await writeFile(join(folderA, 'seed.txt'), 'seed');
+      await writeFile(join(folderB, 'seed.txt'), 'seed');
+      await writeFile(join(folderC, 'seed.txt'), 'seed');
+
+      const setup = await createMultiClientSetup([folderA, folderB, folderC]);
+      const { stopAll } = await startAllSync(setup);
+
+      try {
+        await writeFile(join(folderA, 'mod.txt'), 'v1');
+        await waitForFile(join(folderB, 'mod.txt'), 'v1');
+        await waitForFile(join(folderC, 'mod.txt'), 'v1');
+
+        await writeFile(join(folderA, 'mod.txt'), 'v2');
+        await waitForFile(join(folderB, 'mod.txt'), 'v2');
+        await waitForFile(join(folderC, 'mod.txt'), 'v2');
+
+        // Deleting returns A to a state every node has already broadcast.
+        await rm(join(folderA, 'mod.txt'));
+
+        await waitForGone(join(folderB, 'mod.txt'));
+        await waitForGone(join(folderC, 'mod.txt'));
+      } finally {
+        stopAll();
+        await setup.tearDown();
+      }
+    });
+
     it('should propagate files from all three clients', async () => {
       const folderA = join(baseDir, 'a');
       const folderB = join(baseDir, 'b');
