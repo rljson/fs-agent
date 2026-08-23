@@ -144,6 +144,60 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
     expect(warned('vanished during the scan')).toBe(false);
   });
 
+  // The guard that makes tolerating a vanished entry safe rather than worse.
+  //
+  // A tree is applied by peers as authoritative. Publish one that merely MISSED
+  // a file and every other machine reads it as a file DELETED. Tolerating the
+  // race without this turned a four-node concurrency recipe from green into two
+  // failures in three runs — the writer kept its file, every peer lost it.
+  describe('never publishes a partial picture', () => {
+    it('keeps the last complete tree when a later scan skips an entry', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'a');
+      await writeFile(join(testDir, 'b.txt'), 'b');
+
+      const scanner = new FsScanner(testDir, { bs: new BsMem() });
+      const complete = await scanner.scan();
+      expect(pathsIn(complete)).toEqual(
+        expect.arrayContaining(['a.txt', 'b.txt']),
+      );
+
+      // b.txt vanishes mid-walk on the next scan.
+      failures.push({ op: 'stat', match: /b\.txt$/, code: 'ENOENT' });
+      const partial = await scanner.scan();
+
+      // The complete picture is retained — b.txt is NOT reported as gone.
+      expect(pathsIn(partial)).toContain('b.txt');
+      expect(scanner.tree).toBe(complete);
+      expect(warned('partial picture')).toBe(true);
+    });
+
+    it('recovers on the next clean scan', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'a');
+      const scanner = new FsScanner(testDir, { bs: new BsMem() });
+      await scanner.scan();
+
+      failures.push({ op: 'stat', match: /late\.txt$/, code: 'ENOENT' });
+      await writeFile(join(testDir, 'late.txt'), 'late');
+      expect(pathsIn(await scanner.scan())).not.toContain('late.txt');
+
+      // Churn over: the very next scan is authoritative again.
+      failures.length = 0;
+      expect(pathsIn(await scanner.scan())).toContain('late.txt');
+    });
+
+    it('accepts a partial FIRST scan rather than refusing to start', async () => {
+      await writeFile(join(testDir, 'a.txt'), 'a');
+      await writeFile(join(testDir, 'doomed.txt'), 'doomed');
+      failures.push({ op: 'stat', match: /doomed\.txt$/, code: 'ENOENT' });
+
+      const tree = await new FsScanner(testDir, { bs: new BsMem() }).scan();
+
+      expect(pathsIn(tree)).toContain('a.txt');
+      expect(pathsIn(tree)).not.toContain('doomed.txt');
+      expect(warned('no previous scan')).toBe(true);
+    });
+  });
+
   // The counterpart that matters just as much. Tolerance is for "it is not
   // there any more", NOT for a permission problem or a failing disk. Those
   // must still stop the scan loudly — a tree that is quietly missing files is
