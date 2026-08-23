@@ -270,8 +270,32 @@ export class FsScanner {
       console.warn(
         `[fs-scanner] ${this._vanishedDuringScan} entr` +
           `${this._vanishedDuringScan === 1 ? 'y' : 'ies'} vanished during the ` +
-          `scan of ${this._rootPath} — skipped; the next scan picks up the ` +
-          `settled state`,
+          `scan of ${this._rootPath} — this scan is a partial picture`,
+      );
+
+      // A scan that skipped entries is NOT this folder's state. Tolerating a
+      // vanished child keeps the walk alive, which is the point — but
+      // publishing the result would trade a stalled watcher for something
+      // worse: peers apply a tree as authoritative, so a file merely MISSED
+      // reads as a file DELETED, on every other machine.
+      //
+      // Measured, not theorised: making the walk survive without this guard
+      // turned a four-node concurrency recipe from green into two failures in
+      // three runs, with the writer keeping its file and every peer losing it.
+      //
+      // So keep the last picture that WAS complete. Nothing is lost — the
+      // safety rescan comes back within its interval, and the first scan that
+      // completes cleanly reports the drift. The cache swap is skipped too: a
+      // cache rebuilt from a partial walk would prune entries for files that
+      // are still there.
+      if (this._tree) {
+        return this._tree;
+      }
+      // No previous picture — the very first scan. A partial tree beats
+      // refusing to start; the same rescan settles it.
+      console.warn(
+        `[fs-scanner] no previous scan of ${this._rootPath} to fall back on — ` +
+          `starting from the partial one`,
       );
     }
 
