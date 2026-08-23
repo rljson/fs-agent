@@ -788,8 +788,8 @@ export class FsScanner {
    * an unbounded pause silences the node permanently. A bounded one degrades
    * to a little duplicate work instead, which is the right way round: the
    * loop-suppression this exists for is an optimisation, staying alive is not.
-   * @param options - Pause options.
-   * @param options.autoResumeMs - Release the pause after this many ms.
+   * @param options - Pause options; `autoResumeMs` releases the pause after
+   *   that many milliseconds.
    */
   pauseWatch(options?: { autoResumeMs?: number }): void {
     if (!this._paused) this._pausedAt = Date.now();
