@@ -57,3 +57,25 @@ worse.
 
 Until one is chosen, the interval is `RLJSON_FS_RESCAN_MS`-overridable so a
 large deployment can back it off without a code change.
+
+## Update: the safety rescan is probably NOT the mechanism
+
+Traced every sync trigger across three agents at a 5s interval:
+
+- **No push is triggered by `safety-rescan`** in these runs. Every one is a real
+  watcher event. The interval correlated with the failure because it changes
+  timing, not because the rescan does the resurrecting.
+- Peers broadcast a tree **still containing the file**, triggered by `modified`,
+  immediately after applying that file. That is `resumeWatch()` ->
+  `_rescanAfterPause()` firing `_notifyChange({ type: 'modified' })` once the
+  pause ends: an echo of the apply, arriving with `_remoteApplyInFlight` already
+  cleared, so the WP1b flag does not cover it.
+
+So the open question narrows, and moves: it is not "how should the safety rescan
+decide whether to push", it is **"an apply echo is indistinguishable from a local
+edit once the pause ends"**. The post-pause notification needs to carry its
+provenance, or the content-key dedup that should absorb it needs to be
+understood — it evidently does not under three nodes.
+
+This also means the interval is a red herring for WP1. Left at 30s because 5s
+remains unproven, but it is not the thing to fix.
