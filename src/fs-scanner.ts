@@ -13,6 +13,42 @@ import { FSWatcher, watch } from 'fs';
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
+/**
+ * How often the safety rescan runs.
+ *
+ * It is the only thing that notices a write while the watcher is deaf — a
+ * dropped native event, or a pause that was never resumed — so the interval is
+ * the worst-case latency for those writes, not a background-maintenance knob.
+ * Thirty seconds made a stuck node look broken rather than slow.
+ *
+ * Five seconds was blocked for months because shortening it made a
+ * three-client delete test fail consistently, which read as "the rescan lands
+ * inside a delete round trip and undoes the deletion". It does not: tracing
+ * every sync trigger showed no push comes from the rescan at all. The interval
+ * only shifted which bootstrap refs landed in a window where they were marked
+ * received and never delivered, and that is fixed at its source. See
+ * `doc/safety-rescan.md`.
+ *
+ * Overridable per deployment so a large or deep tree can back it off (the scan
+ * is O(N), though {@link FsScanOptions.scanCachePath} makes a warm one cheap)
+ * without a code change.
+ */
+/* v8 ignore start -- @preserve env-overridable interval */
+const _envRescan = Number(process.env['RLJSON_FS_RESCAN_MS']);
+export const SAFETY_RESCAN_INTERVAL_MS =
+  Number.isFinite(_envRescan) && _envRescan > 0 ? _envRescan : 5_000;
+/* v8 ignore stop -- @preserve */
+
+/**
+ * How long a pause must last before the safety rescan treats it as stuck and
+ * reports through it.
+ *
+ * Longer than any restore takes, so ordinary loop-suppression is untouched;
+ * short enough that a pause whose resume never arrives costs seconds, not
+ * every write from then on.
+ */
+export const STUCK_PAUSE_MS = 15_000;
+
 // .............................................................................
 // Types
 // .............................................................................
@@ -123,6 +159,12 @@ export class FsScanner {
   private _missedChangesDuringPause: boolean = false;
   /** Periodic full-rescan timer that catches events the native watcher drops. */
   private _safetyTimer: ReturnType<typeof setInterval> | null = null;
+  /** When the current pause began, or null when not paused. */
+  private _pausedAt: number | null = null;
+
+  /** Releases a pause whose resume never arrived (see {@link pauseWatch}). */
+  private _autoResumeTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** Set by stopWatch() so a pending watcher reinstall / rescan bails out. */
   private _stopRequested: boolean = false;
 
@@ -509,13 +551,13 @@ export class FsScanner {
 
     // Periodic safety net: native fs.watch drops events under burst load
     // (especially Windows ReadDirectoryChangesW). A periodic full rescan +
-    // notify catches drift the watcher missed — one O(N) scan every 30 s.
+    // notify catches drift the watcher missed.
     /* v8 ignore next -- @preserve stopWatch clears the timer with the watcher, so it is always null here */
     if (!this._safetyTimer) {
       this._safetyTimer = setInterval(() => {
         /* v8 ignore next -- @preserve timer firing is exercised via _runSafetyRescan */
         void this._runSafetyRescan();
-      }, 30_000);
+      }, SAFETY_RESCAN_INTERVAL_MS);
       this._safetyTimer.unref?.();
     }
   }
@@ -527,7 +569,14 @@ export class FsScanner {
    * scan failures are no-ops.
    */
   private async _runSafetyRescan(): Promise<void> {
-    if (this._paused || this._stopRequested) return;
+    // Gated on the pause looking STUCK, not on the pause itself. A stuck pause
+    // is what this exists to recover from — but scanning during a legitimate
+    // restore pause mutates `_tree` underneath the restore, which broke delete
+    // propagation intermittently until the threshold was applied here too.
+    if (this._stopRequested) return;
+    if (this._paused && !this._pauseLooksStuck({ type: 'safety-rescan', path: '.' })) {
+      return;
+    }
     /* v8 ignore next -- @preserve _tree is set before the timer ever fires */
     const prevKey = this._tree ? this._safetyContentKey(this._tree) : null;
     try {
@@ -538,8 +587,8 @@ export class FsScanner {
       );
       return;
     }
-    /* v8 ignore next -- @preserve defensive: pause/stop racing the scan */
-    if (this._paused || this._stopRequested) return;
+    /* v8 ignore next -- @preserve defensive: stop racing the scan */
+    if (this._stopRequested) return;
     /* v8 ignore next -- @preserve scan() always sets _tree on success */
     const nextKey = this._tree ? this._safetyContentKey(this._tree) : null;
     if (prevKey !== nextKey) {
@@ -673,10 +722,34 @@ export class FsScanner {
     return undefined;
   }
 
+  /**
+   * Whether this notification should escape the pause.
+   *
+   * Only the safety rescan may, and only once the pause has outlasted any
+   * plausible restore. Letting it through a SHORT pause reintroduces exactly
+   * the echo the pause prevents — a rescan firing mid-restore notifies, the
+   * agent stores a tree built from half-restored files, and delete propagation
+   * breaks (caught by the client-server suite, not by unit tests).
+   * @param change - The pending notification.
+   * @returns `true` when the pause has lasted long enough to look stuck.
+   */
+  private _pauseLooksStuck(change: FsChange): boolean {
+    if (change.type !== 'safety-rescan') return false;
+    if (this._pausedAt === null) return false;
+    return Date.now() - this._pausedAt >= STUCK_PAUSE_MS;
+  }
+
   private async _notifyChange(change: FsChange): Promise<void> {
-    // Don't notify if watching is paused (prevents loops during external updates)
-    /* v8 ignore if -- @preserve */
-    if (this._paused) {
+    // Pausing suppresses notifications so an external restore does not loop
+    // back as a local change — EXCEPT the periodic safety rescan.
+    //
+    // `pauseWatch()` is called on socket disconnect and `resumeWatch()` only on
+    // reconnect. A disconnect whose reconnect never fires leaves the scanner
+    // paused forever, and every subsequent write is dropped here: the node
+    // syncs its initial state and then goes silent for good. That was live for
+    // weeks. The rescan is the one notification that must survive a pause,
+    // because it is what notices the writes the pause swallowed.
+    if (this._paused && !this._pauseLooksStuck(change)) {
       return;
     }
 
@@ -697,6 +770,10 @@ export class FsScanner {
 
   stopWatch(): void {
     this._stopRequested = true;
+    if (this._autoResumeTimer) {
+      clearTimeout(this._autoResumeTimer);
+      this._autoResumeTimer = null;
+    }
     if (this._safetyTimer) {
       clearInterval(this._safetyTimer);
       this._safetyTimer = null;
@@ -709,12 +786,38 @@ export class FsScanner {
   }
 
   /**
-   * Temporarily pause file change notifications
-   * Used to prevent loops when updating filesystem from external source
+   * Temporarily pause file change notifications, so an external restore does
+   * not loop back as a local change.
+   *
+   * `autoResumeMs` bounds the pause. A pause taken on socket disconnect is
+   * released by the matching reconnect — and when that reconnect never fires,
+   * an unbounded pause silences the node permanently. A bounded one degrades
+   * to a little duplicate work instead, which is the right way round: the
+   * loop-suppression this exists for is an optimisation, staying alive is not.
+   * @param autoResumeMs - Release the pause after this many milliseconds.
+   *   Omit to pause until an explicit `resumeWatch()`.
    */
-  pauseWatch(): void {
+  pauseWatch(autoResumeMs?: number): void {
+    if (!this._paused) this._pausedAt = Date.now();
     this._paused = true;
     this._missedChangesDuringPause = false;
+    if (this._autoResumeTimer) {
+      clearTimeout(this._autoResumeTimer);
+      this._autoResumeTimer = null;
+    }
+    if (autoResumeMs !== undefined) {
+      this._autoResumeTimer = setTimeout(() => {
+        this._autoResumeTimer = null;
+        if (this._paused) {
+          console.warn(
+            `[fs-scanner] pause exceeded ${autoResumeMs}ms without a ` +
+              `resume — releasing it so ${this._rootPath} keeps syncing`,
+          );
+          this.resumeWatch();
+        }
+      }, autoResumeMs);
+      this._autoResumeTimer.unref?.();
+    }
   }
 
   /**
@@ -723,8 +826,13 @@ export class FsScanner {
    * an asynchronous rescan so that syncToDb can detect and push the changes.
    */
   resumeWatch(): void {
+    if (this._autoResumeTimer) {
+      clearTimeout(this._autoResumeTimer);
+      this._autoResumeTimer = null;
+    }
     const missedChanges = this._missedChangesDuringPause;
     this._paused = false;
+    this._pausedAt = null;
     this._missedChangesDuringPause = false;
     if (missedChanges) {
       void this._rescanAfterPause();
