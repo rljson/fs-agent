@@ -311,7 +311,10 @@ export function defineProductionSyncTests(
 
           await rm(join(folderA, 'mod.txt'));
 
-          await waitForGone(join(folderB, 'mod.txt'));
+          // A longer budget than the default: this case waits for a full
+          // create/modify/delete round trip, and under the whole suite running
+          // in parallel the default 10s was marginal enough to flake.
+          await waitForGone(join(folderB, 'mod.txt'), 25_000);
           expect(await readFileSafe(join(folderB, 'seed.txt'))).toBe('seed');
         } finally {
           await teardown();

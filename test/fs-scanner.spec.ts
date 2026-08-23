@@ -558,15 +558,254 @@ describe('FsScanner', () => {
       expect(changes).toContain('safety-rescan');
     });
 
-    it('is a no-op while paused', async () => {
+    it('still reports drift while paused — a stuck pause must not silence it', async () => {
+      // This asserted the opposite until v0.0.19, and that was the bug: the
+      // pause taken on socket disconnect is released only by the matching
+      // reconnect, so a reconnect that never fires left the scanner paused for
+      // good. The node synced its initial state and then ignored every write —
+      // live for weeks. The rescan is precisely what has to survive a pause,
+      // because it is what notices the writes the pause swallowed.
       const scanner = new FsScanner(testDir);
       await scanner.scan();
       const changes: string[] = [];
       scanner.onChange((c) => changes.push(c.type));
       scanner.pauseWatch();
+      // Backdate the pause past the stuck threshold.
+      (scanner as unknown as { _pausedAt: number })._pausedAt =
+        Date.now() - 60_000;
       await writeFile(join(testDir, 'c.txt'), 'c');
       await runRescan(scanner);
+      expect(changes).toEqual(['safety-rescan']);
+    });
+
+    it('does not even SCAN during a short pause', async () => {
+      // Scanning mutates _tree underneath an in-flight restore, so the
+      // threshold gates the scan as well as the notification.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const before = scanner.tree;
+      scanner.pauseWatch();
+      await writeFile(join(testDir, 'noscan.txt'), 'n');
+      await runRescan(scanner);
+      expect(scanner.tree).toBe(before);
+
+      // Once the pause looks stuck it scans and reports.
+      (scanner as unknown as { _pausedAt: number })._pausedAt =
+        Date.now() - 60_000;
+      await runRescan(scanner);
+      expect(scanner.tree).not.toBe(before);
+    });
+
+    it('never lets a non-rescan change through, however long the pause', async () => {
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+      scanner.pauseWatch();
+      (scanner as unknown as { _pausedAt: number })._pausedAt =
+        Date.now() - 60_000;
+      await (
+        scanner as unknown as {
+          _notifyChange: (c: { type: string; path: string }) => Promise<void>;
+        }
+      )._notifyChange({ type: 'modified', path: 'y.txt' });
       expect(changes).toEqual([]);
+    });
+
+    it('re-pausing replaces the pending auto-release', async () => {
+      vi.useFakeTimers();
+      try {
+        const scanner = new FsScanner(testDir);
+        await scanner.scan();
+        const timer = () =>
+          (scanner as unknown as { _autoResumeTimer: unknown })._autoResumeTimer;
+        scanner.pauseWatch({ autoResumeMs: 500 });
+        const first = timer();
+        // A second bounded pause must not leave the first timer running, or
+        // the pause is released on the older, shorter deadline.
+        scanner.pauseWatch({ autoResumeMs: 5_000 });
+        expect(timer()).not.toBe(first);
+        await vi.advanceTimersByTimeAsync(600);
+        expect((scanner as unknown as { _paused: boolean })._paused).toBe(true);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect((scanner as unknown as { _paused: boolean })._paused).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a stuck pause lets the rescan run, not merely report', async () => {
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+      scanner.pauseWatch();
+      (scanner as unknown as { _pausedAt: number })._pausedAt =
+        Date.now() - 60_000;
+      await writeFile(join(testDir, 'stuck.txt'), 'x');
+      await runRescan(scanner);
+      expect(changes).toEqual(['safety-rescan']);
+    });
+
+    it('does nothing once stopWatch has been called', async () => {
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const before = scanner.tree;
+      scanner.stopWatch();
+      await writeFile(join(testDir, 'stopped.txt'), 'x');
+      await runRescan(scanner);
+      expect(scanner.tree).toBe(before);
+    });
+
+    it('the auto-release is inert if the pause already ended', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const scanner = new FsScanner(testDir);
+        await scanner.scan();
+        scanner.pauseWatch({ autoResumeMs: 500 });
+        // Cleared by something other than resumeWatch (which would also cancel
+        // the timer): the callback must still find nothing to do.
+        (scanner as unknown as { _paused: boolean })._paused = false;
+        await vi.advanceTimersByTimeAsync(600);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('treats a rescan with no recorded pause start as not stuck', async () => {
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const stuck = (
+        scanner as unknown as {
+          _pauseLooksStuck: (c: { type: string; path: string }) => boolean;
+        }
+      )._pauseLooksStuck.bind(scanner);
+      expect(stuck({ type: 'safety-rescan', path: '.' })).toBe(false);
+    });
+
+    it('logs and releases when the auto-resume fires', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const scanner = new FsScanner(testDir);
+        await scanner.scan();
+        scanner.pauseWatch({ autoResumeMs: 500 });
+        await vi.advanceTimersByTimeAsync(600);
+        expect((scanner as unknown as { _paused: boolean })._paused).toBe(false);
+        expect(warn.mock.calls.flat().join(' ')).toContain('without a resume');
+
+        // A pause already released before the timer fires is left alone.
+        scanner.pauseWatch({ autoResumeMs: 500 });
+        scanner.resumeWatch();
+        warn.mockClear();
+        await vi.advanceTimersByTimeAsync(600);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('a second pause does not reset when the first began', async () => {
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      scanner.pauseWatch();
+      const first = (scanner as unknown as { _pausedAt: number })._pausedAt;
+      scanner.pauseWatch();
+      // Otherwise a caller that re-pausesevery cycle keeps the pause looking fresh
+      // forever, which is exactly how a stuck pause hides.
+      expect((scanner as unknown as { _pausedAt: number })._pausedAt).toBe(first);
+    });
+
+    it('stays quiet during a SHORT pause, so a restore cannot echo', async () => {
+      // Letting the rescan through a brief pause reintroduces the loop the
+      // pause exists to stop: it fires mid-restore, the agent stores a tree
+      // built from half-restored files, and delete propagation breaks. The
+      // client-server suite caught this; unit tests did not.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+      scanner.pauseWatch();
+      await writeFile(join(testDir, 'short.txt'), 's');
+      await runRescan(scanner);
+      expect(changes).toEqual([]);
+    });
+
+    it('does NOT let ordinary changes through a pause', async () => {
+      // The loop-suppression the pause exists for is untouched: only the
+      // rescan is exempt, so an external restore still cannot echo back.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+      scanner.pauseWatch();
+      await (
+        scanner as unknown as {
+          _notifyChange: (c: { type: string; path: string }) => Promise<void>;
+        }
+      )._notifyChange({ type: 'modified', path: 'x.txt' });
+      expect(changes).toEqual([]);
+    });
+
+    it('releases a pause that was never resumed', async () => {
+      vi.useFakeTimers();
+      try {
+        const scanner = new FsScanner(testDir);
+        await scanner.scan();
+        scanner.pauseWatch({ autoResumeMs: 1_000 });
+        expect(
+          (scanner as unknown as { _paused: boolean })._paused,
+        ).toBe(true);
+
+        await vi.advanceTimersByTimeAsync(1_100);
+        // Bounded: a reconnect that never arrives costs a few seconds of
+        // missed notifications, not every write from then on.
+        expect(
+          (scanner as unknown as { _paused: boolean })._paused,
+        ).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a resume cancels the auto-release, and stopWatch does too', async () => {
+      vi.useFakeTimers();
+      try {
+        const scanner = new FsScanner(testDir);
+        await scanner.scan();
+        const timer = () =>
+          (scanner as unknown as { _autoResumeTimer: unknown })
+            ._autoResumeTimer;
+
+        scanner.pauseWatch({ autoResumeMs: 1_000 });
+        expect(timer()).not.toBeNull();
+        scanner.resumeWatch();
+        expect(timer()).toBeNull();
+
+        scanner.pauseWatch({ autoResumeMs: 1_000 });
+        scanner.stopWatch();
+        expect(timer()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('an unbounded pause stays paused', async () => {
+      vi.useFakeTimers();
+      try {
+        const scanner = new FsScanner(testDir);
+        await scanner.scan();
+        // No autoResumeMs: the restore-suppression callers keep exact control.
+        scanner.pauseWatch();
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect((scanner as unknown as { _paused: boolean })._paused).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('survives a scan failure (root removed) without throwing', async () => {

@@ -2455,3 +2455,55 @@ describe('FsAgent', () => {
     });
   });
 });
+
+describe('FsAgent.fromClient — disconnect must not silence the node', () => {
+  it('bounds the pause it takes on disconnect', async () => {
+    // onReconnect is the only thing that releases this pause. When it never
+    // fires the node syncs its initial state and then ignores every write, so
+    // the pause has to release itself.
+    const { DISCONNECT_PAUSE_MAX_MS } = await import('../src/fs-agent.ts');
+    let onDisconnect: (() => void) | undefined;
+    const paused: Array<{ autoResumeMs?: number } | undefined> = [];
+
+    const { tmpdir } = await import('node:os');
+    const { randomUUID } = await import('node:crypto');
+    const dir = join(tmpdir(), `fromclient-${randomUUID()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      const { IoMem, createSocketPair } = await import('@rljson/io');
+      const io = new IoMem();
+      await io.init();
+      await io.isReady();
+      const { BsMem } = await import('@rljson/bs');
+      const [, clientSocket] = createSocketPair();
+      const client = {
+        io,
+        bs: new BsMem(),
+        onDisconnect: (cb: () => void) => {
+          onDisconnect = cb;
+        },
+      };
+
+      const agent = await FsAgent.fromClient(
+        dir,
+        'sharedTree',
+        client as never,
+        clientSocket as never,
+      );
+      const realPause = agent.scanner.pauseWatch.bind(agent.scanner);
+      agent.scanner.pauseWatch = (opts?: { autoResumeMs?: number }) => {
+        paused.push(opts);
+        realPause(opts);
+      };
+
+      expect(typeof onDisconnect).toBe('function');
+      onDisconnect!();
+      expect(paused).toHaveLength(1);
+      expect(paused[0]?.autoResumeMs).toBe(DISCONNECT_PAUSE_MAX_MS);
+      agent.scanner.stopWatch();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+

@@ -159,6 +159,15 @@ const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
   recoveryRetries: 10,
 };
 
+/**
+ * Longest a disconnect may keep the watcher paused.
+ *
+ * Generous enough for an ordinary reconnect, short enough that a reconnect
+ * which never arrives costs a few seconds of missed notifications rather than
+ * every write from then on.
+ */
+export const DISCONNECT_PAUSE_MAX_MS = 30_000;
+
 /** Filename for sync error log written to the sync folder */
 export const SYNC_ERROR_FILE = '.sync-errors.log';
 
@@ -1756,7 +1765,12 @@ export class FsAgent {
     // triggers syncFromDb to catch up on any missed changes.
     if (typeof client.onDisconnect === 'function') {
       client.onDisconnect(() => {
-        agent.scanner.pauseWatch();
+        // Bounded: `onReconnect` is the only thing that releases this pause,
+        // and a disconnect whose reconnect never fires left the node silent
+        // for weeks — initial sync fine, then no reaction to any write.
+        agent.scanner.pauseWatch({
+          autoResumeMs: DISCONNECT_PAUSE_MAX_MS,
+        });
       });
     }
 
