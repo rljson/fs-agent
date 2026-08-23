@@ -186,6 +186,27 @@ export const ATOMIC_TMP_PREFIX = '.fsagent-tmp-';
 /**
  * Orchestrates filesystem operations with tree structures and blob storage
  */
+/**
+ * Thrown when a restore wrote everything it could but at least one file was
+ * held open by another process.
+ *
+ * Not a failure of the restore so much as a "not yet": the bytes are still
+ * available, the file is simply busy. It is an error rather than a silent
+ * partial success because the folder does NOT match the tree afterwards, and
+ * anything that treats it as if it did — advertising the state, recording the
+ * ref as applied — would make one locked file look like an edit that everyone
+ * else must adopt.
+ */
+export class PartialRestoreError extends Error {
+  constructor(public readonly lockedPaths: string[]) {
+    super(
+      `restore could not write ${lockedPaths.length} locked file` +
+        `${lockedPaths.length === 1 ? '' : 's'}: ${lockedPaths.join(', ')}`,
+    );
+    this.name = 'PartialRestoreError';
+  }
+}
+
 export class FsAgent {
   private _scanner: FsScanner;
   private _adapter: FsBlobAdapter;
@@ -220,6 +241,9 @@ export class FsAgent {
   /** Files written vs left alone by the current {@link restore}. */
   private _restoreWritten = 0;
   private _restoreSkipped = 0;
+
+  /** Paths the current {@link restore} could not write because they were held open. */
+  private _restoreLocked: string[] = [];
 
   /**
    * What this agent last wrote to each absolute path, so a repeat restore can
@@ -593,6 +617,7 @@ export class FsAgent {
     // Recursively restore from tree structure
     this._restoreWritten = 0;
     this._restoreSkipped = 0;
+    this._restoreLocked = [];
     await this._restoreTree(
       tree.rootHash,
       tree.trees,
@@ -614,6 +639,13 @@ export class FsAgent {
         expectedFiles,
         preRestore,
       );
+    }
+
+    // Everything writable is now written, and pruning has run. Only now report
+    // the locked files — raising earlier would have abandoned the rest of the
+    // restore, which is the behaviour this replaces.
+    if (this._restoreLocked.length > 0) {
+      throw new PartialRestoreError([...this._restoreLocked]);
     }
   }
 
@@ -722,27 +754,45 @@ export class FsAgent {
         // Create parent directories
         await mkdir(dirname(filePath), { recursive: true });
 
-        // Write file atomically (temp + fsync + rename) so a crash mid-restore
-        // never leaves a half-written, corrupt file on disk.
-        await FsAgent._atomicWriteFile(filePath, fileBlob.content);
-        this._restoreWritten++;
+        try {
+          // Write file atomically (temp + fsync + rename) so a crash
+          // mid-restore never leaves a half-written, corrupt file on disk.
+          await FsAgent._atomicWriteFile(filePath, fileBlob.content);
+          this._restoreWritten++;
 
-        // Preserve mtime
-        /* v8 ignore else -- @preserve */
-        if (meta.mtime) {
-          const mtime = new Date(meta.mtime);
-          await utimes(filePath, mtime, mtime);
-        }
+          // Preserve mtime
+          /* v8 ignore else -- @preserve */
+          if (meta.mtime) {
+            const mtime = new Date(meta.mtime);
+            await utimes(filePath, mtime, mtime);
+          }
 
-        // Remember what was put there, so a repeat restore recognises its own
-        // work without re-reading the file.
-        /* v8 ignore else -- @preserve */
-        if (meta.size !== undefined && meta.mtime !== undefined) {
-          this._restoredBlobs.set(filePath, {
-            blobId: meta.blobId,
-            size: meta.size,
-            mtime: meta.mtime,
-          });
+          // Remember what was put there, so a repeat restore recognises its
+          // own work without re-reading the file.
+          /* v8 ignore else -- @preserve */
+          if (meta.size !== undefined && meta.mtime !== undefined) {
+            this._restoredBlobs.set(filePath, {
+              blobId: meta.blobId,
+              size: meta.size,
+              mtime: meta.mtime,
+            });
+          }
+        } catch (error) {
+          // CARAT holds .dbf and .PRJZ open for as long as a user has the
+          // document. One of those aborted the entire restore, so a single
+          // open document stopped every OTHER file in the tree from arriving —
+          // one user's lock became everyone's stalled sync.
+          //
+          // Skip the file and keep going. The bytes are not lost: nothing has
+          // been recorded as applied, so the caller retries, and by then the
+          // file is usually closed.
+          if (!FsAgent._isLocked(error)) throw error;
+          console.warn(
+            `[FsAgent] restore: "${meta.relativePath}" is held open by another ` +
+              `process (${(error as NodeJS.ErrnoException).code}) — skipped, ` +
+              `will retry`,
+          );
+          this._restoreLocked.push(meta.relativePath);
         }
       }
     } else if (meta.type === 'directory') {
@@ -762,6 +812,21 @@ export class FsAgent {
         }
       }
     }
+  }
+
+  /**
+   * Whether a caught value means "another process is holding this file".
+   *
+   * Windows reports a locked file as EPERM or EBUSY; EACCES covers the
+   * permission-denied shape. Deliberately narrow — anything else is a real
+   * write failure and must still abort, because a restore that shrugged off
+   * every error would report success while leaving the folder wrong.
+   * @param err - The caught value.
+   * @returns `true` for a lock-shaped error.
+   */
+  private static _isLocked(err: unknown): boolean {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
   }
 
   /**
@@ -1757,6 +1822,29 @@ export class FsAgent {
           this._currentRef = postRestoreRef;
           return; // Success — exit retry loop
         } catch (err) {
+          if (err instanceof PartialRestoreError) {
+            // The folder now holds this ref's content for every file except
+            // the locked ones. That half-applied state must not go out: the
+            // watcher wakes on resume, sees hundreds of changed files, and
+            // would broadcast a tree that still carries the OLD bytes for the
+            // locked file — re-asserting it to every peer and undoing the
+            // change we were in the middle of applying. One user with a
+            // document open would silently revert it for everyone.
+            //
+            // Recording it as the last state SENT suppresses exactly that
+            // advertisement, without claiming the ref was applied: the ref
+            // bookkeeping is untouched, so the retry below still re-applies
+            // it, and a genuine local edit afterwards still has a different
+            // content key and still goes out.
+            try {
+              const halfApplied = await this._scanner.scan();
+              this._lastSentContentKey =
+                this._contentKeyFromTree(halfApplied);
+            } catch {
+              /* v8 ignore next -- @preserve a failed scan here just means the
+                 echo is not suppressed; the retry still runs */
+            }
+          }
           if (attempt === maxAttempts) {
             if (recoveryAttempt >= this._timeouts.recoveryRetries) {
               // Recovery budget exhausted (or disabled) — give up and record it.
