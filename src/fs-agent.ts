@@ -187,6 +187,30 @@ export const ATOMIC_TMP_PREFIX = '.fsagent-tmp-';
  * Orchestrates filesystem operations with tree structures and blob storage
  */
 /**
+ * A prune smaller than this many files is always allowed through.
+ *
+ * Below it, "most of the folder" is not a meaningful statement: emptying a
+ * three-file folder is an ordinary edit, and a guard that blocked it would
+ * fire constantly on small trees and be turned off.
+ */
+export const MASS_DELETE_MIN_FILES = 100;
+
+/**
+ * Above this share of the folder, a prune is treated as suspicious rather than
+ * intentional.
+ */
+export const MASS_DELETE_MAX_RATIO = 0.3;
+
+/**
+ * A restore that could not put the folder into the state the tree describes.
+ *
+ * The distinction that matters to callers is not why. It is that the folder
+ * does NOT match the tree afterwards, so the ref must not be recorded as
+ * applied and the resulting state must not be advertised to peers.
+ */
+export class RestoreIncompleteError extends Error {}
+
+/**
  * Thrown when a restore wrote everything it could but at least one file was
  * held open by another process.
  *
@@ -197,13 +221,44 @@ export const ATOMIC_TMP_PREFIX = '.fsagent-tmp-';
  * ref as applied — would make one locked file look like an edit that everyone
  * else must adopt.
  */
-export class PartialRestoreError extends Error {
+export class PartialRestoreError extends RestoreIncompleteError {
   constructor(public readonly lockedPaths: string[]) {
     super(
       `restore could not write ${lockedPaths.length} locked file` +
         `${lockedPaths.length === 1 ? '' : 's'}: ${lockedPaths.join(', ')}`,
     );
     this.name = 'PartialRestoreError';
+  }
+}
+
+/**
+ * Thrown when `cleanTarget` would have deleted most of the folder.
+ *
+ * The dangerous direction of sync is a POPULATED node receiving a tree that
+ * lacks its files: a peer that comes up empty — a fresh clone, a folder not
+ * yet mounted, a bootstrap that raced its own first scan — advertises an empty
+ * tree, and every other node faithfully deletes everything it has.
+ *
+ * Nothing downstream can tell that apart from a genuine bulk deletion, so the
+ * judgement has to be made here, and it is deliberately biased: refusing a
+ * real mass delete costs one manual step, applying a false one costs the data.
+ */
+export class MassDeleteRefusedError extends RestoreIncompleteError {
+  constructor(
+    public readonly wouldPrune: number,
+    public readonly totalFiles: number,
+    public readonly incomingFiles: number,
+  ) {
+    super(
+      // No pluralisation: the guard only fires above MASS_DELETE_MIN_FILES,
+      // so this is never one file.
+      `refusing to prune ${wouldPrune} of ${totalFiles} local files: ` +
+        `the incoming tree has ` +
+        `${incomingFiles === 0 ? 'NO files at all' : `only ${incomingFiles}`}, ` +
+        `which looks like a peer that came up empty rather than a deletion. ` +
+        `Nothing was deleted.`,
+    );
+    this.name = 'MassDeleteRefusedError';
   }
 }
 
@@ -633,6 +688,42 @@ export class FsAgent {
     }
 
     if (options?.cleanTarget) {
+      // How much of this folder would the prune take with it?
+      //
+      // Only files that were here BEFORE the restore can be pruned, so that
+      // is the population to judge against — a file written during the
+      // restore is a fresh user write and is protected separately.
+      let wouldPrune = 0;
+      for (const existing of preRestore) {
+        if (!expectedFiles.has(existing)) wouldPrune++;
+      }
+      if (
+        wouldPrune > MASS_DELETE_MIN_FILES &&
+        (expectedFiles.size === 0 ||
+          wouldPrune / preRestore.size > MASS_DELETE_MAX_RATIO)
+      ) {
+        // Loud, because the alternative to noticing this is discovering it
+        // from a user whose folder emptied.
+        console.error(
+          `[FsAgent] MASS DELETE REFUSED on ${target}: the incoming tree ` +
+            `would remove ${wouldPrune} of ${preRestore.size} files ` +
+            `(incoming tree has ${expectedFiles.size}). Nothing was deleted. ` +
+            `If this deletion is real, it has to be applied deliberately.`,
+        );
+        this._writeSyncError(
+          'restore/massDeleteGuard',
+          new Error(
+            `refused to prune ${wouldPrune}/${preRestore.size} files; ` +
+              `incoming tree had ${expectedFiles.size}`,
+          ),
+        );
+        throw new MassDeleteRefusedError(
+          wouldPrune,
+          preRestore.size,
+          expectedFiles.size,
+        );
+      }
+
       await this._pruneExtraneous(
         target,
         expectedDirs,
@@ -1822,9 +1913,9 @@ export class FsAgent {
           this._currentRef = postRestoreRef;
           return; // Success — exit retry loop
         } catch (err) {
-          if (err instanceof PartialRestoreError) {
-            // The folder now holds this ref's content for every file except
-            // the locked ones. That half-applied state must not go out: the
+          if (err instanceof RestoreIncompleteError) {
+            // The folder does not match the tree — files were locked, or a
+            // mass delete was refused. That state must not go out: the
             // watcher wakes on resume, sees hundreds of changed files, and
             // would broadcast a tree that still carries the OLD bytes for the
             // locked file — re-asserting it to every peer and undoing the
