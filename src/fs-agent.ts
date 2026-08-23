@@ -13,6 +13,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   unlink,
   utimes,
   writeFile,
@@ -215,6 +216,19 @@ export class FsAgent {
    * view — and undo a deletion the peer just made.
    */
   private _remoteApplyInFlight = false;
+
+  /** Files written vs left alone by the current {@link restore}. */
+  private _restoreWritten = 0;
+  private _restoreSkipped = 0;
+
+  /**
+   * What this agent last wrote to each absolute path, so a repeat restore can
+   * recognise its own work without re-reading the file.
+   */
+  private _restoredBlobs = new Map<
+    string,
+    { blobId: string; size: number; mtime: number }
+  >();
   private _timeouts: Required<TimeoutConfig>;
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
@@ -577,7 +591,21 @@ export class FsAgent {
       : new Set<string>();
 
     // Recursively restore from tree structure
-    await this._restoreTree(tree.rootHash, tree.trees, target);
+    this._restoreWritten = 0;
+    this._restoreSkipped = 0;
+    await this._restoreTree(
+      tree.rootHash,
+      tree.trees,
+      target,
+      target === this._rootPath,
+    );
+    if (this._restoreSkipped > 0) {
+      console.log(
+        `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
+          `${this._restoreSkipped} already-correct file` +
+          `${this._restoreSkipped === 1 ? '' : 's'} untouched`,
+      );
+    }
 
     if (options?.cleanTarget) {
       await this._pruneExtraneous(
@@ -624,11 +652,14 @@ export class FsAgent {
    * @param treeHash - Hash of the tree node to restore
    * @param trees - Map of all tree nodes
    * @param targetPath - Target directory path
+   * @param isOwnRoot - Whether `targetPath` is this agent's own folder, which
+   *   is the only case where the scanner's view describes these files
    */
   private async _restoreTree(
     treeHash: string,
     trees: Map<string, any>,
     targetPath: string,
+    isOwnRoot: boolean,
   ): Promise<void> {
     const treeNode = trees.get(treeHash);
     /* v8 ignore next -- @preserve */
@@ -649,6 +680,27 @@ export class FsAgent {
 
       /* v8 ignore else -- @preserve */
       if (meta.blobId) {
+        // Is this file already exactly what we are about to write?
+        //
+        // Every sync used to rewrite the whole tree. On the production
+        // catalogue that is 80 GB of blob fetches and disk writes per restore,
+        // which is why restores time out — and almost all of it rewrites bytes
+        // that were already identical.
+        //
+        // The check goes BEFORE the fetch deliberately: `getBlob` is the
+        // expensive half (it can cross the network), so a skip that still
+        // fetched would save the smaller cost and keep the larger one.
+        //
+        // restore preserves mtime, so a file this agent wrote earlier carries
+        // the tree's exact mtime. Size and mtime together are the rsync
+        // heuristic the scan cache already relies on. It errs only towards
+        // rewriting: a mismatch, an unreadable stat, or a coarse-grained
+        // filesystem all fall through to the write.
+        if (await this._alreadyOnDisk(filePath, meta, isOwnRoot)) {
+          this._restoreSkipped++;
+          return;
+        }
+
         // Try to fetch the blob
         let fileBlob;
         try {
@@ -673,12 +725,24 @@ export class FsAgent {
         // Write file atomically (temp + fsync + rename) so a crash mid-restore
         // never leaves a half-written, corrupt file on disk.
         await FsAgent._atomicWriteFile(filePath, fileBlob.content);
+        this._restoreWritten++;
 
         // Preserve mtime
         /* v8 ignore else -- @preserve */
         if (meta.mtime) {
           const mtime = new Date(meta.mtime);
           await utimes(filePath, mtime, mtime);
+        }
+
+        // Remember what was put there, so a repeat restore recognises its own
+        // work without re-reading the file.
+        /* v8 ignore else -- @preserve */
+        if (meta.size !== undefined && meta.mtime !== undefined) {
+          this._restoredBlobs.set(filePath, {
+            blobId: meta.blobId,
+            size: meta.size,
+            mtime: meta.mtime,
+          });
         }
       }
     } else if (meta.type === 'directory') {
@@ -694,9 +758,96 @@ export class FsAgent {
       /* v8 ignore else -- @preserve */
       if (treeNode.children && Array.isArray(treeNode.children)) {
         for (const childHash of treeNode.children) {
-          await this._restoreTree(childHash, trees, targetPath);
+          await this._restoreTree(childHash, trees, targetPath, isOwnRoot);
         }
       }
+    }
+  }
+
+  /**
+   * The content identity this agent believes is on disk at `filePath`, or
+   * `undefined` when it has no basis for an opinion.
+   *
+   * Two sources, both anchored on a real blobId rather than a guess:
+   * what this agent last wrote there, and what the scanner hashed at its last
+   * scan of the folder (which survives a restart, so a fresh process still
+   * skips an unchanged 80 GB catalogue).
+   * @param filePath - Absolute path of the file.
+   * @param relativePath - Its path within the tree.
+   * @param isOwnRoot - Whether the restore target is this agent's own folder,
+   *   which is the only case where the scanner's view describes this file.
+   * @returns The believed content identity, or `undefined`.
+   */
+  private _knownOnDisk(
+    filePath: string,
+    relativePath: string,
+    isOwnRoot: boolean,
+  ): { blobId: string; size: number; mtime: number } | undefined {
+    const written = this._restoredBlobs.get(filePath);
+    if (written) return written;
+    if (!isOwnRoot) return undefined;
+    const scanned = this._scanner.getTreeByPath(relativePath)?.meta as
+      | FsNodeMeta
+      | undefined;
+    if (
+      scanned?.blobId === undefined ||
+      scanned.size === undefined ||
+      scanned.mtime === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      blobId: scanned.blobId,
+      size: scanned.size,
+      mtime: scanned.mtime,
+    };
+  }
+
+  /**
+   * Whether the file at `filePath` is already the content `meta` describes.
+   *
+   * The decision is anchored on the blobId: a different blobId is always
+   * rewritten, whatever the timestamps say. Hashing the file instead would
+   * mean reading 80 GB to avoid writing 80 GB, which saves nothing — so the
+   * known blobId is verified against a `stat`, which catches a file edited
+   * since this agent last had an opinion about it.
+   *
+   * Deliberately one-directional in its uncertainty: every unclear case
+   * answers `false` and the file is rewritten. A needless write costs time; a
+   * wrongly skipped write leaves the wrong bytes on disk indefinitely.
+   *
+   * Anchoring on the blobId is not belt-and-braces. Size and mtime alone
+   * cannot see a same-size edit made inside the same millisecond — the scan
+   * cache tolerates that, but a restore must not: there the cost is not a
+   * stale cache entry, it is the wrong file contents left in place.
+   * @param filePath - Absolute path of the file to check.
+   * @param meta - The metadata describing the content that should be there.
+   * @param isOwnRoot - Whether the target is this agent's own folder.
+   * @returns `true` only when the file is certainly already correct.
+   */
+  private async _alreadyOnDisk(
+    filePath: string,
+    meta: FsNodeMeta,
+    isOwnRoot: boolean,
+  ): Promise<boolean> {
+    const known = this._knownOnDisk(
+      filePath,
+      meta.relativePath,
+      isOwnRoot,
+    );
+    if (!known || known.blobId !== meta.blobId) return false;
+    try {
+      const st = await stat(filePath);
+      // Sub-millisecond tolerance, and it is load-bearing rather than
+      // defensive: `utimes` takes a millisecond value but the filesystem
+      // stores nanoseconds, and the value read back is routinely the one
+      // below — 1787491136425 is written and 1787491136424.999 comes back.
+      // Comparing exactly (or flooring) makes every file look modified, which
+      // silently turns the whole optimisation off.
+      return st.size === known.size && Math.abs(st.mtimeMs - known.mtime) < 1;
+    } catch {
+      // Not there, or not readable — write it.
+      return false;
     }
   }
 
