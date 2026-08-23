@@ -619,11 +619,11 @@ describe('FsScanner', () => {
         await scanner.scan();
         const timer = () =>
           (scanner as unknown as { _autoResumeTimer: unknown })._autoResumeTimer;
-        scanner.pauseWatch({ autoResumeMs: 500 });
+        scanner.pauseWatch(500);
         const first = timer();
         // A second bounded pause must not leave the first timer running, or
         // the pause is released on the older, shorter deadline.
-        scanner.pauseWatch({ autoResumeMs: 5_000 });
+        scanner.pauseWatch(5_000);
         expect(timer()).not.toBe(first);
         await vi.advanceTimersByTimeAsync(600);
         expect((scanner as unknown as { _paused: boolean })._paused).toBe(true);
@@ -663,7 +663,7 @@ describe('FsScanner', () => {
       try {
         const scanner = new FsScanner(testDir);
         await scanner.scan();
-        scanner.pauseWatch({ autoResumeMs: 500 });
+        scanner.pauseWatch(500);
         // Cleared by something other than resumeWatch (which would also cancel
         // the timer): the callback must still find nothing to do.
         (scanner as unknown as { _paused: boolean })._paused = false;
@@ -692,13 +692,13 @@ describe('FsScanner', () => {
       try {
         const scanner = new FsScanner(testDir);
         await scanner.scan();
-        scanner.pauseWatch({ autoResumeMs: 500 });
+        scanner.pauseWatch(500);
         await vi.advanceTimersByTimeAsync(600);
         expect((scanner as unknown as { _paused: boolean })._paused).toBe(false);
         expect(warn.mock.calls.flat().join(' ')).toContain('without a resume');
 
         // A pause already released before the timer fires is left alone.
-        scanner.pauseWatch({ autoResumeMs: 500 });
+        scanner.pauseWatch(500);
         scanner.resumeWatch();
         warn.mockClear();
         await vi.advanceTimersByTimeAsync(600);
@@ -756,7 +756,7 @@ describe('FsScanner', () => {
       try {
         const scanner = new FsScanner(testDir);
         await scanner.scan();
-        scanner.pauseWatch({ autoResumeMs: 1_000 });
+        scanner.pauseWatch(1_000);
         expect(
           (scanner as unknown as { _paused: boolean })._paused,
         ).toBe(true);
@@ -781,12 +781,12 @@ describe('FsScanner', () => {
           (scanner as unknown as { _autoResumeTimer: unknown })
             ._autoResumeTimer;
 
-        scanner.pauseWatch({ autoResumeMs: 1_000 });
+        scanner.pauseWatch(1_000);
         expect(timer()).not.toBeNull();
         scanner.resumeWatch();
         expect(timer()).toBeNull();
 
-        scanner.pauseWatch({ autoResumeMs: 1_000 });
+        scanner.pauseWatch(1_000);
         scanner.stopWatch();
         expect(timer()).toBeNull();
       } finally {

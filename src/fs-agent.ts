@@ -1768,9 +1768,7 @@ export class FsAgent {
         // Bounded: `onReconnect` is the only thing that releases this pause,
         // and a disconnect whose reconnect never fires left the node silent
         // for weeks — initial sync fine, then no reaction to any write.
-        agent.scanner.pauseWatch({
-          autoResumeMs: DISCONNECT_PAUSE_MAX_MS,
-        });
+        agent.scanner.pauseWatch(DISCONNECT_PAUSE_MAX_MS);
       });
     }
 

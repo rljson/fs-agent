@@ -788,10 +788,10 @@ export class FsScanner {
    * an unbounded pause silences the node permanently. A bounded one degrades
    * to a little duplicate work instead, which is the right way round: the
    * loop-suppression this exists for is an optimisation, staying alive is not.
-   * @param options - Pause options; `autoResumeMs` releases the pause after
-   *   that many milliseconds.
+   * @param autoResumeMs - Release the pause after this many milliseconds.
+   *   Omit to pause until an explicit `resumeWatch()`.
    */
-  pauseWatch(options?: { autoResumeMs?: number }): void {
+  pauseWatch(autoResumeMs?: number): void {
     if (!this._paused) this._pausedAt = Date.now();
     this._paused = true;
     this._missedChangesDuringPause = false;
@@ -799,17 +799,17 @@ export class FsScanner {
       clearTimeout(this._autoResumeTimer);
       this._autoResumeTimer = null;
     }
-    if (options?.autoResumeMs !== undefined) {
+    if (autoResumeMs !== undefined) {
       this._autoResumeTimer = setTimeout(() => {
         this._autoResumeTimer = null;
         if (this._paused) {
           console.warn(
-            `[fs-scanner] pause exceeded ${options.autoResumeMs}ms without a ` +
+            `[fs-scanner] pause exceeded ${autoResumeMs}ms without a ` +
               `resume — releasing it so ${this._rootPath} keeps syncing`,
           );
           this.resumeWatch();
         }
-      }, options.autoResumeMs);
+      }, autoResumeMs);
       this._autoResumeTimer.unref?.();
     }
   }

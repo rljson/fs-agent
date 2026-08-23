@@ -2463,7 +2463,7 @@ describe('FsAgent.fromClient — disconnect must not silence the node', () => {
     // the pause has to release itself.
     const { DISCONNECT_PAUSE_MAX_MS } = await import('../src/fs-agent.ts');
     let onDisconnect: (() => void) | undefined;
-    const paused: Array<{ autoResumeMs?: number } | undefined> = [];
+    const paused: Array<number | undefined> = [];
 
     const { tmpdir } = await import('node:os');
     const { randomUUID } = await import('node:crypto');
@@ -2491,15 +2491,15 @@ describe('FsAgent.fromClient — disconnect must not silence the node', () => {
         clientSocket as never,
       );
       const realPause = agent.scanner.pauseWatch.bind(agent.scanner);
-      agent.scanner.pauseWatch = (opts?: { autoResumeMs?: number }) => {
-        paused.push(opts);
-        realPause(opts);
+      agent.scanner.pauseWatch = (ms?: number) => {
+        paused.push(ms);
+        realPause(ms);
       };
 
       expect(typeof onDisconnect).toBe('function');
       onDisconnect!();
       expect(paused).toHaveLength(1);
-      expect(paused[0]?.autoResumeMs).toBe(DISCONNECT_PAUSE_MAX_MS);
+      expect(paused[0]).toBe(DISCONNECT_PAUSE_MAX_MS);
       agent.scanner.stopWatch();
     } finally {
       await rm(dir, { recursive: true, force: true });
