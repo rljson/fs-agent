@@ -183,6 +183,9 @@ export class FsScanner {
   /** Ensures the persisted cache is read from disk only once. */
   private _cacheLoaded = false;
 
+  /** Entries that vanished mid-scan, counted per {@link scan} for one summary. */
+  private _vanishedDuringScan = 0;
+
   constructor(rootPath: string, options: FsScanOptions = {}) {
     this._rootPath = rootPath;
     this._options = {
@@ -238,6 +241,7 @@ export class FsScanner {
     }
 
     const trees = new Map<TreeRef, Tree>();
+    this._vanishedDuringScan = 0;
     let rootTree;
     try {
       rootTree = await this._scanDirectory(this._rootPath, '.', 0, trees);
@@ -257,6 +261,17 @@ export class FsScanner {
     if (!rootHashStr) {
       throw new Error(
         'Failed to generate hash for root tree. Tree structure may be invalid.',
+      );
+    }
+
+    // One line per scan rather than one per entry: under real churn this is
+    // routine, and a message per file would bury everything else.
+    if (this._vanishedDuringScan > 0) {
+      console.warn(
+        `[fs-scanner] ${this._vanishedDuringScan} entr` +
+          `${this._vanishedDuringScan === 1 ? 'y' : 'ies'} vanished during the ` +
+          `scan of ${this._rootPath} — skipped; the next scan picks up the ` +
+          `settled state`,
       );
     }
 
@@ -308,109 +323,126 @@ export class FsScanner {
         continue;
       }
 
-      const childStats = await stat(childPath);
-      /* v8 ignore else -- @preserve */
-      if (entry.isDirectory()) {
-        // Recursively scan directory
-        const childTree = await this._scanDirectory(
-          childPath,
-          childRelPath,
-          depth + 1,
-          trees,
-        );
-        childTrees.push(childTree);
-
-        // Hash directory tree node in place (JSON hash, NOT stored in Bs)
-        hip(childTree);
-        const childHashStr = childTree._hash as string;
-
-        // Add child tree to map
-        trees.set(childHashStr, childTree);
-        childRefs.push(childHashStr);
-      } else if (entry.isFile()) {
+      // Everything from here on can fail because the entry stopped existing
+      // between `readdir` naming it and this loop reaching it — the `stat`,
+      // the `readFile`, or the `readdir` inside a recursive descent. One
+      // vanished child used to abort the entire scan, and with it the watcher
+      // that depends on it: a folder under active churn could stop syncing
+      // altogether. Skip the child, keep the scan.
+      try {
+        const childStats = await stat(childPath);
         /* v8 ignore else -- @preserve */
-        const mtimeMs = childStats.mtime.getTime();
+        if (entry.isDirectory()) {
+          // Recursively scan directory
+          const childTree = await this._scanDirectory(
+            childPath,
+            childRelPath,
+            depth + 1,
+            trees,
+          );
+          childTrees.push(childTree);
 
-        // Scan cache: if this file's mtime AND size are unchanged since the last
-        // scan, reuse its cached blobId instead of re-reading + re-hashing the
-        // content. (mtime+size is the rsync-style heuristic; a same-size edit
-        // within the same mtime tick is not detected — acceptable in practice.)
-        const cached = this._scanCachePath
-          ? this._blobCache.get(childRelPath)
-          : undefined;
+          // Hash directory tree node in place (JSON hash, NOT stored in Bs)
+          hip(childTree);
+          const childHashStr = childTree._hash as string;
 
-        let blobId: string;
-        if (
-          cached &&
-          cached.mtime === mtimeMs &&
-          cached.size === childStats.size
-        ) {
-          blobId = cached.blobId;
-        } else {
-          // Store ONLY file content in blob storage (NOT tree node)
-          let fileContent: Buffer;
-          try {
-            fileContent = await readFile(childPath);
-          } catch (error) {
-            throw new Error(
-              `Failed to read file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
-            );
+          // Add child tree to map
+          trees.set(childHashStr, childTree);
+          childRefs.push(childHashStr);
+        } else if (entry.isFile()) {
+          /* v8 ignore else -- @preserve */
+          const mtimeMs = childStats.mtime.getTime();
+
+          // Scan cache: if this file's mtime AND size are unchanged since the last
+          // scan, reuse its cached blobId instead of re-reading + re-hashing the
+          // content. (mtime+size is the rsync-style heuristic; a same-size edit
+          // within the same mtime tick is not detected — acceptable in practice.)
+          const cached = this._scanCachePath
+            ? this._blobCache.get(childRelPath)
+            : undefined;
+
+          let blobId: string;
+          if (
+            cached &&
+            cached.mtime === mtimeMs &&
+            cached.size === childStats.size
+          ) {
+            blobId = cached.blobId;
+          } else {
+            // Store ONLY file content in blob storage (NOT tree node)
+            let fileContent: Buffer;
+            try {
+              fileContent = await readFile(childPath);
+            } catch (error) {
+              // A file deleted between stat and read is the same race as one
+              // deleted before the stat — rethrow it unwrapped so the per-entry
+              // handler can recognise and skip it, rather than burying the code
+              // in a message string and killing the whole scan.
+              if (FsScanner._isVanished(error)) throw error;
+              throw new Error(
+                `Failed to read file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+
+            let blobProps;
+            try {
+              blobProps = await this._bs.setBlob(fileContent);
+            } catch (error) {
+              throw new Error(
+                `Failed to store blob for file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+
+            if (!blobProps || !blobProps.blobId) {
+              throw new Error(
+                `Blob storage returned invalid blobId for file "${childRelPath}"`,
+              );
+            }
+            blobId = blobProps.blobId;
           }
 
-          let blobProps;
-          try {
-            blobProps = await this._bs.setBlob(fileContent);
-          } catch (error) {
-            throw new Error(
-              `Failed to store blob for file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
-            );
+          if (this._scanCachePath) {
+            this._nextBlobCache.set(childRelPath, {
+              mtime: mtimeMs,
+              size: childStats.size,
+              blobId,
+            });
           }
 
-          if (!blobProps || !blobProps.blobId) {
-            throw new Error(
-              `Blob storage returned invalid blobId for file "${childRelPath}"`,
-            );
-          }
-          blobId = blobProps.blobId;
-        }
-
-        if (this._scanCachePath) {
-          this._nextBlobCache.set(childRelPath, {
-            mtime: mtimeMs,
+          const fileMeta: FsNodeMeta = {
+            name: entry.name,
+            type: 'file',
+            relativePath: childRelPath,
             size: childStats.size,
-            blobId,
-          });
+            // mtime is kept for files (restore preserves it, so it round-trips to
+            // the same ref on every client) but NOT for directories (a folder's
+            // mtime is per-machine and does not round-trip). The absolute `path`
+            // is excluded everywhere — it is folder-specific.
+            mtime: mtimeMs,
+            blobId, // Link to content in Bs
+          };
+
+          const fileTree: Tree = {
+            id: entry.name,
+            isParent: false,
+            meta: fileMeta,
+            children: null,
+          };
+
+          childTrees.push(fileTree);
+
+          // Hash file tree node in place (JSON hash, NOT stored in Bs)
+          hip(fileTree);
+          const fileTreeHashStr = fileTree._hash as string;
+
+          // Add file tree to map
+          trees.set(fileTreeHashStr, fileTree);
+          childRefs.push(fileTreeHashStr);
         }
-
-        const fileMeta: FsNodeMeta = {
-          name: entry.name,
-          type: 'file',
-          relativePath: childRelPath,
-          size: childStats.size,
-          // mtime is kept for files (restore preserves it, so it round-trips to
-          // the same ref on every client) but NOT for directories (a folder's
-          // mtime is per-machine and does not round-trip). The absolute `path`
-          // is excluded everywhere — it is folder-specific.
-          mtime: mtimeMs,
-          blobId, // Link to content in Bs
-        };
-
-        const fileTree: Tree = {
-          id: entry.name,
-          isParent: false,
-          meta: fileMeta,
-          children: null,
-        };
-
-        childTrees.push(fileTree);
-
-        // Hash file tree node in place (JSON hash, NOT stored in Bs)
-        hip(fileTree);
-        const fileTreeHashStr = fileTree._hash as string;
-
-        // Add file tree to map
-        trees.set(fileTreeHashStr, fileTree);
-        childRefs.push(fileTreeHashStr);
+      } catch (error) {
+        if (!FsScanner._isVanished(error)) throw error;
+        this._vanishedDuringScan++;
+        continue;
       }
     }
 
@@ -631,6 +663,21 @@ export class FsScanner {
   private static _errMessage(err: unknown): string {
     /* v8 ignore next -- @preserve non-Error throws are defensive */
     return err instanceof Error ? err.message : String(err);
+  }
+
+  /**
+   * Whether a caught value is a "no longer there" filesystem error.
+   *
+   * A scan walks a directory that is still being written to. `readdir` returns
+   * a name, and by the time the entry is `stat`ed, read, or descended into it
+   * can be gone — a save-and-rename editor, a build tool, a peer applying a
+   * deletion. That is ordinary, not exceptional.
+   * @param err - The caught value.
+   * @returns `true` for ENOENT / ENOTDIR.
+   */
+  private static _isVanished(err: unknown): boolean {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
   }
 
   /** Whether the host is Windows — gates Windows-specific watcher hardening. */
