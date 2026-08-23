@@ -46,14 +46,18 @@ function createMockConnector(db: Db, treeKey: string, syncConfig?: SyncConfig) {
 
 describe('FsAgent', () => {
   const testDir = join(process.cwd(), 'test-temp-fs-agent');
+  /** Scratch folder for building a tree that differs from `testDir`'s. */
+  const sourceDir = join(process.cwd(), 'test-temp-fs-agent-source');
 
   beforeEach(async () => {
     await rm(testDir, { recursive: true, force: true });
+    await rm(sourceDir, { recursive: true, force: true });
     await mkdir(testDir, { recursive: true });
   });
 
   afterEach(async () => {
     await rm(testDir, { recursive: true, force: true });
+    await rm(sourceDir, { recursive: true, force: true });
   });
 
   describe('constructor', () => {
@@ -1817,6 +1821,72 @@ describe('FsAgent', () => {
       invalidateSpy.mockRestore();
       warnSpy.mockRestore();
       errorSpy.mockRestore();
+    });
+
+    it('retires a ref adopted WITHOUT a restore, so the folder can be told to return to that state', async () => {
+      // A ref whose tree already matches the folder is adopted through the
+      // equivalent-content path: nothing to restore, nothing to do. It is
+      // still an adopted state, and it has to be recorded as one — because
+      // the only ref this agent ever retires from the connector's dedup sets
+      // is the one it is LEAVING. A state adopted silently is never left in
+      // the bookkeeping's eyes, so it is never retired, and it stays marked
+      // "already received" for the rest of the session.
+      //
+      // That matters because refs are content hashes: a folder that returns
+      // to an earlier state re-derives that state's exact ref. Every agent
+      // reaches its BOOTSTRAP state this way (peers that are already in sync
+      // have equivalent content by definition), so deleting a file created
+      // after bootstrap re-derives the bootstrap ref — and the advertisement
+      // was dropped as a duplicate before any agent saw it. The deletion
+      // reached no peer at all.
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+      await writeFile(join(testDir, 'seed.txt'), 'seed');
+
+      const agent = new FsAgent(testDir);
+      const dbAdapter = new FsDbAdapter(db, treeKey);
+
+      // refSeed describes the folder exactly as it stands → adopted without
+      // a restore when it arrives.
+      const refSeed = await dbAdapter.storeFsTree(await agent.extract());
+
+      // refBoth adds a file, so applying it is a real restore.
+      await mkdir(sourceDir, { recursive: true });
+      await writeFile(join(sourceDir, 'seed.txt'), 'seed');
+      await writeFile(join(sourceDir, 'temp.txt'), 'temporary');
+      const sourceAgent = new FsAgent(sourceDir, agent.bs);
+      const refBoth = await dbAdapter.storeFsTree(await sourceAgent.extract());
+
+      const connector = createMockConnector(db, treeKey);
+      const invalidateSpy = vi.spyOn(connector, 'invalidateSent');
+      const stopSync = await agent.syncFromDb(db, connector, treeKey, {
+        cleanTarget: true,
+      });
+
+      // 1. Adopted with no restore — the case that used to go unrecorded.
+      connector.simulateIncoming(refSeed);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // 2. A real change. Leaving refSeed must retire it.
+      connector.simulateIncoming(refBoth);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(existsSync(join(testDir, 'temp.txt'))).toBe(true);
+      expect(invalidateSpy).toHaveBeenCalledWith(refSeed);
+
+      // 3. The peer deletes the file again, returning to refSeed's exact ref.
+      //    It has to be deliverable, or the deletion is lost for good.
+      connector.simulateIncoming(refSeed);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(existsSync(join(testDir, 'temp.txt'))).toBe(false);
+      expect(existsSync(join(testDir, 'seed.txt'))).toBe(true);
+
+      stopSync();
+      agent.scanner.stopWatch();
+      invalidateSpy.mockRestore();
     });
 
     it('drops an unfetchable ref immediately when recovery is disabled (recoveryRetries: 0)', async () => {

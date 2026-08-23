@@ -1328,6 +1328,31 @@ export class FsAgent {
   }
 
   /**
+   * Records `treeRef` as the ref describing this folder's current state, and
+   * retires the one it supersedes from the connector's dedup sets.
+   *
+   * A tree ref is a pure content hash, so a folder that returns to an earlier
+   * state re-derives that state's exact ref. The connector drops an incoming
+   * ref it has already received, which assumes a state is reached once and
+   * never returned to — false for content-addressed state, and false in the
+   * most ordinary way possible: create a file, then delete it again.
+   *
+   * Retiring the SUPERSEDED ref is what keeps the return trip deliverable.
+   * The ref just adopted stays deduped, so a peer re-advertising the state
+   * this folder is actually in is still suppressed as the echo it is. That
+   * only works if every adopted state passes through here — a state adopted
+   * silently is never retired and blocks its own return for good.
+   * @param connector - Connector whose dedup sets to retire from.
+   * @param treeRef - The ref that now describes this folder.
+   */
+  private _adoptAppliedRef(connector: Connector, treeRef: string): void {
+    if (this._lastAppliedRef && this._lastAppliedRef !== treeRef) {
+      connector.invalidateSent?.(this._lastAppliedRef);
+    }
+    this._lastAppliedRef = treeRef;
+  }
+
+  /**
    * Derives a deterministic content key from an FsTree.
    * @param tree - Tree structure to derive content key from
    */
@@ -1489,6 +1514,22 @@ export class FsAgent {
                 `current=${currentFiles.size} entries, ` +
                 `ref=${treeRef.slice(0, 8)}…)`,
             );
+            // Equivalent content means this ref DESCRIBES the folder as it
+            // stands — the same conclusion the restore path reaches, reached
+            // without any work to do. It has to update the dedup bookkeeping
+            // for the same reason, and skipping that was a silent hole:
+            // `invalidateSent` retires the ref this agent is LEAVING, so the
+            // chain only stays unbroken while every state the agent passes
+            // through is recorded as it is adopted. A state adopted here was
+            // never recorded, so it was never retired, and it sat in the
+            // connector's received set for the rest of the session — the
+            // bootstrap ref most of all, which every agent reaches this way.
+            // A peer that later returned the folder to that state re-derived
+            // its exact ref (refs are content hashes) and the advertisement
+            // was dropped as already-received, so the change reached no peer
+            // at all. Deleting a file created earlier in the session is
+            // precisely that shape. See `doc/safety-rescan.md`.
+            this._adoptAppliedRef(connector, treeRef);
             return;
           }
 
@@ -1559,17 +1600,7 @@ export class FsAgent {
             skipNotification: true,
             previous,
           });
-          // The receiving half of the same problem. The ref applied BEFORE this
-          // one no longer describes this folder, and a peer that later returns
-          // the tree to that state — by deleting what it just added — would be
-          // discarded here as already-received. Retiring the superseded one
-          // keeps the return trip deliverable; the ref just applied stays
-          // deduped, so a repeated advertisement of the CURRENT state is still
-          // suppressed.
-          if (this._lastAppliedRef && this._lastAppliedRef !== treeRef) {
-            connector.invalidateSent?.(this._lastAppliedRef);
-          }
-          this._lastAppliedRef = treeRef;
+          this._adoptAppliedRef(connector, treeRef);
           this._lastSentRef = postRestoreRef;
           this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
           this._currentRef = postRestoreRef;
@@ -1648,6 +1679,22 @@ export class FsAgent {
       recoveryAttempt: number,
       predecessorRefs?: string[],
     ) => {
+      // A ref is marked "already received" by the connector the instant it
+      // ARRIVES, but single-flight means the one it supersedes here is
+      // dropped without ever being looked at. It describes a state this agent
+      // never adopted, so leaving it marked received is a lie that never
+      // expires: refs are content hashes, and a peer that later puts the
+      // folder back into that exact state re-derives that exact ref and the
+      // advertisement is discarded before any agent sees it.
+      //
+      // Three peers is where this starts to bite, and the reason is just
+      // arithmetic — each node receives a bootstrap ref from every other
+      // node at once, so with three there is a second one to supersede and
+      // with two there is not. Hand the dropped ref back, the same way an
+      // apply that fails terminally does.
+      if (pendingRef && pendingRef !== ref) {
+        connector.invalidateReceived(pendingRef);
+      }
       pendingRef = ref;
       pendingRecoveryAttempt = recoveryAttempt;
       pendingPredecessorRefs = predecessorRefs;

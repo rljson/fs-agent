@@ -19,18 +19,24 @@ import { dirname, join } from 'path';
  * It is the only thing that notices a write while the watcher is deaf — a
  * dropped native event, or a pause that was never resumed — so the interval is
  * the worst-case latency for those writes, not a background-maintenance knob.
- * Thirty seconds made a stuck node look broken rather than slow — but
- * SHORTENING it is not the answer, and that is worth knowing before anyone
- * tries again: at five seconds the rescan lands inside a delete round trip and
- * undoes the deletion. See `doc/safety-rescan.md`.
+ * Thirty seconds made a stuck node look broken rather than slow.
+ *
+ * Five seconds was blocked for months because shortening it made a
+ * three-client delete test fail consistently, which read as "the rescan lands
+ * inside a delete round trip and undoes the deletion". It does not: tracing
+ * every sync trigger showed no push comes from the rescan at all. The interval
+ * only shifted which bootstrap refs landed in a window where they were marked
+ * received and never delivered, and that is fixed at its source. See
+ * `doc/safety-rescan.md`.
  *
  * Overridable per deployment so a large or deep tree can back it off (the scan
- * is O(N)) without a code change.
+ * is O(N), though {@link FsScanOptions.scanCachePath} makes a warm one cheap)
+ * without a code change.
  */
 /* v8 ignore start -- @preserve env-overridable interval */
 const _envRescan = Number(process.env['RLJSON_FS_RESCAN_MS']);
 export const SAFETY_RESCAN_INTERVAL_MS =
-  Number.isFinite(_envRescan) && _envRescan > 0 ? _envRescan : 30_000;
+  Number.isFinite(_envRescan) && _envRescan > 0 ? _envRescan : 5_000;
 /* v8 ignore stop -- @preserve */
 
 /**
