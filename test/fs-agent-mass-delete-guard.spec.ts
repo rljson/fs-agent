@@ -10,6 +10,9 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
+import { Connector, Db } from '@rljson/db';
+import { IoMem, SocketMock } from '@rljson/io';
+import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import {
   FsAgent,
@@ -17,6 +20,7 @@ import {
   MassDeleteRefusedError,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
+import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // The dangerous direction of sync is a POPULATED node receiving a tree that
 // lacks its files. A peer that comes up empty — a fresh clone, a folder not yet
@@ -170,6 +174,80 @@ describe('FsAgent — the mass-delete guard', () => {
     });
 
     expect(await targetFiles()).toHaveLength(0);
+  });
+
+  // The correction the lab forced, and the reason this is not symmetric with
+  // the locked-file case. The peer that sent the sparse tree is the one
+  // MISSING data; this node holds the fuller copy. If it goes quiet after
+  // refusing, the sparse peer has nothing to catch up from — and with every
+  // populated node refusing its pushes, the network livelocks. Measured on
+  // four machines, where two nodes sat at 5 and 15 of 121 files.
+  it('keeps advertising its own state after refusing, so the sparse peer can catch up', async () => {
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    const treeKey = 'fsTree';
+    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+    const bs = new BsMem();
+    await fill(targetDir, POPULATED);
+
+    // A peer advertises an almost-empty tree.
+    await fill(sourceDir, 2, 'sparse');
+    const sparseRef = await new FsDbAdapter(db, treeKey).storeFsTree(
+      await sourceTree(bs),
+    );
+
+    const route = Route.fromFlat(`/${treeKey}+`);
+    const socket = new SocketMock();
+    const connector = new Connector(db, route, socket);
+    const sent: string[] = [];
+    const realSend = connector.send.bind(connector);
+    connector.send = (ref: string) => {
+      sent.push(ref);
+      return realSend(ref);
+    };
+    const agent = new FsAgent(targetDir, bs, {
+      timeouts: {
+        debounceMs: 1,
+        processRefRetries: 0,
+        processRefRetryDelayMs: 1,
+        recoveryRetries: 0,
+      },
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const stopTo = await agent.syncToDb(db, connector, treeKey);
+    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
+      cleanTarget: true,
+    });
+
+    // Count only what goes out AFTER the refusal — syncToDb's initial store
+    // has already sent one ref.
+    sent.length = 0;
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: sparseRef });
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Refused: nothing DELETED. The two incoming files were still added —
+    // the restore is additive and only the prune is refused, which is the
+    // right split: new data is never the dangerous part.
+    const after = await targetFiles();
+    expect(after.filter((f) => f.startsWith('f'))).toHaveLength(POPULATED);
+    expect(after.filter((f) => f.startsWith('sparse'))).toHaveLength(2);
+
+    // …and crucially the node still SAYS something. After a refusal the
+    // watcher resumes, sees the two files the restore did add, and broadcasts
+    // the folder as it now stands — 120 files plus those two.
+    //
+    // The suppression that is right for a locked file silences exactly this,
+    // and here that is the livelock: the only node with the full copy goes
+    // quiet, and the sparse peer has nothing to catch up from.
+    expect(sent.length).toBeGreaterThan(0);
+
+    stopTo();
+    stopFrom();
+    agent.scanner.stopWatch();
+    errSpy.mockRestore();
   });
 
   it('does not interfere when cleanTarget is off', async () => {

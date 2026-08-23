@@ -1913,20 +1913,39 @@ export class FsAgent {
           this._currentRef = postRestoreRef;
           return; // Success — exit retry loop
         } catch (err) {
-          if (err instanceof RestoreIncompleteError) {
-            // The folder does not match the tree — files were locked, or a
-            // mass delete was refused. That state must not go out: the
-            // watcher wakes on resume, sees hundreds of changed files, and
-            // would broadcast a tree that still carries the OLD bytes for the
-            // locked file — re-asserting it to every peer and undoing the
-            // change we were in the middle of applying. One user with a
-            // document open would silently revert it for everyone.
+          if (err instanceof MassDeleteRefusedError) {
+            // A refusal is TERMINAL for this ref, and the opposite of the
+            // locked-file case below in both respects.
             //
-            // Recording it as the last state SENT suppresses exactly that
-            // advertisement, without claiming the ref was applied: the ref
-            // bookkeeping is untouched, so the retry below still re-applies
-            // it, and a genuine local edit afterwards still has a different
-            // content key and still goes out.
+            // No retry: the same tree will be refused for the same reason, so
+            // retrying only burns the recovery budget and repeats the error.
+            //
+            // And no advertisement suppression — this is the correction the
+            // lab forced. Suppressing here looked consistent and was wrong:
+            // the peer that sent the sparse tree is the one MISSING data, and
+            // this node holds the fuller copy. Going quiet leaves it stranded
+            // with nothing to catch up from, and with every node that has the
+            // files refusing its pushes, the network livelocks — measured on
+            // four nodes, where two sat at 5 and 15 of 121 files and could not
+            // recover.
+            //
+            // So this node keeps its state and keeps talking about it. The
+            // ref is still not adopted, because it was not applied.
+            return;
+          }
+          if (err instanceof PartialRestoreError) {
+            // The mirror image. Here the incoming ref is the NEWER state and
+            // this folder holds a half-applied version of it, with the OLD
+            // bytes still in the files that were locked. The watcher wakes on
+            // resume, sees hundreds of changed files, and would broadcast
+            // that — re-asserting the old bytes to every peer and undoing the
+            // change being applied. One user with a document open would
+            // silently revert it for everyone.
+            //
+            // Recording it as the last state SENT suppresses exactly that,
+            // without claiming the ref was applied: the ref bookkeeping is
+            // untouched so the retry below still re-applies it, and a genuine
+            // local edit afterwards still differs and still goes out.
             try {
               const halfApplied = await this._scanner.scan();
               this._lastSentContentKey =
