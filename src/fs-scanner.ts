@@ -19,9 +19,19 @@ import { dirname, join } from 'path';
  * It is the only thing that notices a write while the watcher is deaf — a
  * dropped native event, or a pause that was never resumed — so the interval is
  * the worst-case latency for those writes, not a background-maintenance knob.
- * Thirty seconds made a stuck node look broken rather than slow.
+ * Thirty seconds made a stuck node look broken rather than slow — but
+ * SHORTENING it is not the answer, and that is worth knowing before anyone
+ * tries again: at five seconds the rescan lands inside a delete round trip and
+ * undoes the deletion. See `doc/safety-rescan.md`.
+ *
+ * Overridable per deployment so a large or deep tree can back it off (the scan
+ * is O(N)) without a code change.
  */
-export const SAFETY_RESCAN_INTERVAL_MS = 30_000;
+/* v8 ignore start -- @preserve env-overridable interval */
+const _envRescan = Number(process.env['RLJSON_FS_RESCAN_MS']);
+export const SAFETY_RESCAN_INTERVAL_MS =
+  Number.isFinite(_envRescan) && _envRescan > 0 ? _envRescan : 30_000;
+/* v8 ignore stop -- @preserve */
 
 /**
  * How long a pause must last before the safety rescan treats it as stuck and
@@ -778,7 +788,8 @@ export class FsScanner {
    * an unbounded pause silences the node permanently. A bounded one degrades
    * to a little duplicate work instead, which is the right way round: the
    * loop-suppression this exists for is an optimisation, staying alive is not.
-   * @param options - `autoResumeMs` releases the pause after that many ms.
+   * @param options - Pause options.
+   * @param options.autoResumeMs - Release the pause after this many ms.
    */
   pauseWatch(options?: { autoResumeMs?: number }): void {
     if (!this._paused) this._pausedAt = Date.now();
