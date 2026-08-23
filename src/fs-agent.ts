@@ -29,7 +29,7 @@ import { FsScanner, FsTree } from './fs-scanner.ts';
 
 import type { Connector, Db } from '@rljson/db';
 import type { InsertHistoryRow } from '@rljson/rljson';
-import type { FsNodeMeta } from './fs-scanner.ts';
+import type { FsChange, FsNodeMeta } from './fs-scanner.ts';
 
 // .............................................................................
 // Types
@@ -204,6 +204,17 @@ export class FsAgent {
   private _lastAppliedRef?: string;
   /** Content fingerprint of the last tree we broadcasted (paths+blobIds) */
   private _lastSentContentKey?: string;
+
+  /**
+   * True while a ref received from a peer is being applied to disk.
+   *
+   * The safety rescan cannot tell a local change the watcher missed (which it
+   * must broadcast) from a remote change not yet applied here (which it must
+   * not). The agent can: while this is set, the disk is mid-way through
+   * someone else's revision, so a rescan-driven push would re-assert our stale
+   * view — and undo a deletion the peer just made.
+   */
+  private _remoteApplyInFlight = false;
   private _timeouts: Required<TimeoutConfig>;
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
@@ -1065,7 +1076,12 @@ export class FsAgent {
     // Finder "Keep Both" copy + rename) into a single store+broadcast.
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const debouncedSync = () => {
+    const debouncedSync = (change?: FsChange) => {
+      // A rescan-driven push during a remote apply re-asserts stale state.
+      // Real watcher events are unambiguous local changes and still go out.
+      if (change?.type === 'safety-rescan' && this._remoteApplyInFlight) {
+        return;
+      }
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
         debounceTimer = null;
@@ -1437,6 +1453,7 @@ export class FsAgent {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         // Pause filesystem watching to prevent loops
         this._scanner.pauseWatch();
+        this._remoteApplyInFlight = true;
 
         try {
           // Fetch incoming tree from DB (without restoring yet)
@@ -1609,6 +1626,7 @@ export class FsAgent {
             );
           }
         } finally {
+          this._remoteApplyInFlight = false;
           // Always resume watching, even if there was an error
           this._scanner.resumeWatch();
         }
