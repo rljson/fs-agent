@@ -1865,11 +1865,14 @@ export class FsAgent {
     let pendingRecoveryAttempt = 0;
     // Predecessor content refs carried with the pending ref (causalOrdering).
     let pendingPredecessorRefs: string[] | undefined;
+    /** Whether the pending ref was the newest thing its sender had said. */
+    let pendingIsNewest = true;
 
     const processRef = async (
       treeRef: string,
       recoveryAttempt = 0,
       predecessorRefs?: string[],
+      isNewestFromSender = true,
     ) => {
       const maxAttempts = this._timeouts.processRefRetries + 1;
 
@@ -1996,15 +1999,40 @@ export class FsAgent {
           // fresh and must not pretend otherwise.
           const ancestryExpected = this._resolveConflicts;
           const declaresAncestry = (predecessorRefs?.length ?? 0) > 0;
+
+          // Second reason to withhold pruning, and the one that needs no
+          // ancestry at all: the sender has already said something later than
+          // this.
+          //
+          // A ref is a content hash — it says WHAT state a sender is in, never
+          // whether that is news, and the same state can legitimately recur.
+          // The per-sender sequence says whether it is news, and the connector
+          // now reports its conclusion. A re-advertisement, or a straggler
+          // arriving late, must not be allowed to delete.
+          //
+          // This is what a node returning from a disconnect emits: the state
+          // it held before it left. Applying its FILES is harmless — they are
+          // real, just old. Applying its ABSENCES is the data loss, because
+          // everything created while it was away is absent from it.
+          //
+          // Guards the destructive half only, deliberately. Every attempt to
+          // fix this class by changing what gets APPLIED has made things
+          // worse; the one that has held guards what may be DELETED.
+          const staleAdvertisement = !isNewestFromSender;
+
+          const withholdPrune =
+            (ancestryExpected && !declaresAncestry) || staleAdvertisement;
           const applyOptions =
-            restoreOptions?.cleanTarget && ancestryExpected && !declaresAncestry
+            restoreOptions?.cleanTarget && withholdPrune
               ? { ...restoreOptions, cleanTarget: false }
               : restoreOptions;
           if (applyOptions !== restoreOptions) {
             console.warn(
-              `[FsAgent] ref=${treeRef.slice(0, 8)}… declares no ancestry — ` +
-                `applying additively, not pruning. A sender that cannot say ` +
-                `what it descends from must not delete.`,
+              `[FsAgent] ref=${treeRef.slice(0, 8)}… ` +
+                (staleAdvertisement
+                  ? 'is not the newest its sender has advertised'
+                  : 'declares no ancestry') +
+                ` — applying additively, not pruning.`,
             );
           }
           await FsAgent._withTimeout(
@@ -2159,6 +2187,7 @@ export class FsAgent {
       delayMs: number,
       recoveryAttempt: number,
       predecessorRefs?: string[],
+      isNewestFromSender = true,
     ) => {
       // A ref is marked "already received" by the connector the instant it
       // ARRIVES, but single-flight means the one it supersedes here is
@@ -2179,16 +2208,18 @@ export class FsAgent {
       pendingRef = ref;
       pendingRecoveryAttempt = recoveryAttempt;
       pendingPredecessorRefs = predecessorRefs;
+      pendingIsNewest = isNewestFromSender;
       if (fromDbTimer) clearTimeout(fromDbTimer);
       fromDbTimer = setTimeout(async () => {
         fromDbTimer = null;
         const r = pendingRef;
         const ra = pendingRecoveryAttempt;
         const pr = pendingPredecessorRefs;
+        const newest = pendingIsNewest;
         pendingRef = null;
         /* v8 ignore if -- @preserve a scheduled timer always has a pending ref */
         if (r) {
-          await processRef(r, ra, pr);
+          await processRef(r, ra, pr, newest);
         }
       }, delayMs);
     };
@@ -2202,13 +2233,20 @@ export class FsAgent {
     const syncCallback = (
       treeRef: string,
       predecessorRefs?: string[],
+      info?: { isNewestFromSender?: boolean },
     ): Promise<void> => {
       // Validate the tree reference
       if (!treeRef || typeof treeRef !== 'string') {
         return Promise.resolve();
       }
       // A freshly-arrived ref resets the recovery budget to 0.
-      scheduleProcess(treeRef, this._timeouts.debounceMs, 0, predecessorRefs);
+      scheduleProcess(
+        treeRef,
+        this._timeouts.debounceMs,
+        0,
+        predecessorRefs,
+        info?.isNewestFromSender ?? true,
+      );
       return Promise.resolve();
     };
 
