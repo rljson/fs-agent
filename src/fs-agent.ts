@@ -1878,6 +1878,33 @@ export class FsAgent {
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         // Pause filesystem watching to prevent loops
+        // A stale advertisement is not news, and is therefore not acted on
+        // AT ALL.
+        //
+        // This corrects the previous version of the guard, which applied a
+        // stale advertisement additively and only withheld pruning, on the
+        // reasoning that "its files are real, just old". That is wrong when
+        // the stale state predates a deletion: its files include the one that
+        // was just deleted, so the deletion is undone by ADDITION rather than
+        // by pruning. Measured — with the guard in its additive form, a
+        // periodic re-advertisement made modify-delete fail two runs in four.
+        //
+        // Nothing is lost by ignoring it. The sender's current state arrives
+        // in its own advertisement, and a peer that already holds the newer
+        // state needs nothing from the older one.
+        if (!isNewestFromSender) {
+          console.warn(
+            `[FsAgent] ref=${treeRef.slice(0, 8)}… is not the newest its ` +
+              `sender has advertised — ignoring it.`,
+          );
+          // Hand it back to the connector's dedup. It was marked received on
+          // arrival and never applied, so leaving it marked would block a
+          // later, genuine return to this exact state — refs are content
+          // hashes, and that trap has been paid for once already.
+          connector.invalidateReceived(treeRef);
+          return;
+        }
+
         this._scanner.pauseWatch();
         this._remoteApplyInFlight = true;
 
@@ -2018,21 +2045,17 @@ export class FsAgent {
           // Guards the destructive half only, deliberately. Every attempt to
           // fix this class by changing what gets APPLIED has made things
           // worse; the one that has held guards what may be DELETED.
-          const staleAdvertisement = !isNewestFromSender;
-
-          const withholdPrune =
-            (ancestryExpected && !declaresAncestry) || staleAdvertisement;
+          // Staleness is handled above by ignoring the advertisement
+          // outright, so what is left here is the ancestry case: a sender
+          // that cannot say what it descends from may add, but not delete.
           const applyOptions =
-            restoreOptions?.cleanTarget && withholdPrune
+            restoreOptions?.cleanTarget && ancestryExpected && !declaresAncestry
               ? { ...restoreOptions, cleanTarget: false }
               : restoreOptions;
           if (applyOptions !== restoreOptions) {
             console.warn(
-              `[FsAgent] ref=${treeRef.slice(0, 8)}… ` +
-                (staleAdvertisement
-                  ? 'is not the newest its sender has advertised'
-                  : 'declares no ancestry') +
-                ` — applying additively, not pruning.`,
+              `[FsAgent] ref=${treeRef.slice(0, 8)}… declares no ancestry — ` +
+                `applying additively, not pruning.`,
             );
           }
           await FsAgent._withTimeout(

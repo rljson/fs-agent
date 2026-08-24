@@ -241,18 +241,25 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       });
     };
 
-    it('applies its files but does not prune', async () => {
+    // Ignored outright, not applied additively. The earlier version of this
+    // guard applied a stale advertisement's files on the reasoning that they
+    // are "real, just old" — which is wrong when the stale state predates a
+    // deletion: its files include the one just deleted, so the deletion is
+    // undone BY ADDITION. Measured: with the additive version, a periodic
+    // re-advertisement made a delete-propagation recipe fail two runs in four.
+    it('is ignored outright — it neither adds nor deletes', async () => {
       const db = await makeDb();
       const bs = new BsMem();
 
-      // The peer's older state, then a newer one. The target adopts the newer
-      // one first, exactly as it would in life.
-      await writeFile(join(sourceDir, 'theirs.txt'), 'theirs');
+      // The sender's older state contains a file its newer state does not:
+      // exactly the shape of a re-advertised pre-deletion tree.
+      await writeFile(join(sourceDir, 'deleted-later.txt'), 'doomed');
       const adapter = new FsDbAdapter(db, 'fsTree');
       const oldRef = await adapter.storeFsTree(
         await new FsAgent(sourceDir, bs).extract(),
       );
-      await writeFile(join(sourceDir, 'newer.txt'), 'newer');
+      await rm(join(sourceDir, 'deleted-later.txt'));
+      await writeFile(join(sourceDir, 'survivor.txt'), 'survivor');
       const newRef = await adapter.storeFsTree(
         await new FsAgent(sourceDir, bs).extract(),
       );
@@ -268,20 +275,19 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
 
       connector.advertise(newRef, 5);
       await new Promise((r) => setTimeout(r, 400));
+      expect(existsSync(join(targetDir, 'survivor.txt'))).toBe(true);
 
-      // Now the straggler: an OLDER advertisement from the same sender.
+      // The straggler: the sender's PRE-deletion state.
       connector.advertise(oldRef, 3);
       await new Promise((r) => setTimeout(r, 400));
 
-      // Its files are fine to have…
-      expect(existsSync(join(targetDir, 'theirs.txt'))).toBe(true);
-      // …and it must not have deleted what it never knew about. newer.txt
-      // exists only in the state that came AFTER the straggler was sent, so
-      // its absence from the straggler is ignorance, not a deletion.
-      expect(existsSync(join(targetDir, 'newer.txt'))).toBe(true);
+      // The deleted file must NOT come back…
+      expect(existsSync(join(targetDir, 'deleted-later.txt'))).toBe(false);
+      // …and nothing current may be removed either.
+      expect(existsSync(join(targetDir, 'survivor.txt'))).toBe(true);
       expect(
         warnSpy.mock.calls.some((c) =>
-          String(c[0]).includes('not the newest its sender has advertised'),
+          String(c[0]).includes('is not the newest its sender has advertised'),
         ),
       ).toBe(true);
 
