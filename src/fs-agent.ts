@@ -407,6 +407,22 @@ export class FsAgent {
    * must never be worth failing a sync over.
    * @param ref - The ref the folder is now at.
    */
+  /**
+   * Starts the watcher unless it is already running.
+   *
+   * Both `syncToDb` and `syncFromDb` need a live watcher and either may be
+   * started first. `syncToDb` used to call `watch()` unconditionally, so
+   * starting them in the order `syncFromDb` then `syncToDb` threw "Already
+   * watching" — which quietly forced every caller into push-first, the order
+   * that lets a reconnecting client overwrite the network with a stale tree.
+   * A crash is a poor reason to choose an unsafe order.
+   */
+  private async _ensureWatching(): Promise<void> {
+    if (!this._scanner.isWatching) {
+      await this._scanner.watch();
+    }
+  }
+
   private _persistCurrentRef(ref: string): void {
     try {
       writeFileSync(
@@ -1536,7 +1552,7 @@ export class FsAgent {
 
     // Register callback and start watching
     this._scanner.onChange(debouncedSync);
-    await this._scanner.watch();
+    await this._ensureWatching();
 
     // Return cleanup function
     return () => {
@@ -1837,9 +1853,7 @@ export class FsAgent {
     restoreOptions?: RestoreOptions,
   ): Promise<() => void> {
     // Start watching filesystem (if not already watching)
-    if (!this._scanner['_watcher']) {
-      await this._scanner.watch();
-    }
+    await this._ensureWatching();
 
     // Debounced incoming ref handler: when multiple refs arrive in rapid
     // succession (e.g. the other side is doing a multi-step Finder operation),

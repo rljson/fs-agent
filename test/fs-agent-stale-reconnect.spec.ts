@@ -174,6 +174,45 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     agent.scanner.stopWatch();
   });
 
+  // Starting order must be the caller's choice, not something a crash decides
+  // for them. syncToDb called watch() unconditionally, so syncFromDb-then-
+  // syncToDb threw "Already watching" — pushing every caller into push-first,
+  // which is the order that lets a reconnecting client overwrite the network.
+  it('allows syncFromDb to be started before syncToDb', async () => {
+    const db = await makeDb();
+    const bs = new BsMem();
+    await writeFile(join(targetDir, 'a.txt'), 'a');
+
+    const agent = new FsAgent(targetDir, bs, { timeouts: { debounceMs: 1 } });
+    const connector = makeConnector(db);
+
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
+    // The order that used to throw.
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    expect(agent.scanner.isWatching).toBe(true);
+
+    stopFrom();
+    stopTo();
+    agent.scanner.stopWatch();
+  });
+
+  it('still allows the other order', async () => {
+    const db = await makeDb();
+    const bs = new BsMem();
+    await writeFile(join(targetDir, 'a.txt'), 'a');
+
+    const agent = new FsAgent(targetDir, bs, { timeouts: { debounceMs: 1 } });
+    const connector = makeConnector(db);
+
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
+    expect(agent.scanner.isWatching).toBe(true);
+
+    stopTo();
+    stopFrom();
+    agent.scanner.stopWatch();
+  });
+
   // Rule (b): the fix at the source. A restart must still be able to say what
   // it descends from, or every push it makes is one peers cannot check.
   it('records the ref it is at, and declares it after a restart', async () => {
