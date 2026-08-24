@@ -203,6 +203,11 @@ export class FsScanner {
     return this._tree;
   }
 
+  /** Whether a watcher is currently installed. */
+  get isWatching(): boolean {
+    return this._watcher !== null;
+  }
+
   get rootPath(): string {
     return this._rootPath;
   }
