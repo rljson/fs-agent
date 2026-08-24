@@ -1516,7 +1516,6 @@ export class FsAgent {
               `syncToDb storeFsTree(${treeKey})`,
             );
             this._currentRef = ref;
-        this._persistCurrentRef(ref);
             this._persistCurrentRef(ref);
 
             // Skip broadcast if the ref matches what we already sent.
@@ -1892,6 +1891,41 @@ export class FsAgent {
         // Nothing is lost by ignoring it. The sender's current state arrives
         // in its own advertisement, and a peer that already holds the newer
         // state needs nothing from the older one.
+        // A ref this agent itself broadcast is never news to this agent.
+        //
+        // Measured, not reasoned: with the server repeating a new connection's
+        // bootstrap, a two-client run logged
+        //   RESTORE root=a ref=joLcfgkh lastSent=joLcfgkh newest=true
+        // three times in one attempt — the client restoring its OWN last
+        // advertisement over its own newer edit, destroying it, and then
+        // declining to re-send because the folder was back at the content it
+        // had already sent. The edit reached no peer and was gone locally.
+        //
+        // Two existing defences both miss it. The origin filter drops an echo
+        // by comparing `o` to this connector's origin, but the server's
+        // bootstrap carries the SERVER as origin, not the client the ref came
+        // from. The staleness check then asks whether this is the newest thing
+        // its sender has said — and the sender it sees is the server, whose
+        // count did advance, so the echo reads as news (`newest=true` above).
+        //
+        // The ref-level dedup does not catch it either, and deliberately:
+        // `_sendRef` clears each outgoing ref from BOTH dedup sets, so that a
+        // folder returning to an earlier state can advertise it again. That is
+        // correct and stays — it is what makes A → B → A deliverable — but it
+        // is exactly what leaves this agent open to its own echo.
+        //
+        // Ignoring is always right here. If the folder still holds this state,
+        // applying it is a no-op; if it has moved on, applying it is the data
+        // loss above. A peer that genuinely wants this state back gets it from
+        // whatever this agent advertises next.
+        if (treeRef === this._lastSentRef) {
+          console.warn(
+            `[FsAgent] ref=${treeRef.slice(0, 8)}… is this agent's own last ` +
+              `advertisement echoed back — ignoring it.`,
+          );
+          return;
+        }
+
         if (!isNewestFromSender) {
           console.warn(
             `[FsAgent] ref=${treeRef.slice(0, 8)}… is not the newest its ` +
