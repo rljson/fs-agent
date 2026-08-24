@@ -7,7 +7,7 @@
 import { Bs, BsMem } from '@rljson/bs';
 import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 
-import { appendFileSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import {
   mkdir,
   readdir,
@@ -179,6 +179,17 @@ export const SYNC_ERROR_FILE = '.sync-errors.log';
  */
 export const ATOMIC_TMP_PREFIX = '.fsagent-tmp-';
 
+/**
+ * Filename for the agent's own state, kept beside the synced folder's content
+ * and ignored by the scanner like the other two above.
+ *
+ * It holds one thing: the ref this folder was last known to be at. That
+ * survives a restart, which is the whole point — a process that comes back
+ * with no idea what it descends from cannot declare ancestry, and a push with
+ * no ancestry is one every peer has to treat as untrustworthy for deletion.
+ */
+export const AGENT_STATE_FILE = '.fsagent-state.json';
+
 // .............................................................................
 // FsAgent Class
 // .............................................................................
@@ -328,7 +339,12 @@ export class FsAgent {
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._scanner = new FsScanner(rootPath, {
       ...options,
-      ignore: [...(options.ignore || []), SYNC_ERROR_FILE, ATOMIC_TMP_PREFIX],
+      ignore: [
+        ...(options.ignore || []),
+        SYNC_ERROR_FILE,
+        ATOMIC_TMP_PREFIX,
+        AGENT_STATE_FILE,
+      ],
       bs: this._bs,
     });
     this._adapter = new FsBlobAdapter(this._bs);
@@ -380,6 +396,48 @@ export class FsAgent {
    */
   get timeouts(): Required<TimeoutConfig> {
     return this._timeouts;
+  }
+
+  /**
+   * Records the ref this folder is now at, so a restart can still say what it
+   * descends from.
+   *
+   * Best-effort on purpose: losing it costs ancestry on the next start, which
+   * degrades to an additive-only apply rather than to anything unsafe, so it
+   * must never be worth failing a sync over.
+   * @param ref - The ref the folder is now at.
+   */
+  private _persistCurrentRef(ref: string): void {
+    try {
+      writeFileSync(
+        join(this._rootPath, AGENT_STATE_FILE),
+        JSON.stringify({ currentRef: ref }),
+        'utf-8',
+      );
+    } catch {
+      /* v8 ignore next -- @preserve best-effort; see the doc comment */
+    }
+  }
+
+  /**
+   * The ref this folder was last recorded at, from a previous run.
+   *
+   * Absent, unreadable and malformed all mean the same thing — this process
+   * cannot vouch for what it descends from — and all answer `undefined`, which
+   * the caller treats as "declare no ancestry".
+   * @returns The persisted ref, or `undefined`.
+   */
+  private _loadPersistedRef(): string | undefined {
+    try {
+      const file = join(this._rootPath, AGENT_STATE_FILE);
+      if (!existsSync(file)) return undefined;
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'));
+      if (!parsed || typeof parsed !== 'object') return undefined;
+      const ref = (parsed as { currentRef?: unknown }).currentRef;
+      return typeof ref === 'string' && ref.length > 0 ? ref : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1345,6 +1403,22 @@ export class FsAgent {
     // reconnect after offline edits), the initial revision descends from it —
     // chain `previous` and broadcast the predecessor so the divergence is
     // detectable as a fork rather than an orphan root.
+    // A restart starts with no `_currentRef`, so without this the first push
+    // declares no ancestry — and a push with no ancestry is one every peer
+    // must apply additively, because it cannot be checked for staleness.
+    // Reload what this folder was last recorded at, so a node coming back
+    // after a disconnect can still say what it descends from and peers can
+    // recognise its tree as the older one it is.
+    if (this._currentRef === undefined) {
+      const persisted = this._loadPersistedRef();
+      if (persisted !== undefined) {
+        this._currentRef = persisted;
+        console.log(
+          `[FsAgent] resuming from recorded ref ${persisted.slice(0, 8)}… — ` +
+            `this folder can declare its ancestry`,
+        );
+      }
+    }
     const initialParentRef = this._currentRef;
     const initialTree = await FsAgent._withTimeout(
       this.extract(),
@@ -1371,6 +1445,7 @@ export class FsAgent {
     if (initialRef) {
       this._lastSentRef = initialRef;
       this._currentRef = initialRef;
+      this._persistCurrentRef(initialRef);
       this._lastSentContentKey = this._contentKeyFromTree(initialTree);
       await this._sendRef(
         connector,
@@ -1425,6 +1500,8 @@ export class FsAgent {
               `syncToDb storeFsTree(${treeKey})`,
             );
             this._currentRef = ref;
+        this._persistCurrentRef(ref);
+            this._persistCurrentRef(ref);
 
             // Skip broadcast if the ref matches what we already sent.
             // This happens after syncFromDb restores files: the watcher
@@ -1875,9 +1952,49 @@ export class FsAgent {
             }
           }
 
-          // Content differs — restore from incoming tree
+          // Content differs — restore from incoming tree.
+          //
+          // A ref that declares NO ancestry may ADD but must never PRUNE.
+          //
+          // Deletion is the destructive half of a restore, and a sender that
+          // cannot say what it descends from has not shown it knows the
+          // current state. A node that reconnects is exactly that: a fresh
+          // process with no `_currentRef`, whose first push therefore carries
+          // no predecessors — and until this, every peer applied that stale
+          // tree as authoritative and pruned the files created while it was
+          // away. Measured on four machines: a file reached all three
+          // connected nodes and was deleted from all three, two seconds later,
+          // by the fourth coming back.
+          //
+          // The ancestry guard above cannot catch it, because it is itself
+          // conditional on predecessors being present. So the rule lives here
+          // instead, and it costs nothing legitimate: a genuine first push has
+          // nothing to delete anyway.
+          // Gated on `_resolveConflicts`, and that gate is load-bearing: the
+          // sender only transmits predecessors when conflict resolution is
+          // on (see `_sendRef`). With it off, NO ref carries ancestry, so
+          // this rule would read every legitimate deletion as untrustworthy
+          // and silently stop deletions propagating at all — which it did,
+          // across eight tests, before the gate was added.
+          //
+          // So: withhold pruning only where ancestry was expected and is
+          // missing. Where it is never sent, the rule cannot tell stale from
+          // fresh and must not pretend otherwise.
+          const ancestryExpected = this._resolveConflicts;
+          const declaresAncestry = (predecessorRefs?.length ?? 0) > 0;
+          const applyOptions =
+            restoreOptions?.cleanTarget && ancestryExpected && !declaresAncestry
+              ? { ...restoreOptions, cleanTarget: false }
+              : restoreOptions;
+          if (applyOptions !== restoreOptions) {
+            console.warn(
+              `[FsAgent] ref=${treeRef.slice(0, 8)}… declares no ancestry — ` +
+                `applying additively, not pruning. A sender that cannot say ` +
+                `what it descends from must not delete.`,
+            );
+          }
           await FsAgent._withTimeout(
-            this.restore(incomingTree, undefined, restoreOptions),
+            this.restore(incomingTree, undefined, applyOptions),
             this._timeouts.restore,
             `syncFromDb → restore(${treeKey})`,
           );
@@ -1911,6 +2028,7 @@ export class FsAgent {
           this._lastSentRef = postRestoreRef;
           this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
           this._currentRef = postRestoreRef;
+          this._persistCurrentRef(postRestoreRef);
           return; // Success — exit retry loop
         } catch (err) {
           if (err instanceof MassDeleteRefusedError) {
