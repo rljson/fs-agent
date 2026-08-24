@@ -54,11 +54,16 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat('/fsTree+'), socket);
     return Object.assign(connector, {
-      simulateIncoming: (ref: string, predecessorRefs?: string[]) =>
+      simulateIncoming: (
+        ref: string,
+        predecessorRefs?: string[],
+        extra?: Record<string, unknown>,
+      ) =>
         socket.emit(connector.events.ref, {
           o: 'remote-peer',
           r: ref,
           p: predecessorRefs,
+          ...extra,
         }),
     });
   };
@@ -211,6 +216,108 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     stopTo();
     stopFrom();
     agent.scanner.stopWatch();
+  });
+
+  // The guard that needs no ancestry: the sender has already said something
+  // later than this. A node returning from a disconnect emits exactly that —
+  // the state it held before it left. Applying its FILES is harmless, they
+  // are real, just old. Applying its ABSENCES is the data loss.
+  describe('an advertisement that is not the newest from its sender', () => {
+    /** A connector that reports sender sequences, as a real one does. */
+    const makeSeqConnector = (db: Db) => {
+      const socket = new SocketMock();
+      const connector = new Connector(db, Route.fromFlat('/fsTree+'), socket, {
+        causalOrdering: true,
+        includeClientIdentity: true,
+      });
+      return Object.assign(connector, {
+        advertise: (ref: string, seq: number) =>
+          socket.emit(connector.events.ref, {
+            o: 'remote-peer',
+            r: ref,
+            c: 'peer-a',
+            seq,
+          }),
+      });
+    };
+
+    it('applies its files but does not prune', async () => {
+      const db = await makeDb();
+      const bs = new BsMem();
+
+      // The peer's older state, then a newer one. The target adopts the newer
+      // one first, exactly as it would in life.
+      await writeFile(join(sourceDir, 'theirs.txt'), 'theirs');
+      const adapter = new FsDbAdapter(db, 'fsTree');
+      const oldRef = await adapter.storeFsTree(
+        await new FsAgent(sourceDir, bs).extract(),
+      );
+      await writeFile(join(sourceDir, 'newer.txt'), 'newer');
+      const newRef = await adapter.storeFsTree(
+        await new FsAgent(sourceDir, bs).extract(),
+      );
+
+      const agent = new FsAgent(targetDir, bs, {
+        timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      });
+      const connector = makeSeqConnector(db);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const stop = await agent.syncFromDb(db, connector, 'fsTree', {
+        cleanTarget: true,
+      });
+
+      connector.advertise(newRef, 5);
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Now the straggler: an OLDER advertisement from the same sender.
+      connector.advertise(oldRef, 3);
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Its files are fine to have…
+      expect(existsSync(join(targetDir, 'theirs.txt'))).toBe(true);
+      // …and it must not have deleted what it never knew about. newer.txt
+      // exists only in the state that came AFTER the straggler was sent, so
+      // its absence from the straggler is ignorance, not a deletion.
+      expect(existsSync(join(targetDir, 'newer.txt'))).toBe(true);
+      expect(
+        warnSpy.mock.calls.some((c) =>
+          String(c[0]).includes('not the newest its sender has advertised'),
+        ),
+      ).toBe(true);
+
+      stop();
+      agent.scanner.stopWatch();
+      warnSpy.mockRestore();
+    });
+
+    it('still prunes for the newest advertisement', async () => {
+      const db = await makeDb();
+      const bs = new BsMem();
+      await writeFile(join(targetDir, 'gone.txt'), 'gone');
+      await writeFile(join(targetDir, 'shared.txt'), 'shared');
+      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
+      const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+        await new FsAgent(sourceDir, bs).extract(),
+      );
+
+      const agent = new FsAgent(targetDir, bs, {
+        timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      });
+      const connector = makeSeqConnector(db);
+      const stop = await agent.syncFromDb(db, connector, 'fsTree', {
+        cleanTarget: true,
+      });
+
+      connector.advertise(ref, 1);
+      await new Promise((r) => setTimeout(r, 400));
+
+      // A current advertisement deletes exactly as before — the guard must
+      // not turn cleanTarget off in general.
+      expect(existsSync(join(targetDir, 'gone.txt'))).toBe(false);
+
+      stop();
+      agent.scanner.stopWatch();
+    });
   });
 
   // Rule (b): the fix at the source. A restart must still be able to say what
