@@ -390,6 +390,63 @@ describe('FsAgent — the mass-delete guard', () => {
     warnSpy.mockRestore();
   });
 
+  // A connector outlives the agent using it: Node.restartAgent() rebuilds the
+  // agent from the EXISTING transport. A fresh agent must not inherit what the
+  // previous one was told, because those conclusions were about a folder state
+  // it does not have — and on the lab that left snapshot-bootstrap red on every
+  // run the suite has ever produced.
+  it('starts deaf to what a previous agent was told', async () => {
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    const treeKey = 'fsTree';
+    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+    const bs = new BsMem();
+    await fill(sourceDir, 4, 'peer');
+    const peerRef = await new FsDbAdapter(db, treeKey).storeFsTree(
+      await sourceTree(bs),
+    );
+
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // The first agent consumes the ref…
+    const first = new FsAgent(targetDir, bs, {
+      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+    });
+    const stopFirst = await first.syncFromDb(db, connector, treeKey, {
+      cleanTarget: true,
+    });
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
+    await new Promise((r) => setTimeout(r, 800));
+    expect((await targetFiles()).filter((f) => f.startsWith('peer'))).toHaveLength(4);
+    stopFirst();
+    first.scanner.stopWatch();
+
+    // …the folder is then lost, and a NEW agent takes over the same connector.
+    for (const f of await targetFiles()) {
+      await rm(join(targetDir, f), { recursive: true, force: true });
+    }
+    const second = new FsAgent(targetDir, bs, {
+      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+    });
+    const stopSecond = await second.syncFromDb(db, connector, treeKey, {
+      cleanTarget: true,
+    });
+
+    // The peer re-advertises exactly what it advertised before. Without the
+    // reset this is dropped as already-delivered and the folder stays empty.
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
+    await new Promise((r) => setTimeout(r, 800));
+    expect((await targetFiles()).filter((f) => f.startsWith('peer'))).toHaveLength(4);
+
+    stopSecond();
+    second.scanner.stopWatch();
+    errSpy.mockRestore();
+  });
+
   // Two nodes can refuse each other, each holding files the other lacks. An
   // unthrottled answer to every refusal is a loop.
   it('answers at most once per cooldown', async () => {
