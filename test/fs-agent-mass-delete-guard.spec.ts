@@ -250,6 +250,180 @@ describe('FsAgent — the mass-delete guard', () => {
     errSpy.mockRestore();
   });
 
+  // The test above passes for an incidental reason: the sparse tree carried two
+  // files, the restore added them, the watcher woke on the change and broadcast
+  // the folder. Nothing was DELIBERATE about the answer.
+  //
+  // An EMPTY incoming tree adds nothing. The folder does not change, the
+  // watcher has nothing to report, and the node with the full copy says
+  // nothing at all — which is the deadlock a joining machine actually hits.
+  // Measured on two clients: an empty joiner sat at 0 of 3642 files for 60 s.
+  it('answers an empty tree with its own state, though nothing changed', async () => {
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    const treeKey = 'fsTree';
+    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+    const bs = new BsMem();
+    await fill(targetDir, POPULATED);
+
+    // sourceDir is left empty — the joiner holds nothing.
+    const emptyRef = await new FsDbAdapter(db, treeKey).storeFsTree(
+      await sourceTree(bs),
+    );
+
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
+    const sent: string[] = [];
+    const realSend = connector.send.bind(connector);
+    connector.send = (ref: string) => {
+      sent.push(ref);
+      return realSend(ref);
+    };
+
+    const agent = new FsAgent(targetDir, bs, {
+      timeouts: {
+        debounceMs: 1,
+        processRefRetries: 0,
+        processRefRetryDelayMs: 1,
+        recoveryRetries: 0,
+      },
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // syncToDb gives the agent a current ref — the state it will answer with.
+    const stopTo = await agent.syncToDb(db, connector, treeKey);
+    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
+      cleanTarget: true,
+    });
+
+    sent.length = 0;
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Nothing was deleted…
+    expect(
+      (await targetFiles()).filter((f) => f.startsWith('f')),
+    ).toHaveLength(POPULATED);
+    // …and the folder is byte-for-byte what it was, so only a deliberate
+    // answer can have put anything on the wire.
+    expect(sent.length).toBeGreaterThan(0);
+    expect(
+      warnSpy.mock.calls.some((c) =>
+        String(c[0]).includes('re-announcing'),
+      ),
+    ).toBe(true);
+
+    stopTo();
+    stopFrom();
+    agent.scanner.stopWatch();
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  // Two nodes can refuse each other, each holding files the other lacks. An
+  // unthrottled answer to every refusal is a loop.
+  it('answers at most once per cooldown', async () => {
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    const treeKey = 'fsTree';
+    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+    const bs = new BsMem();
+    await fill(targetDir, POPULATED);
+    const adapter = new FsDbAdapter(db, treeKey);
+    const emptyRef = await adapter.storeFsTree(await sourceTree(bs));
+    await fill(sourceDir, 1, 'other');
+    const otherSparseRef = await adapter.storeFsTree(await sourceTree(bs));
+
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
+    const agent = new FsAgent(targetDir, bs, {
+      timeouts: {
+        debounceMs: 1,
+        processRefRetries: 0,
+        processRefRetryDelayMs: 1,
+        recoveryRetries: 0,
+      },
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const stopTo = await agent.syncToDb(db, connector, treeKey);
+    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
+      cleanTarget: true,
+    });
+
+    warnSpy.mockClear();
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit(connector.events.ref, { o: 'other-peer', r: otherSparseRef });
+    await new Promise((r) => setTimeout(r, 300));
+
+    const answers = warnSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('re-announcing'),
+    );
+    expect(answers).toHaveLength(1);
+
+    stopTo();
+    stopFrom();
+    agent.scanner.stopWatch();
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  // Nothing to answer WITH: an agent that has never pushed has no current ref,
+  // and inventing one would be asserting a state it has not established.
+  it('says nothing when it has no state of its own to offer', async () => {
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    const treeKey = 'fsTree';
+    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+    const bs = new BsMem();
+    await fill(targetDir, POPULATED);
+    const emptyRef = await new FsDbAdapter(db, treeKey).storeFsTree(
+      await sourceTree(bs),
+    );
+
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
+    const agent = new FsAgent(targetDir, bs, {
+      timeouts: {
+        debounceMs: 1,
+        processRefRetries: 0,
+        processRefRetryDelayMs: 1,
+        recoveryRetries: 0,
+      },
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // syncFromDb only — never pushed, so no current ref.
+    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
+      cleanTarget: true,
+    });
+    warnSpy.mockClear();
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(
+      warnSpy.mock.calls.some((c) => String(c[0]).includes('re-announcing')),
+    ).toBe(false);
+    expect(
+      (await targetFiles()).filter((f) => f.startsWith('f')),
+    ).toHaveLength(POPULATED);
+
+    stopFrom();
+    agent.scanner.stopWatch();
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   it('does not interfere when cleanTarget is off', async () => {
     const bs = new BsMem();
     await fill(targetDir, POPULATED);

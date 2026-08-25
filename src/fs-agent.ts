@@ -204,6 +204,16 @@ export const AGENT_STATE_FILE = '.fsagent-state.json';
  * three-file folder is an ordinary edit, and a guard that blocked it would
  * fire constantly on small trees and be turned off.
  */
+/**
+ * How long an agent waits before answering another refusal.
+ *
+ * Two nodes can refuse each other — each holding files the other lacks — and an
+ * unthrottled answer to every refusal is a loop. Long enough that a genuine
+ * catch-up (a restore of the answered ref) completes inside it, short enough
+ * that a node joining an idle network is not left waiting.
+ */
+export const REFUSAL_ANSWER_COOLDOWN_MS = 5_000;
+
 export const MASS_DELETE_MIN_FILES = 100;
 
 /**
@@ -290,6 +300,8 @@ export class FsAgent {
    * state can still reach this agent.
    */
   private _lastAppliedRef?: string;
+  /** When this agent last answered a refusal, for the cooldown. */
+  private _lastRefusalAnswerMs = 0;
   /** Content fingerprint of the last tree we broadcasted (paths+blobIds) */
   private _lastSentContentKey?: string;
 
@@ -1771,6 +1783,38 @@ export class FsAgent {
    * @param connector - Connector whose dedup sets to retire from.
    * @param treeRef - The ref that now describes this folder.
    */
+  /**
+   * Re-announce this folder's current state after refusing an incoming tree.
+   *
+   * A refusal means the sender holds less than this node does, so it is the one
+   * that needs telling. Without this the network settles into a state that is
+   * stable and wrong: the sparse node cannot push, the full node has nothing
+   * new to push, and nothing moves until an unrelated edit happens somewhere.
+   *
+   * Rate-limited because two nodes can refuse each other — each holding files
+   * the other lacks — and an unthrottled answer to every refusal is a loop.
+   * @param connector - Connector to broadcast on.
+   */
+  private async _readvertiseAfterRefusal(connector: Connector): Promise<void> {
+    const ref = this._currentRef;
+    if (!ref) return;
+
+    const now = Date.now();
+    if (now - this._lastRefusalAnswerMs < REFUSAL_ANSWER_COOLDOWN_MS) return;
+    this._lastRefusalAnswerMs = now;
+
+    console.warn(
+      `[FsAgent] refused an incoming tree — re-announcing ${ref.slice(0, 8)}… ` +
+        `so the sender can catch up.`,
+    );
+    try {
+      await this._sendRef(connector, ref);
+    } catch (err) {
+      /* v8 ignore next -- @preserve a failed answer must not mask the refusal */
+      console.warn(`[FsAgent] re-announcement failed: ${String(err)}`);
+    }
+  }
+
   private _adoptAppliedRef(connector: Connector, treeRef: string): void {
     if (this._lastAppliedRef && this._lastAppliedRef !== treeRef) {
       connector.invalidateSent?.(this._lastAppliedRef);
@@ -2175,6 +2219,23 @@ export class FsAgent {
             //
             // So this node keeps its state and keeps talking about it. The
             // ref is still not adopted, because it was not applied.
+            //
+            // "Keeps talking about it" was aspirational. Nothing here made it
+            // talk: the refusal only stopped SUPPRESSING this node's
+            // advertisements, and with its own content unchanged it had nothing
+            // new to say, so it said nothing at all. The sender — the node that
+            // is missing data — heard silence.
+            //
+            // Measured on two clients: an empty joiner sat at 0 of 3642 files
+            // for 60 s, unaffected by a 15 s settle, and a single write on the
+            // populated side moved all 414 MB in about six seconds. On four
+            // nodes the same shape shows as `mass-delete-guard` reporting
+            // "did NOT refill on its own — it needs a change elsewhere".
+            //
+            // That change elsewhere is what this now supplies. A refusal is a
+            // fact about the SENDER: it holds less than we do. Answering it
+            // with our current state is the whole correction.
+            await this._readvertiseAfterRefusal(connector);
             return;
           }
           if (err instanceof PartialRestoreError) {
