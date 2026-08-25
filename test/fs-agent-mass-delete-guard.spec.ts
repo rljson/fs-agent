@@ -323,6 +323,73 @@ describe('FsAgent — the mass-delete guard', () => {
     warnSpy.mockRestore();
   });
 
+  // Refusing a state is not the same as having consumed it.
+  //
+  // A tree ref is a content hash, so a peer emptied twice re-derives the same
+  // ref both times. If the first refusal leaves it marked "already received",
+  // the connector drops the second before this agent ever sees it — nothing
+  // refuses, nothing answers, and that peer stays empty for good.
+  //
+  // Measured: a client that had already joined and was then emptied sat at 1 of
+  // 3642 files with no refusal logged at all, while a FRESH client — whose
+  // empty ref this node had never seen — was refused, answered, and converged
+  // in eleven seconds.
+  it('refuses the same tree again when it comes back', async () => {
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    const treeKey = 'fsTree';
+    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+    const bs = new BsMem();
+    await fill(targetDir, POPULATED);
+    const emptyRef = await new FsDbAdapter(db, treeKey).storeFsTree(
+      await sourceTree(bs),
+    );
+
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
+    const agent = new FsAgent(targetDir, bs, {
+      timeouts: {
+        debounceMs: 1,
+        processRefRetries: 0,
+        processRefRetryDelayMs: 1,
+        recoveryRetries: 0,
+      },
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const stopTo = await agent.syncToDb(db, connector, treeKey);
+    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
+      cleanTarget: true,
+    });
+
+    const refusals = (): number =>
+      errSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('MASS DELETE REFUSED'),
+      ).length;
+
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(refusals()).toBe(1);
+
+    // The very same ref, exactly as an emptied peer re-derives it.
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(refusals()).toBe(2);
+
+    expect(
+      (await targetFiles()).filter((f) => f.startsWith('f')),
+    ).toHaveLength(POPULATED);
+
+    stopTo();
+    stopFrom();
+    agent.scanner.stopWatch();
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   // Two nodes can refuse each other, each holding files the other lacks. An
   // unthrottled answer to every refusal is a loop.
   it('answers at most once per cooldown', async () => {
