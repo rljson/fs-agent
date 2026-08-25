@@ -214,6 +214,16 @@ export const AGENT_STATE_FILE = '.fsagent-state.json';
  */
 export const REFUSAL_ANSWER_COOLDOWN_MS = 5_000;
 
+/**
+ * How many tree nodes are fetched at once while walking a tree.
+ *
+ * The walk is latency-bound, so the whole point is to stop waiting for one node
+ * before asking for the next. Bounded because "the whole level at once" on a
+ * 184 000-file catalogue would be tens of thousands of simultaneous requests,
+ * which trades a latency problem for a queueing one.
+ */
+export const TREE_FETCH_CONCURRENCY = 64;
+
 export const MASS_DELETE_MIN_FILES = 100;
 
 /**
@@ -1168,82 +1178,94 @@ export class FsAgent {
     rootHash: string,
   ): Promise<any[]> {
     const fetchedNodes = new Map<string, any>();
-    const nodesToFetch = new Set<string>([rootHash]);
-    const processed = new Set<string>();
+    const seen = new Set<string>([rootHash]);
+    let frontier: string[] = [rootHash];
 
-    // Iteratively fetch all nodes (avoid deep recursion)
-    while (nodesToFetch.size > 0) {
-      const currentHash = Array.from(nodesToFetch)[0];
-      nodesToFetch.delete(currentHash);
+    // A level at a time, concurrently — not a node at a time, in series.
+    //
+    // This awaited one `db.get` per node. On the customer catalogue that is
+    // 4 952 sequential round trips before a single byte of file content moves,
+    // and the cost is `nodes × RTT`: invisible on localhost at 0.1 ms, 49 s at
+    // 10 ms — which is why the fetch blew its 20 s budget three times running
+    // and only succeeded on the fourth attempt. Measured end to end: a 6.2 s
+    // cold start at 0 ms became 134.9 s at 10 ms and 332.1 s at 30 ms.
+    //
+    // A folder tree is wide and shallow — 4 952 nodes across five levels here —
+    // so issuing a whole level at once turns thousands of SERIAL round trips
+    // into a few concurrent ones. The requests themselves are unchanged: same
+    // `db.get`, same route, same rows, same controller path. Only the waiting
+    // is shared, which is the part that was costing the time.
+    //
+    // Bounded, because "the whole level at once" on a 184 000-file catalogue
+    // would be tens of thousands of simultaneous requests — trading a latency
+    // problem for a queueing one.
+    while (frontier.length > 0) {
+      const next: string[] = [];
 
-      // Skip if already processed
-      /* v8 ignore if -- @preserve */
-      if (processed.has(currentHash)) {
-        continue;
-      }
-      processed.add(currentHash);
-
-      // Fetch the node by hash
-      // Use db.get() to query across sockets via IoMulti/IoPeer
-      // The early return fix in @rljson/db prevents infinite recursion
-      let result;
-      try {
-        result = await FsAgent._withTimeout(
-          db.get(route, { _hash: currentHash }),
-          this._timeouts.dbQuery,
-          `db.get(${treeKey}, _hash=${currentHash.slice(0, 8)}…)`,
+      for (let i = 0; i < frontier.length; i += TREE_FETCH_CONCURRENCY) {
+        const batch = frontier.slice(i, i + TREE_FETCH_CONCURRENCY);
+        const results = await Promise.all(
+          batch.map(async (hash) => {
+            try {
+              return await FsAgent._withTimeout(
+                db.get(route, { _hash: hash }),
+                this._timeouts.dbQuery,
+                `db.get(${treeKey}, _hash=${hash.slice(0, 8)}…)`,
+              );
+            } catch (error) {
+              // A timeout is systemic and must surface; a missing node is
+              // ordinary — a blob reference, or one that was deleted — and was
+              // tolerated by the per-node walk too.
+              if (error instanceof Error && error.message.startsWith('Timeout')) {
+                throw error;
+              }
+              /* v8 ignore start -- @preserve */
+              const errMsg =
+                error instanceof Error ? error.message : String(error);
+              console.warn(
+                `[FsAgent] _fetchTreeRecursively: db.get failed for ` +
+                  `hash=${hash.slice(0, 8)}…: ${errMsg}`,
+              );
+              this._writeSyncError(
+                `fetchTree/db.get(${hash.slice(0, 8)}…)`,
+                error,
+              );
+              return null;
+              /* v8 ignore stop -- @preserve */
+            }
+          }),
         );
-      } catch (error) {
-        // Re-throw timeout errors — they indicate a systemic problem
-        /* v8 ignore if -- @preserve */
-        if (error instanceof Error && error.message.startsWith('Timeout')) {
-          throw error;
-        }
-        /* v8 ignore start -- @preserve */
-        // Node not found - might be a blob reference or deleted
-        const errMsg = error instanceof Error ? error.message : String(error);
-        console.warn(
-          `[FsAgent] _fetchTreeRecursively: db.get failed for ` +
-            `hash=${currentHash.slice(0, 8)}…: ${errMsg}`,
-        );
-        this._writeSyncError(
-          `fetchTree/db.get(${currentHash.slice(0, 8)}…)`,
-          error,
-        );
-        continue;
-      }
-      /* v8 ignore stop -- @preserve */
 
-      // Extract node data from rljson
-      const treeData = result?.rljson?.[treeKey];
-      /* v8 ignore next -- @preserve */
-      if (!treeData || !treeData._data) {
-        continue;
-      }
+        for (const result of results) {
+          const treeData = result?.rljson?.[treeKey];
+          /* v8 ignore next -- @preserve */
+          if (!treeData || !treeData._data) continue;
 
-      // Handle both array and object-with-numeric-keys
-      /* v8 ignore next -- @preserve */
-      const dataArray = Array.isArray(treeData._data)
-        ? treeData._data
-        : Object.values(treeData._data);
+          /* v8 ignore next -- @preserve */
+          const dataArray = Array.isArray(treeData._data)
+            ? treeData._data
+            : Object.values(treeData._data);
 
-      // Process all nodes returned (should be just one for _hash query)
-      for (const node of dataArray) {
-        /* v8 ignore next -- @preserve */
-        if (!node._hash) continue;
-
-        fetchedNodes.set(node._hash, node);
-
-        // If node has children, add them to fetch queue
-        if (node.children && Array.isArray(node.children)) {
-          for (const childHash of node.children) {
+          for (const node of dataArray as any[]) {
             /* v8 ignore next -- @preserve */
-            if (typeof childHash === 'string' && !processed.has(childHash)) {
-              nodesToFetch.add(childHash);
+            if (!node._hash) continue;
+            fetchedNodes.set(node._hash, node);
+
+            if (node.children && Array.isArray(node.children)) {
+              for (const childHash of node.children) {
+                /* v8 ignore next -- @preserve */
+                if (typeof childHash !== 'string' || seen.has(childHash)) {
+                  continue;
+                }
+                seen.add(childHash);
+                next.push(childHash);
+              }
             }
           }
         }
       }
+
+      frontier = next;
     }
 
     return Array.from(fetchedNodes.values());
