@@ -1201,9 +1201,59 @@ export class FsAgent {
     // problem for a queueing one.
     while (frontier.length > 0) {
       const next: string[] = [];
+      const collect = (dataArray: any[]): void => {
+        for (const node of dataArray) {
+          /* v8 ignore next -- @preserve */
+          if (!node?._hash) continue;
+          fetchedNodes.set(node._hash, node);
 
-      for (let i = 0; i < frontier.length; i += TREE_FETCH_CONCURRENCY) {
-        const batch = frontier.slice(i, i + TREE_FETCH_CONCURRENCY);
+          if (node.children && Array.isArray(node.children)) {
+            for (const childHash of node.children) {
+              /* v8 ignore next -- @preserve */
+              if (typeof childHash !== 'string' || seen.has(childHash)) {
+                continue;
+              }
+              seen.add(childHash);
+              next.push(childHash);
+            }
+          }
+        }
+      };
+
+      // One request for the whole level, where the io can answer one.
+      //
+      // Concurrency alone only widened the problem: 39 617 nodes at 64 in
+      // flight is 620 sequential batches, which at 30 ms is 18.6 s against a
+      // 20 s budget — measured, and it timed out twice. That cost is LINEAR in
+      // node count, so the 184 000-file catalogue cannot complete at all.
+      // A batch read is flat: one round trip per level, whatever the level
+      // holds.
+      //
+      // `Core.readRowsByHashes` uses the io's optional batch read where there
+      // is one and falls back to per-hash reads where there is not, so every Io
+      // implementation keeps working. What it does NOT always reproduce is
+      // `db.get`'s access path — through a peer it returned nothing for a root
+      // that `db.get` found — so anything it misses is fetched the proven way
+      // below rather than being treated as absent.
+      let unresolved = frontier;
+      try {
+        const rowsByHash = await FsAgent._withTimeout(
+          db.core.readRowsByHashes(treeKey, frontier),
+          this._timeouts.dbQuery,
+          `readRowsByHashes(${treeKey}, ${frontier.length})`,
+        );
+        if (rowsByHash.size > 0) {
+          collect(Array.from(rowsByHash.values()));
+          unresolved = frontier.filter((h) => !rowsByHash.has(h));
+        }
+      } catch {
+        // Batch reads are an optimisation. A failure here is not a failure of
+        // the walk — every hash simply goes down the per-node path.
+        unresolved = frontier;
+      }
+
+      for (let i = 0; i < unresolved.length; i += TREE_FETCH_CONCURRENCY) {
+        const batch = unresolved.slice(i, i + TREE_FETCH_CONCURRENCY);
         const results = await Promise.all(
           batch.map(async (hash) => {
             try {
@@ -1242,26 +1292,11 @@ export class FsAgent {
           if (!treeData || !treeData._data) continue;
 
           /* v8 ignore next -- @preserve */
-          const dataArray = Array.isArray(treeData._data)
-            ? treeData._data
-            : Object.values(treeData._data);
-
-          for (const node of dataArray as any[]) {
-            /* v8 ignore next -- @preserve */
-            if (!node._hash) continue;
-            fetchedNodes.set(node._hash, node);
-
-            if (node.children && Array.isArray(node.children)) {
-              for (const childHash of node.children) {
-                /* v8 ignore next -- @preserve */
-                if (typeof childHash !== 'string' || seen.has(childHash)) {
-                  continue;
-                }
-                seen.add(childHash);
-                next.push(childHash);
-              }
-            }
-          }
+          collect(
+            Array.isArray(treeData._data)
+              ? treeData._data
+              : Object.values(treeData._data),
+          );
         }
       }
 
