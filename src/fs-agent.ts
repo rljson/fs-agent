@@ -1922,6 +1922,24 @@ export class FsAgent {
     treeKey: string,
     restoreOptions?: RestoreOptions,
   ): Promise<() => void> {
+    // This agent has never been told anything, whatever the connector believes.
+    //
+    // A connector outlives the agent consuming it: `Node.restartAgent()`
+    // rebuilds the agent from the EXISTING transport, so a fresh agent starts
+    // against a received-dedup set full of conclusions drawn for its
+    // predecessor. Those conclusions were about a folder state this agent does
+    // not have.
+    //
+    // Measured: an agent restarted onto an emptied folder needs its peers to
+    // re-send what it lost, and those peers answer with exactly the ref the
+    // connector had already delivered to the previous agent — dropped before
+    // this one saw it, leaving the folder empty. That is `snapshot-bootstrap`
+    // on the lab, red on every run the suite has ever produced.
+    //
+    // A no-op on a first start, and cheap when it is not: a redelivered ref
+    // whose state the folder already holds costs one content comparison.
+    connector.resetReceived?.();
+
     // Start watching filesystem (if not already watching)
     await this._ensureWatching();
 
