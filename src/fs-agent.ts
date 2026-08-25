@@ -1516,10 +1516,28 @@ export class FsAgent {
     const initialPrevious = initialIsNew
       ? await this._ancestryPrevious(db, treeKey, [initialParentRef as string])
       : undefined;
+    // Decided BEFORE the store, because the store is what announces.
+    //
+    // Declining to call `_sendRef` is not enough to stay quiet: the connector
+    // observes local inserts and broadcasts them, so writing the tree IS the
+    // announcement. The quiet-join message printed while the empty ref went out
+    // on the very next line — silence in the log and a claim on the wire.
+    //
+    // Measured at catalogue scale, where it stops being cosmetic: a client
+    // joining a network holding 116 544 files announced its own empty tree,
+    // that became the network's latest state, and the joiner then received its
+    // own emptiness back and sat at 0 files.
+    //
+    // The row is still written — ancestry and the restore path both need it —
+    // just not announced.
+    const isSilentJoiner =
+      initialParentRef === undefined && this._treeIsEmpty(initialTree);
+
     const initialRef = await FsAgent._withTimeout(
       new FsDbAdapter(db, treeKey).storeFsTree(initialTree, {
         ...options,
         previous: initialPrevious,
+        skipNotification: isSilentJoiner ? true : options?.skipNotification,
       }),
       this._timeouts.fetchTree,
       `syncToDb → initial storeFsTree(${treeKey})`,
@@ -1544,8 +1562,6 @@ export class FsAgent {
     // The remembered ref is what separates the two cases, and it must be: a
     // folder the USER emptied has a remembered state, so that deletion is a
     // fact about a folder this agent was tracking and still goes out.
-    const isSilentJoiner =
-      initialParentRef === undefined && this._treeIsEmpty(initialTree);
     if (isSilentJoiner) {
       console.warn(
         `[FsAgent] ${this._rootPath} is empty and has no remembered state — ` +
