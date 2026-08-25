@@ -1468,9 +1468,40 @@ export class FsAgent {
       `syncToDb → initial storeFsTree(${treeKey})`,
     );
 
+    // A machine with nothing to say does not speak.
+    //
+    // An agent whose folder is empty AND which has no remembered state has
+    // established nothing about this treeKey. Announcing that emptiness is not
+    // reporting a fact, it is making a claim — and the network takes the newest
+    // claim as the current state, so a machine joining an idle network made
+    // emptiness the truth and the bootstrap then handed it back to everyone.
+    //
+    // The mass-delete guard stops that costing data, but it cannot make the
+    // joiner's folder fill: with its own empty tree as the network's latest
+    // ref there is nothing for the bootstrap to deliver. Measured on the real
+    // customer folder: 0 of 3642 files after 60 s, twice.
+    //
+    // Staying silent leaves the populated state as the latest one, which is
+    // what the existing bootstrap already knows how to send.
+    //
+    // The remembered ref is what separates the two cases, and it must be: a
+    // folder the USER emptied has a remembered state, so that deletion is a
+    // fact about a folder this agent was tracking and still goes out.
+    const isSilentJoiner =
+      initialParentRef === undefined && this._treeIsEmpty(initialTree);
+    if (isSilentJoiner) {
+      console.warn(
+        `[FsAgent] ${this._rootPath} is empty and has no remembered state — ` +
+          `joining quietly rather than announcing emptiness.`,
+      );
+      this._currentRef = initialRef;
+      this._persistCurrentRef(initialRef);
+      this._lastSentContentKey = this._contentKeyFromTree(initialTree);
+    }
+
     // Send initial ref through connector (self-filtering will prevent loops)
     /* v8 ignore next -- @preserve */
-    if (initialRef) {
+    if (initialRef && !isSilentJoiner) {
       this._lastSentRef = initialRef;
       this._currentRef = initialRef;
       this._persistCurrentRef(initialRef);
@@ -1813,6 +1844,21 @@ export class FsAgent {
       /* v8 ignore next -- @preserve a failed answer must not mask the refusal */
       console.warn(`[FsAgent] re-announcement failed: ${String(err)}`);
     }
+  }
+
+  /**
+   * Whether a tree describes a folder holding nothing whatsoever.
+   *
+   * Deliberately conservative: an empty DIRECTORY counts as content. A user who
+   * creates a folder and puts a directory in it has made a statement about what
+   * should be there, and the silence this gates is only correct for an agent
+   * that has established nothing at all. Being wrong in that direction would
+   * mean a folder that never advertises until something else happens to change.
+   * @param tree - The tree to inspect.
+   * @returns `true` when the tree carries no entries at all.
+   */
+  private _treeIsEmpty(tree: FsTree): boolean {
+    return this._getFileContentMap(tree).size === 0;
   }
 
   private _adoptAppliedRef(connector: Connector, treeRef: string): void {
