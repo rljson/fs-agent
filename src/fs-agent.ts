@@ -224,6 +224,17 @@ export const REFUSAL_ANSWER_COOLDOWN_MS = 5_000;
  */
 export const TREE_FETCH_CONCURRENCY = 64;
 
+/**
+ * How many restored paths an agent remembers writing.
+ *
+ * The memory exists so a repeat restore recognises this agent's own work
+ * without re-reading the file. Nothing ever removed an entry, so a long-lived
+ * agent over a large catalogue held one per file it had ever written. Dropping
+ * the oldest costs a stat on a file that has not been touched in a long time,
+ * which is the cheap half of the trade.
+ */
+export const RESTORED_BLOB_MEMORY_MAX = 50_000;
+
 export const MASS_DELETE_MIN_FILES = 100;
 
 /**
@@ -958,6 +969,16 @@ export class FsAgent {
           // own work without re-reading the file.
           /* v8 ignore else -- @preserve */
           if (meta.size !== undefined && meta.mtime !== undefined) {
+            // Bounded. This is a shortcut for recognising this agent's own
+            // work, and a shortcut that grows without limit stops being one:
+            // it is keyed by absolute path and nothing ever removed an entry,
+            // so a long-lived agent over a large catalogue accumulated one per
+            // file it had ever written. Dropping the oldest costs a stat on a
+            // file that has not been touched in a long time.
+            if (this._restoredBlobs.size >= RESTORED_BLOB_MEMORY_MAX) {
+              const oldest = this._restoredBlobs.keys().next().value as string;
+              this._restoredBlobs.delete(oldest);
+            }
             this._restoredBlobs.set(filePath, {
               blobId: meta.blobId,
               size: meta.size,
@@ -1169,14 +1190,14 @@ export class FsAgent {
    * @param route - Route to tree table
    * @param treeKey - Tree table key
    * @param rootHash - Hash of the root node to start fetching from
-   * @returns Array of all tree nodes in the tree
+   * @returns Every node in the tree, keyed by its content hash
    */
   private async _fetchTreeRecursively(
     db: Db,
     route: Route,
     treeKey: string,
     rootHash: string,
-  ): Promise<any[]> {
+  ): Promise<Map<string, any>> {
     const fetchedNodes = new Map<string, any>();
     const seen = new Set<string>([rootHash]);
     let frontier: string[] = [rootHash];
@@ -1303,7 +1324,7 @@ export class FsAgent {
       frontier = next;
     }
 
-    return Array.from(fetchedNodes.values());
+    return fetchedNodes;
   }
 
   /**
@@ -1334,21 +1355,17 @@ export class FsAgent {
       `fetchTree(${treeKey}@${rootRef.slice(0, 8)}…)`,
     );
 
-    if (allNodes.length === 0) {
+    if (allNodes.size === 0) {
       throw new Error(
         `No tree nodes found for ${treeKey}@${rootRef}. ` +
           `The tree may have been deleted or the reference is invalid.`,
       );
     }
 
-    // Build trees Map from all fetched nodes
-    const trees = new Map<string, any>();
-    for (const treeNode of allNodes) {
-      /* v8 ignore if -- @preserve */
-      if (treeNode._hash) {
-        trees.set(treeNode._hash, treeNode);
-      }
-    }
+    // The walk already keyed every node by its hash, so this IS the trees map.
+    // It used to be flattened to an array and rebuilt into a map: 158 465
+    // entries copied twice for no gain.
+    const trees = allNodes;
 
     // Validate root tree exists
     /* v8 ignore if -- @preserve */
