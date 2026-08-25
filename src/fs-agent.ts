@@ -1529,6 +1529,33 @@ export class FsAgent {
             this._lastSentRef = ref;
             this._lastSentContentKey = contentKey;
 
+            // Leaving a state by our OWN edit retires it, exactly as adopting
+            // a state by an incoming one does (`_adoptAppliedRef`). Only the
+            // receive side did this, and the asymmetry silently broke deletes.
+            //
+            // A tree ref is a content hash, so the state a folder returns to
+            // re-derives the ref it had before. Deleting a file restores the
+            // folder to precisely the state it was in before that file
+            // existed — the same ref, every time.
+            //
+            // So: this agent receives the seed state at startup, marks that
+            // ref received, then creates a file and moves off it by its own
+            // push. The ref of the state it just LEFT stays marked. A peer
+            // that now deletes the file advertises exactly that ref, and the
+            // connector drops it as already-received before any listener sees
+            // it. The file is gone on the deleter and stays forever on the
+            // other.
+            //
+            // Measured on a four-client local reproduction: a delete issued by
+            // a client that had only RECEIVED the file failed roughly one round
+            // in six, and failed on whichever peer had not happened to re-send
+            // that ref since — which is why it looked like it moved around.
+            // Deleting a file you created yourself always worked, because the
+            // creator's own push had retired the ref on the way past.
+            if (parentRef && parentRef !== ref) {
+              connector.invalidateReceived(parentRef);
+            }
+
             // Broadcast the new ref, carrying the predecessor ref so peers can
             // record correct ancestry.
             if (ref) {
