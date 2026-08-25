@@ -2235,6 +2235,21 @@ export class FsAgent {
             // That change elsewhere is what this now supplies. A refusal is a
             // fact about the SENDER: it holds less than we do. Answering it
             // with our current state is the whole correction.
+            // Retire the refused ref, or the SECOND time this happens is
+            // silent. A tree ref is a content hash, so a folder that is emptied
+            // twice re-derives the same ref both times — and the first
+            // advertisement left it marked "already received" here. The second
+            // is dropped by the connector before the agent sees it, so nothing
+            // refuses, nothing answers, and the peer stays empty for good.
+            //
+            // Measured: a client that had already joined and was then emptied
+            // sat at 1 of 3642 files with no refusal logged at all, while a
+            // FRESH client — whose empty ref this node had never seen — was
+            // refused, answered, and converged in eleven seconds.
+            //
+            // Same shape as the delete fix in 0.0.31: refusing a state is not
+            // the same as having consumed it.
+            connector.invalidateReceived(treeRef);
             await this._readvertiseAfterRefusal(connector);
             return;
           }
