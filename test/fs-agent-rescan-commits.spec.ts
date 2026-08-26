@@ -4,7 +4,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { mkdir, rm, writeFile } from 'fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -115,14 +115,31 @@ describe('FsAgent — a change found only by the safety rescan', () => {
     const stopFrom = await agent.syncFromDb(db, connector, 'fsTree', {
       cleanTarget: false,
     });
+
+    // The peer's tree must NOT already contain the file this node found on its
+    // own, or there is nothing left to announce and the assertion below tests
+    // the harness rather than the agent. Built from a separate folder holding
+    // only the seed, which is what a peer that has not heard the news looks
+    // like.
+    const peerDir = `${dir}-peer`;
+    await rm(peerDir, { recursive: true, force: true });
+    await mkdir(join(peerDir, 'nested'), { recursive: true });
+    for (const name of await readdir(join(dir, 'nested'))) {
+      if (name === 'during-an-apply.txt') continue;
+      await writeFile(
+        join(peerDir, 'nested', name),
+        await readFile(join(dir, 'nested', name), 'utf-8'),
+      );
+    }
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(dir, new BsMem()).extract(),
+      await new FsAgent(peerDir, new BsMem()).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 3_000));
 
     expect(sent.length).toBeGreaterThan(0);
     stopFrom();
+    await rm(`${dir}-peer`, { recursive: true, force: true });
 
     stop();
     agent.scanner.stopWatch();
