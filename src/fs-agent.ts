@@ -351,6 +351,16 @@ export class FsAgent {
    * view — and undo a deletion the peer just made.
    */
   private _remoteApplyInFlight = false;
+  /**
+   * Whether a safety rescan was suppressed while a remote apply was running.
+   *
+   * The rescan is what covers a watcher that drops or coalesces events, so a
+   * suppressed one has to be re-run rather than forgotten — see the deferral in
+   * `syncToDb`'s change handler.
+   */
+  private _rescanDeferred = false;
+  /** Re-runs a deferred rescan once the apply that blocked it has finished. */
+  private _flushDeferredRescan: (() => void) | undefined;
 
   /** Files written vs left alone by the current {@link restore}. */
   private _restoreWritten = 0;
@@ -1622,10 +1632,34 @@ export class FsAgent {
     // Finder "Keep Both" copy + rename) into a single store+broadcast.
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Lets the apply path re-run a rescan it had to suppress. Registered here
+    // because the handler is what knows how to push.
+    this._flushDeferredRescan = () => {
+      if (!this._rescanDeferred) return;
+      this._rescanDeferred = false;
+      debouncedSync({ type: 'safety-rescan', path: '.' });
+    };
+
     const debouncedSync = (change?: FsChange) => {
       // A rescan-driven push during a remote apply re-asserts stale state.
       // Real watcher events are unambiguous local changes and still go out.
       if (change?.type === 'safety-rescan' && this._remoteApplyInFlight) {
+        // Deferred, NOT discarded.
+        //
+        // A rescan-driven push during a remote apply would re-assert stale
+        // state, so it must not go out now. Dropping it outright loses the
+        // change, and how often that happens scales with the folder: an apply
+        // on a small folder is instant, so a rescan almost never lands inside
+        // one — an apply on a big folder takes seconds, and the rescan runs
+        // every five, so nearly every one is thrown away.
+        //
+        // Reported from a live pair on a 3 702-file folder: fs.watch delivered
+        // only coarse directory-level events (Windows coalesces or overflows
+        // ReadDirectoryChangesW on a large recursive tree), the rescan that
+        // exists to cover exactly that fired and logged — and the files it
+        // found never reached the peer. The rescan was working; this line was
+        // eating it.
+        this._rescanDeferred = true;
         return;
       }
       if (debounceTimer) clearTimeout(debounceTimer);
@@ -2527,6 +2561,8 @@ export class FsAgent {
           this._remoteApplyInFlight = false;
           // Always resume watching, even if there was an error
           this._scanner.resumeWatch();
+          // And re-run whatever the apply made us postpone.
+          this._flushDeferredRescan?.();
         }
 
         // Wait before next attempt (only reached on non-final failure)
