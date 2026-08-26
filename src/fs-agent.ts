@@ -1849,7 +1849,15 @@ export class FsAgent {
       const prev = (r.previous ?? [])
         .map((t) => refOfTimeId.get(t))
         .filter((x): x is string => x !== undefined);
-      prevRefsOf.set(r[refKey], prev);
+      // UNION, not overwrite. A content ref can be stored more than once — most
+      // commonly by the agent itself, which re-stores its own post-restore tree
+      // and lands on the identical ref because the restore preserved the
+      // mtimes. That second row carries different predecessors, and overwriting
+      // with it severed the chain: the ref was still in the DAG, but no longer
+      // reachable from its own descendants, so an ancestor stopped looking like
+      // one. Every revision that produced this ref contributes its history.
+      const existing = prevRefsOf.get(r[refKey]);
+      prevRefsOf.set(r[refKey], existing ? [...existing, ...prev] : prev);
     }
     const ancestorsOf = (startRefs: string[]): Set<string> => {
       const seen = new Set<string>();
@@ -2322,24 +2330,50 @@ export class FsAgent {
           // edits) is resolved inline — a 3-way merge into a merge revision D —
           // *before* the destructive restore could clobber local changes, all
           // while the watcher is paused; `behind` falls through to fast-forward.
-          if (
-            this._resolveConflicts &&
-            this._currentRef &&
-            predecessorRefs &&
-            predecessorRefs.length > 0
-          ) {
+          // Not gated on the incoming ref declaring ancestry, because the
+          // question "is this an ancestor of what I hold" is answered by walking
+          // MY history, not the sender's. Requiring predecessors here disabled
+          // the check for exactly the refs that need it most: a straggler
+          // re-advertised by a peer that restored from it carries whatever
+          // ancestry that ORIGINAL push had, which for an early tree in a burst
+          // is often none at all.
+          if (this._currentRef) {
             const relation = await this._ancestryRelation(
               db,
               treeKey,
               this._currentRef,
               treeRef,
-              predecessorRefs,
+              predecessorRefs ?? [],
             );
             if (relation === 'ahead') {
-              return; // We already have a newer revision; ignore the ancestor.
+              // AN ANCESTOR IS NOT NEWS, and this runs whether or not conflict
+              // resolution is switched on.
+              //
+              // It used to be gated with the merge below, which meant the
+              // default deployment had no protection against its own past. Refs
+              // do not arrive in the order they were sent, and on a large
+              // folder there are many of them: measured on four machines,
+              // seeding 1 200 files produced trees of 989, then 1 099, then
+              // 911 nodes IN THAT ARRIVAL ORDER. The 911 was ten seconds stale
+              // by the time it landed, and every node applied it — pruning
+              // seventy-seven files each, well under the mass-delete guard's
+              // floor — and then re-advertised that older state as its own,
+              // because a rescan of a restored folder reproduces the ref it
+              // restored from. Three of four nodes converged on a tree with
+              // thirty-five files missing, INCLUDING THE NODE THAT CREATED
+              // THEM.
+              //
+              // The guard cannot catch this: it refuses catastrophes, and each
+              // individual step here is small. Only causality can, and the
+              // sender now always declares it.
+              console.warn(
+                `[FsAgent] ref=${treeRef.slice(0, 8)}… is an ancestor of the ` +
+                  `state this agent already holds — ignoring.`,
+              );
+              return;
             }
             /* v8 ignore else -- @preserve 'behind' falls through to restore */
-            if (relation === 'diverged') {
+            if (relation === 'diverged' && this._resolveConflicts) {
               await this._resolveConflictInline(
                 db,
                 treeKey,
