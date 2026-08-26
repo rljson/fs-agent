@@ -366,6 +366,17 @@ export class FsAgent {
   private _restoreWritten = 0;
   private _restoreSkipped = 0;
 
+  /**
+   * Files this restore DELETED.
+   *
+   * Counted and reported because a prune is the only half of a restore that
+   * can destroy anything, and until now it was the only half that happened
+   * silently: `restore: wrote 0, left 901 already-correct` is what a node
+   * printed while removing 77 files. The number that mattered was the one not
+   * on the line.
+   */
+  private _restorePruned = 0;
+
   /** Paths the current {@link restore} could not write because they were held open. */
   private _restoreLocked: string[] = [];
 
@@ -822,6 +833,7 @@ export class FsAgent {
     // Recursively restore from tree structure
     this._restoreWritten = 0;
     this._restoreSkipped = 0;
+    this._restorePruned = 0;
     this._restoreLocked = [];
     await this._restoreTree(
       tree.rootHash,
@@ -829,11 +841,14 @@ export class FsAgent {
       target,
       target === this._rootPath,
     );
-    if (this._restoreSkipped > 0) {
+    if (this._restoreSkipped > 0 || this._restorePruned > 0) {
       console.log(
         `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
           `${this._restoreSkipped} already-correct file` +
-          `${this._restoreSkipped === 1 ? '' : 's'} untouched`,
+          `${this._restoreSkipped === 1 ? '' : 's'} untouched` +
+          (this._restorePruned > 0
+            ? `, DELETED ${this._restorePruned}`
+            : ''),
       );
     }
 
@@ -1525,6 +1540,7 @@ export class FsAgent {
         // user write — preserve it so cleanTarget can't delete something the
         // user saved while a restore was in flight.
         await rm(fullPath, { force: true });
+        this._restorePruned++;
       }
     }
   }
@@ -2451,6 +2467,26 @@ export class FsAgent {
             console.warn(
               `[FsAgent] ref=${treeRef.slice(0, 8)}… declares no ancestry — ` +
                 `applying additively, not pruning.`,
+            );
+          }
+          // What this agent believed at the moment it decided a prune was
+          // allowed. A rollback is always SOMEONE deciding a deletion is real,
+          // and until this line the decision left no record — only its
+          // consequence, in a count of files that were suddenly gone.
+          //
+          // Four fields, because each one is a different fix if it turns out to
+          // be the wrong one: whether the connector thought this was the
+          // sender's latest, whether the sender said what it descends from,
+          // whether pruning was allowed at all, and how the incoming tree
+          // compares in size to what is already here.
+          if (restoreOptions?.cleanTarget) {
+            console.log(
+              `[FsAgent] applying ref=${treeRef.slice(0, 8)}… ` +
+                `newestFromSender=${isNewestFromSender} ` +
+                `declaresAncestry=${declaresAncestry} ` +
+                `mayPrune=${applyOptions === restoreOptions} ` +
+                `incomingFiles=${this._getFileContentMap(incomingTree).size} ` +
+                `currentFiles=${this._getFileContentMap(currentTree).size}`,
             );
           }
           await FsAgent._withTimeout(
