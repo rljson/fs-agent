@@ -2313,6 +2313,31 @@ export class FsAgent {
             // at all. Deleting a file created earlier in the session is
             // precisely that shape. See `doc/safety-rescan.md`.
             this._adoptAppliedRef(connector, treeRef);
+            // And record the state as OURS, which this path used to leave
+            // half-done — the connector's bookkeeping was updated, the agent's
+            // was not.
+            //
+            // The consequence was the laundering step in the large-folder
+            // rollback, traced on the lab to this exact path. The folder now
+            // matches `treeRef`, but `_lastSentContentKey` still described some
+            // earlier state, so the next debounced push saw a content key that
+            // did not match, concluded it had news, and re-derived a ref —
+            // which, refs being content hashes, was `treeRef` itself. `_sendRef`
+            // then deliberately clears the connector's dedup so a genuine
+            // A → B → A deletion can go out, and that carried this one out too.
+            //
+            // The effect is that a node re-advertises a state it ADOPTED as
+            // though it authored it. That turns a stale tree into fresh-looking
+            // news from a new sender, which defeats the per-sender staleness
+            // check that would otherwise have caught it, and peers that had
+            // moved on prune back to it — 77 files at a time, under the
+            // mass-delete guard's floor.
+            //
+            // Recording the content key cannot suppress a real local change:
+            // any actual edit gives a different key, and the push proceeds.
+            this._currentRef = treeRef;
+            this._persistCurrentRef(treeRef);
+            this._lastSentContentKey = this._contentKeyFromTree(currentTree);
             return;
           }
 
@@ -2460,10 +2485,34 @@ export class FsAgent {
             previous,
           });
           this._adoptAppliedRef(connector, treeRef);
-          this._lastSentRef = postRestoreRef;
-          this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
           this._currentRef = postRestoreRef;
           this._persistCurrentRef(postRestoreRef);
+
+          // Claim this state as ADVERTISED only if it IS the sender's state.
+          //
+          // An apply does not always leave the folder equal to the incoming
+          // tree: with `cleanTarget` off — or held off by one of the guards
+          // above — the result is a SUPERSET, our files plus theirs. Recording
+          // that merged state as last-sent tells the debounce there is nothing
+          // left to say, and `ref === this._lastSentRef` then swallows the
+          // push outright. The peer never learns about the files only we have.
+          // A change the safety rescan finds while an apply is running is
+          // exactly that shape, and it is what the field reported as never
+          // arriving.
+          //
+          // Equal content is the opposite case, and the one that must stay
+          // quiet: re-announcing a state we just adopted launders a stale tree
+          // into news from a new sender — traced on the lab to this very path —
+          // and peers that had moved on prune back to it, 77 files at a time,
+          // under the mass-delete guard's floor.
+          //
+          // Same question, two answers, one condition: did this apply leave us
+          // where the sender is, or somewhere only we are?
+          const postRestoreKey = this._contentKeyFromTree(postRestoreTree);
+          if (postRestoreKey === this._contentKeyFromTree(incomingTree)) {
+            this._lastSentRef = postRestoreRef;
+            this._lastSentContentKey = postRestoreKey;
+          }
           return; // Success — exit retry loop
         } catch (err) {
           if (err instanceof MassDeleteRefusedError) {
