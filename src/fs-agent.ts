@@ -1849,15 +1849,23 @@ export class FsAgent {
       const prev = (r.previous ?? [])
         .map((t) => refOfTimeId.get(t))
         .filter((x): x is string => x !== undefined);
-      // UNION, not overwrite. A content ref can be stored more than once — most
+      // FIRST writer wins. A content ref can be stored more than once — most
       // commonly by the agent itself, which re-stores its own post-restore tree
       // and lands on the identical ref because the restore preserved the
-      // mtimes. That second row carries different predecessors, and overwriting
-      // with it severed the chain: the ref was still in the DAG, but no longer
-      // reachable from its own descendants, so an ancestor stopped looking like
-      // one. Every revision that produced this ref contributes its history.
-      const existing = prevRefsOf.get(r[refKey]);
-      prevRefsOf.set(r[refKey], existing ? [...existing, ...prev] : prev);
+      // mtimes. Overwriting with that later row severed the chain: the ref
+      // stayed in the DAG but was no longer reachable from its own descendants,
+      // so an ancestor stopped looking like one.
+      //
+      // Unioning the rows instead is worse, and the lab said so: every node
+      // re-stores every ref it applies, so the union cross-links lineages that
+      // never met, ancestor sets balloon, and eventually every ref looks like
+      // an ancestor of every other. Nodes then ignore everything and stall at
+      // whatever they happened to hold — measured as four nodes at 877, 961,
+      // 961 and 1 201 files, diverging rather than converging.
+      //
+      // The first row is the one that means something: the first time this
+      // state existed, this is what it came from. Every later row is an echo.
+      if (!prevRefsOf.has(r[refKey])) prevRefsOf.set(r[refKey], prev);
     }
     const ancestorsOf = (startRefs: string[]): Set<string> => {
       const seen = new Set<string>();
