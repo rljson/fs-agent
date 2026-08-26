@@ -133,4 +133,54 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     stopFrom();
     agent.scanner.stopWatch();
   });
+
+  // The third outcome, and the one the lab measured. A node in the middle of
+  // catching up holds a SUBSET of the sender's tree, and announcing that is how
+  // a burst turns into a rollback: trees arrived at the writer carrying 1008
+  // files, then 892, then 907, every one stamped newestFromSender=true —
+  // correctly, because they came from different peers, each monotonic for
+  // itself. Nothing downstream could tell "still catching up" from "deleted
+  // 116 files".
+  it('stays quiet when the apply left it behind the sender', async () => {
+    const { db, connector, agent, sent, socket, bs } = await wire();
+
+    await writeFile(join(dir, 'shared.txt'), 'shared');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree', {
+      cleanTarget: true,
+    });
+    await new Promise((r) => setTimeout(r, 600));
+
+    // The peer has everything this node has, and more — the ordinary shape of
+    // a node that is behind.
+    await writeFile(join(peerDir, 'shared.txt'), 'shared');
+    for (let i = 0; i < 5; i++) {
+      await writeFile(join(peerDir, `theirs-${i}.txt`), `t${i}`);
+    }
+    const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+      await new FsAgent(peerDir, bs).extract(),
+    );
+
+    // Make the restore fall short, exactly as a timeout or a slow link does:
+    // one blob is unreachable, so the folder ends up a strict subset.
+    const realGet = bs.getBlob.bind(bs);
+    (bs as unknown as { getBlob: unknown }).getBlob = async (id: string) => {
+      const blob = await realGet(id);
+      const text = blob ? Buffer.from(blob).toString('utf-8') : '';
+      if (text === 't4') throw new Error('blob unreachable');
+      return blob;
+    };
+
+    sent.length = 0;
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
+    await new Promise((r) => setTimeout(r, 2_000));
+
+    // Nothing announced: what this node holds is the peer's tree minus what
+    // has not landed yet, and saying so would ask everyone to prune to it.
+    expect(sent).toEqual([]);
+
+    stopTo();
+    stopFrom();
+    agent.scanner.stopWatch();
+  });
 });
