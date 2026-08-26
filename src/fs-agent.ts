@@ -235,6 +235,21 @@ export const TREE_FETCH_CONCURRENCY = 64;
  */
 export const RESTORED_BLOB_MEMORY_MAX = 50_000;
 
+/**
+ * What an agent concluded about an inbound ref.
+ *
+ * See `FsAgent._inboundRefVerdict` for why this is one decision rather than
+ * several conditions.
+ */
+export type InboundRefVerdict = 'apply' | 'own-echo' | 'stale';
+
+/** How each non-applying verdict reads in a log line. */
+export const VERDICT_REASON: Record<Exclude<InboundRefVerdict, 'apply'>, string> =
+  {
+    'own-echo': "is this agent's own last advertisement echoed back",
+    stale: 'is not the newest its sender has advertised',
+  };
+
 export const MASS_DELETE_MIN_FILES = 100;
 
 /**
@@ -1951,6 +1966,63 @@ export class FsAgent {
     return this._getFileContentMap(tree).size === 0;
   }
 
+  /**
+   * Whether an inbound ref is news to this agent, and if not, why.
+   *
+   * "Is this ref news to me" is the question this subsystem keeps getting
+   * wrong. It has been answered in five separate places — the connector's sent
+   * and received dedup sets, `_lastSentContentKey`, `_lastSentRef`,
+   * `_lastAppliedRef` — and each has been wrong at least once:
+   *
+   *  - an agent applied its OWN last advertisement over its own newer edit,
+   *    destroying it and then declining to re-send (fixed 0.0.30);
+   *  - a delete propagated only from the client that had created the file,
+   *    because the send path never retired the state it left (0.0.31);
+   *  - a refusal consumed the ref it refused, so the same emptiness arriving
+   *    twice was silent the second time (0.0.33);
+   *  - a restarted agent inherited its predecessor's conclusions (0.0.34);
+   *  - a quiet join announced anyway, because the connector broadcasts on
+   *    local insert and the gate was on the send (0.0.38).
+   *
+   * Collecting the pre-fetch gates here does not fix a sixth. It makes the
+   * question answerable in one place, in one order, with the reasoning
+   * attached — which is what the previous five each lacked.
+   *
+   * Order matters and is deliberate. The own-echo check comes first because it
+   * is the only one that holds regardless of what the sender believes: the two
+   * defences that ought to catch an echo both miss it. The origin filter
+   * compares the payload's origin to this connector's, and a bootstrap carries
+   * the SERVER as origin rather than the client the ref came from; the
+   * staleness check then measures the server's sequence, which did advance, so
+   * the echo reads as news.
+   *
+   * KNOWN LIMIT, stated because the next person will meet it: this compares
+   * against the LAST ref this agent sent, so an echo of an OLDER
+   * self-originated ref still gets through. Widening it to a set would also
+   * suppress a peer's legitimate revert to a state this agent once held. The
+   * real fix is for the bootstrap to carry the originating client, so the
+   * origin filter works and this check stops being needed at all.
+   * @param treeRef - The inbound ref.
+   * @param isNewestFromSender - Whether the connector judged it the newest
+   *   thing its sender has advertised. Unknown answers `true`.
+   * @returns `apply`, or the reason it is not news.
+   */
+  private _inboundRefVerdict(
+    treeRef: string,
+    isNewestFromSender: boolean,
+  ): InboundRefVerdict {
+    // Always right: if the folder still holds this state, applying it is a
+    // no-op; if it has moved on, applying it is the data loss above.
+    if (treeRef === this._lastSentRef) return 'own-echo';
+
+    // Not news, and not safe to apply additively either: a re-advertised
+    // pre-deletion state carries the file that was just deleted, so applying
+    // it undoes the deletion by ADDITION rather than by pruning.
+    if (!isNewestFromSender) return 'stale';
+
+    return 'apply';
+  }
+
   private _adoptAppliedRef(connector: Connector, treeRef: string): void {
     if (this._lastAppliedRef && this._lastAppliedRef !== treeRef) {
       connector.invalidateSent?.(this._lastAppliedRef);
@@ -2116,51 +2188,23 @@ export class FsAgent {
         // Nothing is lost by ignoring it. The sender's current state arrives
         // in its own advertisement, and a peer that already holds the newer
         // state needs nothing from the older one.
-        // A ref this agent itself broadcast is never news to this agent.
         //
-        // Measured, not reasoned: with the server repeating a new connection's
-        // bootstrap, a two-client run logged
-        //   RESTORE root=a ref=joLcfgkh lastSent=joLcfgkh newest=true
-        // three times in one attempt — the client restoring its OWN last
-        // advertisement over its own newer edit, destroying it, and then
-        // declining to re-send because the folder was back at the content it
-        // had already sent. The edit reached no peer and was gone locally.
-        //
-        // Two existing defences both miss it. The origin filter drops an echo
-        // by comparing `o` to this connector's origin, but the server's
-        // bootstrap carries the SERVER as origin, not the client the ref came
-        // from. The staleness check then asks whether this is the newest thing
-        // its sender has said — and the sender it sees is the server, whose
-        // count did advance, so the echo reads as news (`newest=true` above).
-        //
-        // The ref-level dedup does not catch it either, and deliberately:
-        // `_sendRef` clears each outgoing ref from BOTH dedup sets, so that a
-        // folder returning to an earlier state can advertise it again. That is
-        // correct and stays — it is what makes A → B → A deliverable — but it
-        // is exactly what leaves this agent open to its own echo.
-        //
-        // Ignoring is always right here. If the folder still holds this state,
-        // applying it is a no-op; if it has moved on, applying it is the data
-        // loss above. A peer that genuinely wants this state back gets it from
-        // whatever this agent advertises next.
-        if (treeRef === this._lastSentRef) {
+        // ONE place decides whether an inbound ref is news to this agent. The
+        // question used to be answered in scattered conditions, and every one of
+        // them has been wrong at least once — see `inboundRefVerdict`.
+        const verdict = this._inboundRefVerdict(treeRef, isNewestFromSender);
+        if (verdict !== 'apply') {
           console.warn(
-            `[FsAgent] ref=${treeRef.slice(0, 8)}… is this agent's own last ` +
-              `advertisement echoed back — ignoring it.`,
+            `[FsAgent] ref=${treeRef.slice(0, 8)}… ${VERDICT_REASON[verdict]} ` +
+              `— ignoring it.`,
           );
-          return;
-        }
-
-        if (!isNewestFromSender) {
-          console.warn(
-            `[FsAgent] ref=${treeRef.slice(0, 8)}… is not the newest its ` +
-              `sender has advertised — ignoring it.`,
-          );
-          // Hand it back to the connector's dedup. It was marked received on
-          // arrival and never applied, so leaving it marked would block a
-          // later, genuine return to this exact state — refs are content
-          // hashes, and that trap has been paid for once already.
-          connector.invalidateReceived(treeRef);
+          if (verdict === 'stale') {
+            // Hand it back to the connector's dedup. It was marked received on
+            // arrival and never applied, so leaving it marked would block a
+            // later, genuine return to this exact state — refs are content
+            // hashes, and that trap has been paid for once already.
+            connector.invalidateReceived(treeRef);
+          }
           return;
         }
 
