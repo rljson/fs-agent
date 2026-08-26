@@ -109,3 +109,20 @@ would ignore a genuine return to an ancestor state anyway — so retiring the re
 would not by itself make the revert work. That is a separate question about the
 conflict path, and it deserves its own measurement rather than a fix by
 analogy.
+
+## The rescan shares the burst's scan pass
+
+A rescan is a full `scan()`, and so is every watcher event. Under a burst those
+used to run all at once — one whole-tree pass per file, plus the rescan landing
+in the middle of them. Copying 1 200 files into a watched folder started 1 200
+concurrent scans; the CPU sat 82% idle waiting on the filesystem, RSS climbed
+past 785 MB, and nothing reached the peer for two minutes.
+
+Since 0.0.43 every internal caller — the watcher paths and this rescan — goes
+through one coalescer. A burst collapses to at most two passes: one for whoever
+arrives first, one shared follow-up for everyone who arrives while it runs.
+
+The rescan loses nothing by sharing. What a caller is promised is a pass that
+**starts after it asked**, never one already in flight — so a rescan still sees
+every change that existed when it fired, and drift it would have detected on
+its own pass it detects on the shared one.
