@@ -367,6 +367,26 @@ export class FsAgent {
   private _restoreSkipped = 0;
 
   /**
+   * The file set of the newest tree any peer has told this node about.
+   *
+   * Kept so the send path can answer the one question a receiver never can:
+   * am I about to announce my progress through someone else's state?
+   */
+  private _lastKnownRemoteFiles?: Map<string, string>;
+
+  /**
+   * Whether a LOCAL deletion has been seen since the last apply.
+   *
+   * The discriminator 0.0.49 lacked. A folder smaller than the newest tree
+   * this node knows about is either a node still catching up or a node someone
+   * deleted files from, and those need opposite treatment — the first must stay
+   * quiet, the second must be heard. The shapes are identical; the CAUSE is
+   * not, and only this node can see it: a deletion arrives as a watcher event,
+   * catching up does not.
+   */
+  private _localDeleteSinceApply = false;
+
+  /**
    * Files this restore DELETED.
    *
    * Counted and reported because a prune is the only half of a restore that
@@ -1675,6 +1695,10 @@ export class FsAgent {
     };
 
     const debouncedSync = (change?: FsChange) => {
+      // A local deletion is the one thing that makes a smaller folder NEWS
+      // rather than a gap. Recorded here, where the watcher's verdict arrives,
+      // and consumed below.
+      if (change?.type === 'deleted') this._localDeleteSinceApply = true;
       // A rescan-driven push during a remote apply re-asserts stale state.
       // Real watcher events are unambiguous local changes and still go out.
       if (change?.type === 'safety-rescan' && this._remoteApplyInFlight) {
@@ -1710,6 +1734,49 @@ export class FsAgent {
             const contentKey = this._contentKeyFromTree(tree);
             if (contentKey === this._lastSentContentKey) {
               return;
+            }
+
+            // Am I about to announce my progress through somebody else's
+            // state?
+            //
+            // This is the path the advertisements come out of: a restore writes
+            // files, the watcher sees them, and the debounce pushes whatever the
+            // folder holds AT THAT MOMENT — which mid-catch-up is the sender's
+            // tree minus what has not landed yet. Measured across four lab runs,
+            // the writer held 1 213 files and applied nine to seventeen
+            // shrinking trees each time: 402, then 497, then 148. Every one was
+            // correctly stamped as its sender's newest, because a per-sender
+            // sequence orders one sender's messages and cannot say that this
+            // sender is behind that one.
+            //
+            // Gated on there having been NO local deletion since the last apply,
+            // which is the discriminator the first version of this rule lacked.
+            // A folder smaller than the newest known tree is either a node
+            // catching up or a node someone deleted from — identical in shape,
+            // opposite in what they need. Without the gate this silenced a reset
+            // folder and a real mass deletion too, and the lab went from rolling
+            // back to not delivering at all: four runs, none passed, the last
+            // two never moving their one-byte readiness file.
+            const known = this._lastKnownRemoteFiles;
+            if (known && !this._localDeleteSinceApply && tree.trees.size > 0) {
+              const mine = this._getFileContentMap(tree);
+              if (mine.size < known.size) {
+                let hasOwn = false;
+                for (const path of mine.keys()) {
+                  if (!known.has(path)) {
+                    hasOwn = true;
+                    break;
+                  }
+                }
+                if (!hasOwn) {
+                  console.log(
+                    `[FsAgent] not announcing ${mine.size} of ${known.size} ` +
+                      `files — nothing here was deleted locally, so this is a ` +
+                      `gap rather than news.`,
+                  );
+                  return;
+                }
+              }
             }
 
             const dbAdapter = new FsDbAdapter(db, treeKey);
@@ -2565,6 +2632,10 @@ export class FsAgent {
           // yet.
           const postRestoreFiles = this._getFileContentMap(postRestoreTree);
           const incomingFiles = this._getFileContentMap(incomingTree);
+          this._lastKnownRemoteFiles = incomingFiles;
+          // A fresh apply resets the question: whatever this node is missing
+          // from here on is missing because it has not arrived yet.
+          this._localDeleteSinceApply = false;
           let hasNewsOfOurOwn = false;
           for (const path of postRestoreFiles.keys()) {
             if (!incomingFiles.has(path)) {
