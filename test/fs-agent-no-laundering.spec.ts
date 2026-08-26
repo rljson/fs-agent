@@ -183,4 +183,69 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     stopFrom();
     agent.scanner.stopWatch();
   });
+
+  // The path the advertisements actually came out of. A restore writes files,
+  // the watcher sees them, and the debounce pushes whatever the folder holds at
+  // that moment — mid-catch-up, that is the sender's tree minus what has not
+  // landed yet.
+  //
+  // Measured across four lab runs: the writer applied nine to SEVENTEEN
+  // shrinking trees each time, holding 1213 files and receiving 402, then 497,
+  // then 148.
+  it('does not announce a folder that is a strict subset of the newest tree it knows', async () => {
+    const { db, connector, agent, sent } = await wire();
+
+    await writeFile(join(dir, 'a.txt'), 'a');
+    await writeFile(join(dir, 'b.txt'), 'b');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    await new Promise((r) => setTimeout(r, 600));
+    sent.length = 0;
+
+    // A peer has told this node about a bigger tree; the node holds two of its
+    // five files, which is what catching up looks like from the inside.
+    (
+      agent as unknown as { _lastKnownRemoteFiles: Map<string, string> }
+    )._lastKnownRemoteFiles = new Map([
+      ['a.txt', 'blob-a'],
+      ['b.txt', 'blob-b'],
+      ['c.txt', 'blob-c'],
+      ['d.txt', 'blob-d'],
+      ['e.txt', 'blob-e'],
+    ]);
+
+    await writeFile(join(dir, 'a.txt'), 'a changed');
+    await new Promise((r) => setTimeout(r, 1_200));
+
+    expect(sent).toEqual([]);
+
+    stopTo();
+    agent.scanner.stopWatch();
+  });
+
+  // And the moment it has something of its own, it speaks again — otherwise a
+  // node that fell behind once would never be heard from.
+  it('announces again as soon as it holds a file the newest tree lacks', async () => {
+    const { db, connector, agent, sent } = await wire();
+
+    await writeFile(join(dir, 'a.txt'), 'a');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    await new Promise((r) => setTimeout(r, 600));
+    sent.length = 0;
+
+    (
+      agent as unknown as { _lastKnownRemoteFiles: Map<string, string> }
+    )._lastKnownRemoteFiles = new Map([
+      ['a.txt', 'blob-a'],
+      ['c.txt', 'blob-c'],
+      ['d.txt', 'blob-d'],
+    ]);
+
+    await writeFile(join(dir, 'mine.txt'), 'only here');
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    expect(sent.length).toBeGreaterThan(0);
+
+    stopTo();
+    agent.scanner.stopWatch();
+  });
 });
