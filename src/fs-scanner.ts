@@ -186,6 +186,12 @@ export class FsScanner {
   /** Entries that vanished mid-scan, counted per {@link scan} for one summary. */
   private _vanishedDuringScan = 0;
 
+  /** The scan pass running right now, if any. See {@link _scanAfterNow}. */
+  private _activeScan: Promise<FsTree> | null = null;
+
+  /** The single follow-up pass everyone who arrived mid-scan is waiting on. */
+  private _pendingScan: Promise<FsTree> | null = null;
+
   constructor(rootPath: string, options: FsScanOptions = {}) {
     this._rootPath = rootPath;
     this._options = {
@@ -641,7 +647,9 @@ export class FsScanner {
     /* v8 ignore next -- @preserve _tree is set before the timer ever fires */
     const prevKey = this._tree ? this._safetyContentKey(this._tree) : null;
     try {
-      await this.scan();
+      // Through the coalescer too: a rescan landing in the middle of a burst
+      // would otherwise add a full extra pass to a folder already scanning.
+      await this._scanAfterNow();
     } catch (err) {
       console.warn(
         `[fs-scanner] safety rescan failed: ${FsScanner._errMessage(err)}`,
@@ -759,7 +767,7 @@ export class FsScanner {
       if (exists) {
         // File added or modified — rescan to update the tree, then notify.
         const existingTree = this._findTreeByPath(relativePath);
-        await this.scan();
+        await this._scanAfterNow();
         await this._notifyChange({
           type: existingTree ? 'modified' : 'added',
           path: relativePath,
@@ -777,13 +785,62 @@ export class FsScanner {
         this.stopWatch();
       }
       if (rootExists) {
-        await this.scan();
+        await this._scanAfterNow();
         await this._notifyChange({ type: 'deleted', path: relativePath });
       }
     } catch {
       // Transient scan/notify failure (locked file, etc.) — skip this event;
       // the watcher stays alive and the next change triggers a fresh scan.
     }
+  }
+
+  /**
+   * A scan that is guaranteed to have STARTED after this call, sharing one
+   * pass with everyone else who asked while it was running.
+   *
+   * `scan()` is a whole-tree operation: it walks every directory, stats every
+   * file and writes a blob for anything new. Calling it once per watcher event
+   * therefore costs O(files²) on a burst — and fs.watch does not await its
+   * callback, so those scans all run AT ONCE. Copying 1 200 tiny files into a
+   * watched folder took 1 200 concurrent full scans: the CPU sat 82% idle
+   * waiting on the filesystem, RSS climbed from 263 MB to 785 MB, and after two
+   * minutes the peer had received nothing. On the customer's 3 702-file folder
+   * the same burst wedged the client outright.
+   *
+   * Started-after is the part that cannot be traded away. Joining a scan that
+   * began BEFORE the event would let a push carry a tree that predates the file
+   * that triggered it — which is precisely the partial trees the lab saw
+   * advertised: 64 nodes, then 103, then 204, each a stale snapshot of a folder
+   * that already held twelve hundred files. So a caller either starts a scan
+   * now, or waits for the one that begins when the current pass ends. A burst
+   * of any size collapses to at most two scans, and no change is missed.
+   */
+  private _scanAfterNow(): Promise<FsTree> {
+    if (!this._activeScan) {
+      const started = (async (): Promise<FsTree> => {
+        try {
+          return await this.scan();
+        } finally {
+          this._activeScan = null;
+        }
+      })();
+      this._activeScan = started;
+      return started;
+    }
+    if (this._pendingScan) return this._pendingScan;
+    const queued = (async (): Promise<FsTree> => {
+      // A failed pass is not this caller's problem: what it asked for is a scan
+      // that starts afterwards, and that is what it still gets.
+      try {
+        await this._activeScan;
+      } catch {
+        /* the follow-up pass is the answer either way */
+      }
+      this._pendingScan = null;
+      return this._scanAfterNow();
+    })();
+    this._pendingScan = queued;
+    return queued;
   }
 
   private _findTreeByPath(relativePath: string): Tree | undefined {
