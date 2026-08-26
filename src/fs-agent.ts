@@ -2373,7 +2373,15 @@ export class FsAgent {
               return;
             }
             /* v8 ignore else -- @preserve 'behind' falls through to restore */
-            if (relation === 'diverged' && this._resolveConflicts) {
+            // The merge keeps BOTH of its original preconditions: conflict
+            // resolution switched on, and a sender that declared what it
+            // descends from. Only the ancestor check above was widened.
+            if (
+              relation === 'diverged' &&
+              this._resolveConflicts &&
+              predecessorRefs !== undefined &&
+              predecessorRefs.length > 0
+            ) {
               await this._resolveConflictInline(
                 db,
                 treeKey,
