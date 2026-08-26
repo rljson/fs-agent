@@ -1849,23 +1849,7 @@ export class FsAgent {
       const prev = (r.previous ?? [])
         .map((t) => refOfTimeId.get(t))
         .filter((x): x is string => x !== undefined);
-      // FIRST writer wins. A content ref can be stored more than once — most
-      // commonly by the agent itself, which re-stores its own post-restore tree
-      // and lands on the identical ref because the restore preserved the
-      // mtimes. Overwriting with that later row severed the chain: the ref
-      // stayed in the DAG but was no longer reachable from its own descendants,
-      // so an ancestor stopped looking like one.
-      //
-      // Unioning the rows instead is worse, and the lab said so: every node
-      // re-stores every ref it applies, so the union cross-links lineages that
-      // never met, ancestor sets balloon, and eventually every ref looks like
-      // an ancestor of every other. Nodes then ignore everything and stall at
-      // whatever they happened to hold — measured as four nodes at 877, 961,
-      // 961 and 1 201 files, diverging rather than converging.
-      //
-      // The first row is the one that means something: the first time this
-      // state existed, this is what it came from. Every later row is an echo.
-      if (!prevRefsOf.has(r[refKey])) prevRefsOf.set(r[refKey], prev);
+      prevRefsOf.set(r[refKey], prev);
     }
     const ancestorsOf = (startRefs: string[]): Set<string> => {
       const seen = new Set<string>();
@@ -2338,58 +2322,24 @@ export class FsAgent {
           // edits) is resolved inline — a 3-way merge into a merge revision D —
           // *before* the destructive restore could clobber local changes, all
           // while the watcher is paused; `behind` falls through to fast-forward.
-          // Not gated on the incoming ref declaring ancestry, because the
-          // question "is this an ancestor of what I hold" is answered by walking
-          // MY history, not the sender's. Requiring predecessors here disabled
-          // the check for exactly the refs that need it most: a straggler
-          // re-advertised by a peer that restored from it carries whatever
-          // ancestry that ORIGINAL push had, which for an early tree in a burst
-          // is often none at all.
-          if (this._currentRef) {
+          if (
+            this._resolveConflicts &&
+            this._currentRef &&
+            predecessorRefs &&
+            predecessorRefs.length > 0
+          ) {
             const relation = await this._ancestryRelation(
               db,
               treeKey,
               this._currentRef,
               treeRef,
-              predecessorRefs ?? [],
+              predecessorRefs,
             );
             if (relation === 'ahead') {
-              // AN ANCESTOR IS NOT NEWS, and this runs whether or not conflict
-              // resolution is switched on.
-              //
-              // It used to be gated with the merge below, which meant the
-              // default deployment had no protection against its own past. Refs
-              // do not arrive in the order they were sent, and on a large
-              // folder there are many of them: measured on four machines,
-              // seeding 1 200 files produced trees of 989, then 1 099, then
-              // 911 nodes IN THAT ARRIVAL ORDER. The 911 was ten seconds stale
-              // by the time it landed, and every node applied it — pruning
-              // seventy-seven files each, well under the mass-delete guard's
-              // floor — and then re-advertised that older state as its own,
-              // because a rescan of a restored folder reproduces the ref it
-              // restored from. Three of four nodes converged on a tree with
-              // thirty-five files missing, INCLUDING THE NODE THAT CREATED
-              // THEM.
-              //
-              // The guard cannot catch this: it refuses catastrophes, and each
-              // individual step here is small. Only causality can, and the
-              // sender now always declares it.
-              console.warn(
-                `[FsAgent] ref=${treeRef.slice(0, 8)}… is an ancestor of the ` +
-                  `state this agent already holds — ignoring.`,
-              );
-              return;
+              return; // We already have a newer revision; ignore the ancestor.
             }
             /* v8 ignore else -- @preserve 'behind' falls through to restore */
-            // The merge keeps BOTH of its original preconditions: conflict
-            // resolution switched on, and a sender that declared what it
-            // descends from. Only the ancestor check above was widened.
-            if (
-              relation === 'diverged' &&
-              this._resolveConflicts &&
-              predecessorRefs !== undefined &&
-              predecessorRefs.length > 0
-            ) {
+            if (relation === 'diverged') {
               await this._resolveConflictInline(
                 db,
                 treeKey,
