@@ -367,15 +367,6 @@ export class FsAgent {
   private _restoreSkipped = 0;
 
   /**
-   * The file set of the newest tree any peer has told this node about.
-   *
-   * Kept so the SEND path can answer the one question a receiver never can:
-   * am I about to announce a state that is merely my progress through someone
-   * else's? See the check in `syncToDb`.
-   */
-  private _lastKnownRemoteFiles?: Map<string, string>;
-
-  /**
    * Files this restore DELETED.
    *
    * Counted and reported because a prune is the only half of a restore that
@@ -1721,48 +1712,6 @@ export class FsAgent {
               return;
             }
 
-            // Am I about to announce my progress through somebody else's
-            // state?
-            //
-            // This is the path the advertisements actually came out of, and
-            // the reason the same rule on the post-restore path caught almost
-            // nothing: a restore writes files, the watcher sees them, and the
-            // debounce pushes whatever the folder holds AT THAT MOMENT — which,
-            // mid-catch-up, is the sender's tree minus what has not landed yet.
-            //
-            // Measured across four lab runs, the writer applied nine to
-            // SEVENTEEN shrinking trees each time: holding 1 213 files and
-            // receiving 402, then 497, then 148. Every one was correctly
-            // stamped as its sender's newest, because it was — a per-sender
-            // sequence orders one sender's messages, and cannot say that this
-            // sender is behind that one.
-            //
-            // Only the node itself can know. If everything it holds came from
-            // the last tree it was told about, and it holds LESS, then it has
-            // no news — it has a gap. Announcing it asks everyone else to
-            // prune to that gap.
-            const known = this._lastKnownRemoteFiles;
-            if (known && tree.trees.size > 0) {
-              const mine = this._getFileContentMap(tree);
-              if (mine.size < known.size) {
-                let hasOwn = false;
-                for (const path of mine.keys()) {
-                  if (!known.has(path)) {
-                    hasOwn = true;
-                    break;
-                  }
-                }
-                if (!hasOwn) {
-                  console.log(
-                    `[FsAgent] not announcing ${mine.size} of ${known.size} ` +
-                      `files — this node is still catching up, and that is a ` +
-                      `gap rather than news.`,
-                  );
-                  return;
-                }
-              }
-            }
-
             const dbAdapter = new FsDbAdapter(db, treeKey);
             // Ancestry: this local edit descends from the current head ref.
             const parentRef = this._currentRef;
@@ -2616,7 +2565,6 @@ export class FsAgent {
           // yet.
           const postRestoreFiles = this._getFileContentMap(postRestoreTree);
           const incomingFiles = this._getFileContentMap(incomingTree);
-          this._lastKnownRemoteFiles = incomingFiles;
           let hasNewsOfOurOwn = false;
           for (const path of postRestoreFiles.keys()) {
             if (!incomingFiles.has(path)) {
