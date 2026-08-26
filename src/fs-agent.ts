@@ -2544,10 +2544,44 @@ export class FsAgent {
           //
           // Same question, two answers, one condition: did this apply leave us
           // where the sender is, or somewhere only we are?
-          const postRestoreKey = this._contentKeyFromTree(postRestoreTree);
-          if (postRestoreKey === this._contentKeyFromTree(incomingTree)) {
+          // "Different" is not the same as "ahead", and 0.0.46 conflated them.
+          //
+          // Three outcomes, not two. Equal — their news, stay quiet. A superset
+          // — we hold files they lack, so we have something to say. But a node
+          // in the middle of catching up is a SUBSET: its folder is behind the
+          // sender's, and announcing that is how a burst turns into a rollback.
+          //
+          // The lab measured it directly. Trees arrived at the writer carrying
+          // 1 008 files, then 892, then 907, each stamped
+          // `newestFromSender=true` — and they were, because they came from
+          // DIFFERENT peers, each monotonic for itself. A per-sender sequence
+          // cannot order two senders against each other, so nothing downstream
+          // could tell that 892 was a node still catching up rather than a node
+          // deleting 116 files.
+          //
+          // Which means the node that is behind has to stay quiet on its own
+          // account. It knows something no receiver can work out: that what it
+          // holds came FROM the tree it just applied, minus what has not landed
+          // yet.
+          const postRestoreFiles = this._getFileContentMap(postRestoreTree);
+          const incomingFiles = this._getFileContentMap(incomingTree);
+          let hasNewsOfOurOwn = false;
+          for (const path of postRestoreFiles.keys()) {
+            if (!incomingFiles.has(path)) {
+              hasNewsOfOurOwn = true;
+              break;
+            }
+          }
+          if (!hasNewsOfOurOwn) {
             this._lastSentRef = postRestoreRef;
-            this._lastSentContentKey = postRestoreKey;
+            this._lastSentContentKey = this._contentKeyFromTree(postRestoreTree);
+            if (postRestoreFiles.size < incomingFiles.size) {
+              console.log(
+                `[FsAgent] ref=${treeRef.slice(0, 8)}… left this node behind ` +
+                  `(${postRestoreFiles.size} of ${incomingFiles.size} files) — ` +
+                  `not announcing a state that is catching up.`,
+              );
+            }
           }
           return; // Success — exit retry loop
         } catch (err) {
