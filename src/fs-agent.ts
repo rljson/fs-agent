@@ -689,9 +689,27 @@ export class FsAgent {
     // is cleared from both dedup sets before it goes out. Bounce-backs are
     // still suppressed — they never reach this point.
     connector.invalidateSent?.(ref);
-    if (this._resolveConflicts) {
-      connector.setPredecessors(predecessorRefs ?? []);
-    }
+
+    // Ancestry travels with every push, not only when conflict resolution is
+    // on.
+    //
+    // It is metadata: what state this one descends from. Nothing acts on it
+    // unless asked to, and sending it costs a field on the wire. Withholding it
+    // costs the ability to tell two situations apart that look identical
+    // without it —
+    //
+    //   a peer DELETED a file from a state we both had        (subtractive, correct)
+    //   a peer has files we never shared a history with       (additive, correct)
+    //
+    // — because a first push from an independently-populated folder and a
+    // deletion from a shared state are the same shape once the ancestry is
+    // stripped. Measured: two populated folders joined under one treeKey lose
+    // one side's unique files when the difference is small, and merge when it
+    // is large, because the only discriminator left is a volume heuristic.
+    //
+    // Sent on its own, as the identity and sequence metadata was before it, so
+    // that the rule which consumes it can be enabled and measured separately.
+    connector.setPredecessors(predecessorRefs ?? []);
     // Retry on a transient socket-layer failure (e.g. a dropped packet or a
     // reconnect blip) so a single hiccup doesn't lose an entire ref.
     await FsAgent._withRetry(
@@ -2351,16 +2369,31 @@ export class FsAgent {
           // conditional on predecessors being present. So the rule lives here
           // instead, and it costs nothing legitimate: a genuine first push has
           // nothing to delete anyway.
-          // Gated on `_resolveConflicts`, and that gate is load-bearing: the
-          // sender only transmits predecessors when conflict resolution is
-          // on (see `_sendRef`). With it off, NO ref carries ancestry, so
-          // this rule would read every legitimate deletion as untrustworthy
-          // and silently stop deletions propagating at all — which it did,
-          // across eight tests, before the gate was added.
+          // Gated on `_resolveConflicts`, and that gate is load-bearing: with
+          // it off, the rule would read a legitimate deletion as untrustworthy
+          // and silently stop deletions propagating — which it did, across
+          // eight tests, before the gate was added.
           //
-          // So: withhold pruning only where ancestry was expected and is
-          // missing. Where it is never sent, the rule cannot tell stale from
-          // fresh and must not pretend otherwise.
+          // ANCESTRY IS NOW ALWAYS TRANSMITTED (see `_sendRef`), which is the
+          // groundwork for replacing this gate. It is not replaced yet, and the
+          // measurement says why. Flipping it to `true` broke twenty tests:
+          // every deployment without `causalOrdering` carries no ancestry, so
+          // every deletion looked untrustworthy. Narrowing it to "expect
+          // ancestry where the transport actually carries it"
+          // (`connector.syncConfig?.causalOrdering === true`) left two, and
+          // those two are the real question rather than a fixture problem: a
+          // sender only declares ancestry once it HAS a current ref, so a
+          // genuinely fresh client's first push never does — and under the new
+          // rule its deletions would never prune.
+          //
+          // For a real client that is arguably right: a restarted one reloads
+          // its ref from `.fsagent-state.json` and does declare ancestry, so
+          // only a brand-new folder is treated as first contact, which is
+          // exactly the wanted behaviour. But it changes what "delete"
+          // means on a connection, and this class of change has been reverted
+          // four times for being shipped on reasoning. It needs its own
+          // rollout and a lab measurement, not a flag flip at the end of
+          // another one. See section 11 of doc/large-folder-plan.md.
           const ancestryExpected = this._resolveConflicts;
           const declaresAncestry = (predecessorRefs?.length ?? 0) > 0;
 
