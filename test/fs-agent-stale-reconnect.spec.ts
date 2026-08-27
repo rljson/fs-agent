@@ -231,12 +231,13 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
         includeClientIdentity: true,
       });
       return Object.assign(connector, {
-        advertise: (ref: string, seq: number) =>
+        advertise: (ref: string, seq: number, predecessors?: string[]) =>
           socket.emit(connector.events.ref, {
             o: 'remote-peer',
             r: ref,
             c: 'peer-a',
             seq,
+            p: predecessors,
           }),
       });
     };
@@ -301,26 +302,70 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       const bs = new BsMem();
       await writeFile(join(targetDir, 'gone.txt'), 'gone');
       await writeFile(join(targetDir, 'shared.txt'), 'shared');
-      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
-      const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-        await new FsAgent(sourceDir, bs).extract(),
-      );
 
       const agent = new FsAgent(targetDir, bs, {
         timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
       });
       const connector = makeSeqConnector(db);
+      // Both directions, as every real client runs: the node has a state of
+      // its own, and therefore something a sender can build on.
+      const stopTo = await agent.syncToDb(db, connector, 'fsTree');
       const stop = await agent.syncFromDb(db, connector, 'fsTree', {
         cleanTarget: true,
       });
+      await new Promise((r) => setTimeout(r, 300));
+      const myRef = (agent as unknown as { _currentRef?: string })._currentRef;
 
-      connector.advertise(ref, 1);
+      // The deleter built on the state this node is in, and says so — which is
+      // what makes the absence of gone.txt a deletion rather than ignorance.
+      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
+      const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+        await new FsAgent(sourceDir, bs).extract(),
+      );
+      connector.advertise(ref, 1, myRef ? [myRef] : []);
       await new Promise((r) => setTimeout(r, 400));
 
       // A current advertisement deletes exactly as before — the guard must
       // not turn cleanTarget off in general.
       expect(existsSync(join(targetDir, 'gone.txt'))).toBe(false);
 
+      stopTo();
+      stop();
+      agent.scanner.stopWatch();
+    });
+
+    // The other half of the same rule, and the whole point of it: a sender
+    // that cannot show it has seen this node's state may ADD but not DELETE.
+    // A node catching up declares its own previous state, never this one's, so
+    // it can never cause a prune however late its tree arrives.
+    it('does not prune for a sender that never saw this state', async () => {
+      const db = await makeDb();
+      const bs = new BsMem();
+      await writeFile(join(targetDir, 'gone.txt'), 'gone');
+      await writeFile(join(targetDir, 'shared.txt'), 'shared');
+
+      const agent = new FsAgent(targetDir, bs, {
+        timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      });
+      const connector = makeSeqConnector(db);
+      const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+      const stop = await agent.syncFromDb(db, connector, 'fsTree', {
+        cleanTarget: true,
+      });
+      await new Promise((r) => setTimeout(r, 300));
+
+      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
+      const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+        await new FsAgent(sourceDir, bs).extract(),
+      );
+      // Declares a state this node has never been in.
+      connector.advertise(ref, 1, ['some-other-state-entirely']);
+      await new Promise((r) => setTimeout(r, 400));
+
+      expect(existsSync(join(targetDir, 'gone.txt'))).toBe(true);
+      expect(existsSync(join(targetDir, 'shared.txt'))).toBe(true);
+
+      stopTo();
       stop();
       agent.scanner.stopWatch();
     });

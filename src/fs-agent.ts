@@ -2505,6 +2505,41 @@ export class FsAgent {
           const ancestryExpected = this._resolveConflicts;
           const declaresAncestry = (predecessorRefs?.length ?? 0) > 0;
 
+          // THE PRUNE RULE. One comparison, and the only question that
+          // separates a deletion from a straggler:
+          //
+          //   Is the state I am in among the states this push says it builds
+          //   on?
+          //
+          // Yes — the sender has seen what I have. Everything absent from its
+          // tree is absent BECAUSE IT REMOVED IT, and that is a deletion worth
+          // applying. No — it has not seen my state, so what looks like a
+          // deletion is only its own ignorance of my files.
+          //
+          // This needs no DAG walk, no sequence number, and no assumption
+          // about arrival order — the three things that sank four earlier
+          // attempts. A node catching up declares its own previous state,
+          // never mine, so it can never cause a prune however late it arrives.
+          // A node that genuinely deletes has just built on the state we share,
+          // and says so.
+          //
+          // A node with no `_currentRef` has nothing anyone could have built
+          // on, so it never prunes — which is the additive first meeting the
+          // plan asks for in section 12.
+          //
+          // Applied only where the transport actually CARRIES ancestry.
+          // A connector without `causalOrdering` never puts predecessors on the
+          // wire, so every push would look like one that had not seen this
+          // node's state, and every deletion would be refused. That is not a
+          // hypothetical: it is what the first run of this change did to twenty
+          // tests, all of which use a bare connector.
+          const ancestryIsCarried =
+            connector.syncConfig?.causalOrdering === true;
+          const senderSawMyState =
+            !ancestryIsCarried ||
+            (this._currentRef !== undefined &&
+              (predecessorRefs?.includes(this._currentRef) ?? false));
+
           // Second reason to withhold pruning, and the one that needs no
           // ancestry at all: the sender has already said something later than
           // this.
@@ -2526,14 +2561,21 @@ export class FsAgent {
           // Staleness is handled above by ignoring the advertisement
           // outright, so what is left here is the ancestry case: a sender
           // that cannot say what it descends from may add, but not delete.
-          const applyOptions =
-            restoreOptions?.cleanTarget && ancestryExpected && !declaresAncestry
-              ? { ...restoreOptions, cleanTarget: false }
-              : restoreOptions;
+          const withholdPrune =
+            restoreOptions?.cleanTarget &&
+            ((ancestryExpected && !declaresAncestry) || !senderSawMyState);
+          const applyOptions = withholdPrune
+            ? { ...restoreOptions, cleanTarget: false }
+            : restoreOptions;
           if (applyOptions !== restoreOptions) {
             console.warn(
-              `[FsAgent] ref=${treeRef.slice(0, 8)}… declares no ancestry — ` +
-                `applying additively, not pruning.`,
+              `[FsAgent] ref=${treeRef.slice(0, 8)}… ` +
+                (declaresAncestry
+                  ? `descends from ${predecessorRefs?.map((r) => r.slice(0, 8)).join(', ')}, ` +
+                    `not from the state this node is in ` +
+                    `(${this._currentRef?.slice(0, 8) ?? 'none'})`
+                  : 'declares no ancestry') +
+                ` — applying additively, not pruning.`,
             );
           }
           // What this agent believed at the moment it decided a prune was
