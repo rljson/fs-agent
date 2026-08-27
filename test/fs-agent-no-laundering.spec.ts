@@ -237,37 +237,55 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   // current ref, so a peer pushing a fraction of a second later is a sender the
   // writer must honour, and its tree cannot contain a file that did not exist
   // when it scanned.
-  it('does not prune a file it has not announced yet', async () => {
-    const { db, connector, agent, bs, socket } = await wire();
+  //
+  // Driven through `restore` directly. Staged as a live race it passed on one
+  // machine and failed on another, which tests the scheduler rather than the
+  // rule.
+  it('prunes what it announced and keeps what it has not', async () => {
+    const bs = new BsMem();
+    await writeFile(join(dir, 'announced.txt'), 'peers know about this');
+    await writeFile(join(peerDir, 'only-theirs.txt'), 'theirs');
 
-    await writeFile(join(dir, 'shared.txt'), 'shared');
-    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
-    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree', {
-      cleanTarget: true,
+    const agent = new FsAgent(dir, bs, {
+      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
-    await new Promise((r) => setTimeout(r, 600));
 
-    // A peer's tree of the state everyone agrees on — built before the local
-    // write below exists.
-    await writeFile(join(peerDir, 'shared.txt'), 'shared');
-    const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
-    );
+    // What this node has told the network about: announced.txt only.
+    (
+      agent as unknown as { _announcedFiles: Set<string> }
+    )._announcedFiles.add(join(dir, 'announced.txt'));
 
-    // The local write, and the peer's push arriving on top of it before this
-    // node has said anything about it.
+    // Written after that announcement, so no sender can know it exists.
     await writeFile(join(dir, 'just-written.txt'), 'not announced yet');
-    socket.emit(connector.events.ref, {
-      o: 'remote-peer',
-      r: peerRef,
-      p: [(agent as unknown as { _currentRef?: string })._currentRef],
-    });
-    await new Promise((r) => setTimeout(r, 1_500));
 
+    // A peer's tree that has neither of them.
+    const incoming = await new FsAgent(peerDir, bs).extract();
+    await agent.restore(incoming, undefined, { cleanTarget: true });
+
+    // The announced one is a real deletion; the unannounced one predates
+    // nothing and is kept.
+    expect(existsSync(join(dir, 'announced.txt'))).toBe(false);
     expect(existsSync(join(dir, 'just-written.txt'))).toBe(true);
 
-    stopTo();
-    stopFrom();
+    agent.scanner.stopWatch();
+  });
+
+  // An agent that has never announced cannot tell "written since" from "always
+  // here", and must not withhold pruning on a distinction it cannot make.
+  it('still prunes normally before it has announced anything', async () => {
+    const bs = new BsMem();
+    await writeFile(join(dir, 'gone.txt'), 'gone');
+    await writeFile(join(peerDir, 'only-theirs.txt'), 'theirs');
+
+    const agent = new FsAgent(dir, bs, {
+      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+    });
+
+    const incoming = await new FsAgent(peerDir, bs).extract();
+    await agent.restore(incoming, undefined, { cleanTarget: true });
+
+    expect(existsSync(join(dir, 'gone.txt'))).toBe(false);
+
     agent.scanner.stopWatch();
   });
 });
