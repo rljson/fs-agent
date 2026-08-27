@@ -251,6 +251,17 @@ export const RESTORED_BLOB_MEMORY_MAX = 50_000;
 export const RESTORE_FETCH_CONCURRENCY = 16;
 
 /**
+ * How many of its own past states a node remembers.
+ *
+ * Used to recognise a sender that is BEHIND this node — one that declares a
+ * state this node has held and left. A burst on a large folder produces a few
+ * dozen states, so this is generous; forgetting the oldest costs only the
+ * ability to spot a very stale sender, which the mass-delete guard still
+ * catches.
+ */
+export const STATE_HISTORY_MAX = 1_000;
+
+/**
  * What an agent concluded about an inbound ref.
  *
  * See `FsAgent._inboundRefVerdict` for why this is one decision rather than
@@ -382,6 +393,16 @@ export class FsAgent {
   private _restoreSkipped = 0;
 
 
+
+  /**
+   * The states this node has held, oldest first.
+   *
+   * A push declaring one of these — but not the current one — comes from a
+   * sender that is behind this node. Applying such a tree is what puts a
+   * deleted file back, so it is ignored outright rather than applied
+   * additively.
+   */
+  private readonly _stateHistory: string[] = [];
 
   /**
    * Absolute paths of the files this agent has actually TOLD anyone about.
@@ -519,6 +540,9 @@ export class FsAgent {
   }
 
   private _persistCurrentRef(ref: string): void {
+    // Every state this node enters, in the order it entered them. Recorded
+    // here because this is the one place they all pass through.
+    this._rememberState(ref);
     try {
       writeFileSync(
         join(this._rootPath, AGENT_STATE_FILE),
@@ -2216,6 +2240,36 @@ export class FsAgent {
    * its own pushes, and the states it adopts from theirs.
    * @param tree - The tree that just went out, or was adopted as ours.
    */
+  /**
+   * Records a state this node is now in.
+   * @param ref - The content ref of that state.
+   */
+  private _rememberState(ref: string): void {
+    // Re-entering a state does not make it newer: a folder that returns to an
+    // earlier state re-derives its exact ref, and moving it to the end of the
+    // history would make a genuinely stale sender look current.
+    if (this._stateHistory.includes(ref)) return;
+    this._stateHistory.push(ref);
+    if (this._stateHistory.length > STATE_HISTORY_MAX) {
+      this._stateHistory.shift();
+    }
+  }
+
+  /**
+   * Whether a push comes from a sender this node has already moved past.
+   * @param predecessorRefs - What the push declares it descends from.
+   * @returns True when every declared parent is a state this node has left.
+   */
+  private _senderIsBehind(predecessorRefs: string[]): boolean {
+    if (predecessorRefs.length === 0) return false;
+    return predecessorRefs.every(
+      (ref) =>
+        ref !== this._currentRef &&
+        ref !== this._lastAppliedRef &&
+        this._stateHistory.includes(ref),
+    );
+  }
+
   private _rememberAnnounced(tree: FsTree): void {
     this._announcedFiles.clear();
     for (const path of this._getFileContentMap(tree).keys()) {
@@ -2650,6 +2704,35 @@ export class FsAgent {
           // Staleness is handled above by ignoring the advertisement
           // outright, so what is left here is the ancestry case: a sender
           // that cannot say what it descends from may add, but not delete.
+          // A sender that is BEHIND this node is ignored outright.
+          //
+          // Refusing to PRUNE from an old tree is not enough: applying one
+          // additively is what puts a deleted file back. A peer that has not
+          // yet seen a deletion pushes a tree that still contains the file,
+          // and the additive apply restores it — measured on the customer's
+          // folder, where a file deleted from 3 642 was back moments later.
+          //
+          // Safe to ignore rather than merge: a sender that is behind will
+          // receive this node's newer state, apply it, and re-push anything of
+          // its own from a state this node recognises. Nothing is lost, it
+          // arrives one round later and correctly parented.
+          //
+          // This is what 0.0.44 tried to do through the shared DAG, whose
+          // answer depended on the row order `getInsertHistory` happened to
+          // return. It asks only what this node did, in the order it did it.
+          if (
+            ancestryIsCarried &&
+            declaresAncestry &&
+            this._senderIsBehind(predecessorRefs as string[])
+          ) {
+            console.warn(
+              `[FsAgent] ref=${treeRef.slice(0, 8)}… descends from a state ` +
+                `this node has already left — ignoring, the sender will catch ` +
+                `up and re-push.`,
+            );
+            return;
+          }
+
           const withholdPrune =
             restoreOptions?.cleanTarget &&
             ((ancestryExpected && !declaresAncestry) || !senderSawMyState);
