@@ -183,4 +183,46 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     stopFrom();
     agent.scanner.stopWatch();
   });
+
+  // The insert used to notify on its own, so every ref went out TWICE: once by
+  // the connector, carrying whatever predecessors it happened to hold, and once
+  // by the agent with the right ones. Receivers kept the first and dropped the
+  // second as already-received, so every push arrived one parent behind.
+  //
+  // Measured on the lab, sender against receivers:
+  //   sent 6guj63Ox parent yNAJN-wC | seen parent CtAgdd1w
+  //   sent UBl35ZQQ parent 6guj63Ox | seen parent yNAJN-wC
+  //
+  // Harmless while nothing read the ancestry. Now that a receiver prunes only
+  // for a sender that names a state it is in, it refuses every deletion.
+  it('announces each state once, with its own ancestry', async () => {
+    const { db, connector, agent, sent } = await wire();
+
+    await writeFile(join(dir, 'first.txt'), 'one');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    await new Promise((r) => setTimeout(r, 600));
+
+    const predecessors: Array<string[]> = [];
+    const realSetPredecessors = connector.setPredecessors.bind(connector);
+    connector.setPredecessors = (refs: string[]) => {
+      predecessors.push([...refs]);
+      return realSetPredecessors(refs);
+    };
+    sent.length = 0;
+
+    await writeFile(join(dir, 'second.txt'), 'two');
+    await new Promise((r) => setTimeout(r, 1_200));
+    await writeFile(join(dir, 'third.txt'), 'three');
+    await new Promise((r) => setTimeout(r, 1_200));
+
+    // One emission per state, not two.
+    expect(sent.length).toBe(new Set(sent).size);
+    expect(sent.length).toBe(2);
+
+    // And the second push declares the ref the first one created.
+    expect(predecessors[1]?.[0]).toBe(sent[0]);
+
+    stopTo();
+    agent.scanner.stopWatch();
+  });
 });
