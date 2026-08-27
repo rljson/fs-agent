@@ -381,6 +381,63 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       agent.scanner.stopWatch();
     });
 
+    // Refusing to PRUNE from an old tree is not enough: applying one
+    // additively is what puts a deleted file back. A peer that has not yet
+    // seen a deletion pushes a tree that still contains the file, and the
+    // additive apply restores it.
+    //
+    // Measured on the customer's folder — 3642 files, 404 MB — where a file
+    // deleted from it was back moments later, on one run in two.
+    it('ignores a sender that descends from a state this node has left', async () => {
+      const db = await makeDb();
+      const bs = new BsMem();
+      await writeFile(join(targetDir, 'shared.txt'), 'shared');
+
+      const agent = new FsAgent(targetDir, bs, {
+        timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      });
+      const connector = makeSeqConnector(db);
+      const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+      const stop = await agent.syncFromDb(db, connector, 'fsTree', {
+        cleanTarget: true,
+      });
+      await new Promise((r) => setTimeout(r, 300));
+
+      const inner = agent as unknown as {
+        _currentRef?: string;
+        _stateHistory: string[];
+      };
+      const left = inner._currentRef as string;
+
+      // The node moves on: it deletes the file and is now somewhere new.
+      await rm(join(targetDir, 'shared.txt'), { force: true });
+      await new Promise((r) => setTimeout(r, 600));
+      expect(inner._currentRef).not.toBe(left);
+      expect(inner._stateHistory).toContain(left);
+
+      // A peer that never saw the deletion pushes the old state back.
+      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
+      const staleRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+        await new FsAgent(sourceDir, bs).extract(),
+      );
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      connector.advertise(staleRef, 1, [left]);
+      await new Promise((r) => setTimeout(r, 600));
+
+      // The deletion stands. Ignored outright, not applied additively.
+      expect(existsSync(join(targetDir, 'shared.txt'))).toBe(false);
+      expect(
+        warnSpy.mock.calls.some((c) =>
+          String(c[0]).includes('already left'),
+        ),
+      ).toBe(true);
+
+      stopTo();
+      stop();
+      agent.scanner.stopWatch();
+      warnSpy.mockRestore();
+    });
+
     // The other half of the same rule, and the whole point of it: a sender
     // that cannot show it has seen this node's state may ADD but not DELETE.
     // A node catching up declares its own previous state, never this one's, so
