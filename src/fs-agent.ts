@@ -1725,7 +1725,35 @@ export class FsAgent {
             const ref = await FsAgent._withRetry(
               () =>
                 FsAgent._withTimeout(
-                  dbAdapter.storeFsTree(tree, { ...options, previous }),
+                  // skipNotification, because THIS AGENT broadcasts the ref
+                  // itself a few lines below, with the ancestry attached.
+                  //
+                  // Letting the insert notify sends the ref twice, and the
+                  // first copy is the wrong one: the connector attaches
+                  // whatever predecessors it currently holds, and this push has
+                  // not set its own yet — so the ref goes out carrying the
+                  // PREVIOUS push's parent. `_sendRef` then sets the right
+                  // ancestry and sends again, and every receiver drops that
+                  // second copy as already-received.
+                  //
+                  // Measured on the lab, sender against receivers:
+                  //
+                  //   sent  6guj63Ox parent yNAJN-wC | seen  parent CtAgdd1w
+                  //   sent  UBl35ZQQ parent 6guj63Ox | seen  parent yNAJN-wC
+                  //
+                  // Every push arriving one parent behind. Harmless while
+                  // nothing read the ancestry; now that a receiver prunes only
+                  // for a sender that names a state it is in, it means a
+                  // correctly-formed deletion is refused by everyone — which is
+                  // exactly what the large-folder recipe has been reporting.
+                  //
+                  // The doubled `[sync:out]` line in every log was this, in
+                  // plain sight, for the whole investigation.
+                  dbAdapter.storeFsTree(tree, {
+                    ...options,
+                    previous,
+                    skipNotification: true,
+                  }),
                   this._timeouts.fetchTree,
                   `syncToDb → storeFsTree(${treeKey})`,
                 ),
