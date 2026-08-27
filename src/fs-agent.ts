@@ -395,6 +395,17 @@ export class FsAgent {
 
 
   /**
+   * Absolute paths deleted here since the last announcement.
+   *
+   * The mirror of {@link _announcedFiles}. Between a local unlink and the push
+   * that announces it, this node's advertised state still CONTAINS the file —
+   * so a peer pushing in that window descends from a state the file is in, and
+   * an apply re-creates it. The local scan then sees the file present, and the
+   * deletion is never announced at all: silently undone, everywhere.
+   */
+  private readonly _pendingDeletes = new Set<string>();
+
+  /**
    * The states this node has held, oldest first.
    *
    * A push declaring one of these — but not the current one — comes from a
@@ -1035,6 +1046,21 @@ export class FsAgent {
         // rewriting: a mismatch, an unreadable stat, or a coarse-grained
         // filesystem all fall through to the write.
         if (await this._alreadyOnDisk(filePath, meta, isOwnRoot)) {
+          this._restoreSkipped++;
+          return;
+        }
+
+        // Never re-create a file deleted here and not yet announced.
+        //
+        // The mirror of the prune rule: peers may not remove what they could
+        // not know exists, and they may not restore what they have not yet
+        // been told is gone. Between the unlink and the push, this node's
+        // advertised state still contains the file, so a peer pushing in that
+        // window descends from a state the file is in — and an apply puts it
+        // back. The local scan then sees it present and the deletion is never
+        // announced: silently undone, on every node including the one that
+        // performed it.
+        if (this._pendingDeletes.has(filePath)) {
           this._restoreSkipped++;
           return;
         }
@@ -1774,6 +1800,12 @@ export class FsAgent {
     };
 
     const debouncedSync = (change?: FsChange) => {
+      // A local deletion, recorded the moment the watcher reports it — before
+      // the push that will announce it, which is the window an incoming apply
+      // can undo it in.
+      if (change?.type === 'deleted' && change.path !== '.') {
+        this._pendingDeletes.add(join(this._rootPath, change.path));
+      }
       // A rescan-driven push during a remote apply re-asserts stale state.
       // Real watcher events are unambiguous local changes and still go out.
       if (change?.type === 'safety-rescan' && this._remoteApplyInFlight) {
@@ -2275,6 +2307,9 @@ export class FsAgent {
     for (const path of this._getFileContentMap(tree).keys()) {
       this._announcedFiles.add(join(this._rootPath, path));
     }
+    // Announced state and pending deletions are the same clock: once peers have
+    // been told, a file's absence is theirs to know about.
+    this._pendingDeletes.clear();
   }
 
   private _adoptAppliedRef(connector: Connector, treeRef: string): void {
