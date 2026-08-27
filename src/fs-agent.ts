@@ -236,6 +236,21 @@ export const TREE_FETCH_CONCURRENCY = 64;
 export const RESTORED_BLOB_MEMORY_MAX = 50_000;
 
 /**
+ * How many tree children a restore works on at once.
+ *
+ * A restore's cost is dominated by `getBlob`, and a blob this node does not
+ * already hold is a socket round trip. Walking the tree strictly sequentially
+ * makes the whole restore `files × RTT` — invisible on localhost, and about
+ * sixteen files a second on the lab, where a 1 200-file folder then takes
+ * minutes and reads as a stalled node.
+ *
+ * Sixteen rather than sixty-four: blobs carry file CONTENT, so the ceiling is
+ * memory in flight rather than request count, and a folder of large files at
+ * high concurrency is how a client runs out of heap.
+ */
+export const RESTORE_FETCH_CONCURRENCY = 16;
+
+/**
  * What an agent concluded about an inbound ref.
  *
  * See `FsAgent._inboundRefVerdict` for why this is one decision rather than
@@ -1081,12 +1096,34 @@ export class FsAgent {
 
       await mkdir(dirPath, { recursive: true });
 
-      // Recursively restore children
+      // Restore children, several at a time.
+      //
+      // Siblings are independent — each writes its own path, and a directory
+      // child creates its own directory before descending — so the only thing
+      // the sequential walk bought was one blob fetch in flight. See
+      // {@link RESTORE_FETCH_CONCURRENCY}.
       /* v8 ignore else -- @preserve */
       if (treeNode.children && Array.isArray(treeNode.children)) {
-        for (const childHash of treeNode.children) {
-          await this._restoreTree(childHash, trees, targetPath, isOwnRoot);
-        }
+        const children = [...treeNode.children];
+        let next = 0;
+        const worker = async (): Promise<void> => {
+          for (;;) {
+            const index = next++;
+            if (index >= children.length) return;
+            await this._restoreTree(
+              children[index],
+              trees,
+              targetPath,
+              isOwnRoot,
+            );
+          }
+        };
+        await Promise.all(
+          Array.from(
+            { length: Math.min(RESTORE_FETCH_CONCURRENCY, children.length) },
+            worker,
+          ),
+        );
       }
     }
   }
