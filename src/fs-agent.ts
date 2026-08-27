@@ -2535,10 +2535,18 @@ export class FsAgent {
           // tests, all of which use a bare connector.
           const ancestryIsCarried =
             connector.syncConfig?.causalOrdering === true;
+          //
+          // Only a declaration that EXISTS is judged. A push that says nothing
+          // about what it descends from is left to the rule above, which is
+          // where undeclared ancestry has always been handled — reading silence
+          // as "has not seen my state" refuses every prune from a client whose
+          // first push predates its own `_currentRef`, and that is a real
+          // client on an ordinary startup, not an edge case.
           const senderSawMyState =
             !ancestryIsCarried ||
+            !declaresAncestry ||
             (this._currentRef !== undefined &&
-              (predecessorRefs?.includes(this._currentRef) ?? false));
+              predecessorRefs!.includes(this._currentRef));
 
           // Second reason to withhold pruning, and the one that needs no
           // ancestry at all: the sender has already said something later than
