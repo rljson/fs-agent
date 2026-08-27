@@ -1776,7 +1776,21 @@ export class FsAgent {
 
             // Broadcast the new ref, carrying the predecessor ref so peers can
             // record correct ancestry.
+            //
+            // The parent is logged because it is now load-bearing: a receiver
+            // prunes only for a sender that declares a state the receiver is
+            // in, so a push that names a stale parent has its DELETIONS
+            // refused. Measured on the lab — a node pushed a new file as
+            // 2Rhrtyln, then pushed a deletion one and a half seconds later
+            // claiming to descend from zvEHrFbO, the state before it. All three
+            // peers refused, correctly, and the file stayed. Nothing in the
+            // sender's log said which parent it had used.
             if (ref) {
+              console.log(
+                `[FsAgent] pushing ref=${ref.slice(0, 8)}… ` +
+                  `parent=${parentRef?.slice(0, 8) ?? 'none'} ` +
+                  `files=${this._getFileContentMap(tree).size}`,
+              );
               await this._sendRef(
                 connector,
                 ref,
