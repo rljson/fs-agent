@@ -334,6 +334,53 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       agent.scanner.stopWatch();
     });
 
+    // Two names for the same state. After an apply this node records
+    // `_currentRef` from its own re-scan, which need not equal the ref the tree
+    // arrived under — mtimes do not always survive a restore byte for byte, and
+    // on Windows they regularly do not. The deleting peer declares the ref IT
+    // knows that shared state by.
+    //
+    // Measured before this was allowed for: three lab runs in four converged
+    // perfectly on 1201 files and propagated an added file, and none of them
+    // could delete one.
+    it('prunes for a sender that declares the ref this node applied, not its own name for it', async () => {
+      const db = await makeDb();
+      const bs = new BsMem();
+      await writeFile(join(targetDir, 'gone.txt'), 'gone');
+      await writeFile(join(targetDir, 'shared.txt'), 'shared');
+
+      const agent = new FsAgent(targetDir, bs, {
+        timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      });
+      const connector = makeSeqConnector(db);
+      const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+      const stop = await agent.syncFromDb(db, connector, 'fsTree', {
+        cleanTarget: true,
+      });
+      await new Promise((r) => setTimeout(r, 300));
+
+      // The node's own name for the state differs from the one it applied.
+      const inner = agent as unknown as {
+        _currentRef?: string;
+        _lastAppliedRef?: string;
+      };
+      inner._lastAppliedRef = 'the-ref-the-tree-arrived-under';
+      inner._currentRef = 'this-nodes-own-name-for-it';
+
+      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
+      const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+        await new FsAgent(sourceDir, bs).extract(),
+      );
+      connector.advertise(ref, 1, ['the-ref-the-tree-arrived-under']);
+      await new Promise((r) => setTimeout(r, 400));
+
+      expect(existsSync(join(targetDir, 'gone.txt'))).toBe(false);
+
+      stopTo();
+      stop();
+      agent.scanner.stopWatch();
+    });
+
     // The other half of the same rule, and the whole point of it: a sender
     // that cannot show it has seen this node's state may ADD but not DELETE.
     // A node catching up declares its own previous state, never this one's, so

@@ -2542,11 +2542,25 @@ export class FsAgent {
           // as "has not seen my state" refuses every prune from a client whose
           // first push predates its own `_currentRef`, and that is a real
           // client on an ordinary startup, not an edge case.
+          //
+          // Two names for the same state, and both count. After an apply this
+          // node records `_currentRef` from its OWN re-scan of the folder,
+          // which need not equal the ref the tree arrived under — mtimes do not
+          // always survive a restore byte for byte, and on Windows they
+          // regularly do not. The peer that now deletes something declares the
+          // ref IT knows that shared state by, so a receiver comparing only
+          // against its own name for it rejects a real deletion.
+          //
+          // Measured: with only `_currentRef`, three lab runs in four converged
+          // perfectly on 1 201 files and propagated an added file — and none of
+          // them could delete one.
+          const statesIAmIn = [this._currentRef, this._lastAppliedRef].filter(
+            (r): r is string => r !== undefined,
+          );
           const senderSawMyState =
             !ancestryIsCarried ||
             !declaresAncestry ||
-            (this._currentRef !== undefined &&
-              predecessorRefs!.includes(this._currentRef));
+            statesIAmIn.some((r) => predecessorRefs!.includes(r));
 
           // Second reason to withhold pruning, and the one that needs no
           // ancestry at all: the sender has already said something later than
@@ -2580,8 +2594,8 @@ export class FsAgent {
               `[FsAgent] ref=${treeRef.slice(0, 8)}… ` +
                 (declaresAncestry
                   ? `descends from ${predecessorRefs?.map((r) => r.slice(0, 8)).join(', ')}, ` +
-                    `not from the state this node is in ` +
-                    `(${this._currentRef?.slice(0, 8) ?? 'none'})`
+                    `not from a state this node is in ` +
+                    `(${statesIAmIn.map((r) => r.slice(0, 8)).join(', ') || 'none'})`
                   : 'declares no ancestry') +
                 ` — applying additively, not pruning.`,
             );
