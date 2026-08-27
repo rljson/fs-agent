@@ -4,6 +4,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
+import { existsSync } from 'fs';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -223,6 +224,50 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     expect(predecessors[1]?.[0]).toBe(sent[0]);
 
     stopTo();
+    agent.scanner.stopWatch();
+  });
+
+  // The opposite failure to everything else in this file, and the last one the
+  // lab found: not a stale tree deleting current work, but a CURRENT tree
+  // deleting NEWER work.
+  //
+  // Measured on four machines with 1200 files converged — a file was created
+  // and vanished from every node including the one that created it, one run in
+  // four. After convergence each peer's state descends from the writer's
+  // current ref, so a peer pushing a fraction of a second later is a sender the
+  // writer must honour, and its tree cannot contain a file that did not exist
+  // when it scanned.
+  it('does not prune a file it has not announced yet', async () => {
+    const { db, connector, agent, bs, socket } = await wire();
+
+    await writeFile(join(dir, 'shared.txt'), 'shared');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree', {
+      cleanTarget: true,
+    });
+    await new Promise((r) => setTimeout(r, 600));
+
+    // A peer's tree of the state everyone agrees on — built before the local
+    // write below exists.
+    await writeFile(join(peerDir, 'shared.txt'), 'shared');
+    const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+      await new FsAgent(peerDir, bs).extract(),
+    );
+
+    // The local write, and the peer's push arriving on top of it before this
+    // node has said anything about it.
+    await writeFile(join(dir, 'just-written.txt'), 'not announced yet');
+    socket.emit(connector.events.ref, {
+      o: 'remote-peer',
+      r: peerRef,
+      p: [(agent as unknown as { _currentRef?: string })._currentRef],
+    });
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    expect(existsSync(join(dir, 'just-written.txt'))).toBe(true);
+
+    stopTo();
+    stopFrom();
     agent.scanner.stopWatch();
   });
 });
