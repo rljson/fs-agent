@@ -33,6 +33,11 @@ defineProductionSyncTests(
     const httpServer = createServer();
     const socketIoServer = new SocketIoServer(httpServer, {
       cors: { origin: '*' },
+      // Production runs 50 MB (sl-server.ts, sl-node.ts). The default is 1 MB,
+      // and a tree for ~2 000 files crosses it — so this harness produced a
+      // hard cliff between 1 400 files (1.8 s) and 2 000 (never arrives) that
+      // looks exactly like a product defect and is the test's own limit.
+      maxHttpBufferSize: 50 * 1024 * 1024,
     });
 
     const serverIo = new IoMem();
