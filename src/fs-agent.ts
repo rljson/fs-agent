@@ -425,6 +425,16 @@ export class FsAgent {
   private readonly _announcedFiles = new Set<string>();
 
   /**
+   * Files this node wrote because a peer sent them.
+   *
+   * Permission only: it is never consulted to decide whether the prune gate is
+   * armed, only to answer "may this particular file be pruned". A file the
+   * network handed us is one the network knows about, so the peer that sent it
+   * may later take it away.
+   */
+  private readonly _restoredFiles = new Set<string>();
+
+  /**
    * Files this restore DELETED.
    *
    * Counted and reported because a prune is the only half of a restore that
@@ -1092,6 +1102,36 @@ export class FsAgent {
           await FsAgent._atomicWriteFile(filePath, fileBlob.content);
           this._restoreWritten++;
 
+          // A file the network just handed us is one the network knows about.
+          //
+          // `_announcedFiles` gates pruning so a file the peers cannot know
+          // about is never deleted on their authority. It was maintained only
+          // when this node ANNOUNCES, so a file that arrived by restore was
+          // never in it — and when the peer that sent it later deleted it, the
+          // prune was skipped and this node kept it forever.
+          //
+          // Measured on the lab, the straggler in every remaining failure:
+          //
+          //   applying ynhPcYNr incoming=4603 current=4599 → wrote 1
+          //   applying cXfdDkCE incoming=4602 current=4603 → wrote 0   (no DELETED)
+          //
+          // The delete arrives WITH permission (`mayPrune=true`) and nothing is
+          // removed, leaving one node holding a file the other three have let
+          // go — 3646 against 3645.
+          //
+          // Narrow on purpose. 0.0.61 added the whole incoming TREE to this set
+          // and made far too much prunable: the folder decayed, four nodes
+          // drifting 155 files apart, and it was withdrawn. This adds only what
+          // this restore actually WROTE — files that demonstrably came from a
+          // peer, one at a time.
+          // A SEPARATE set, because `_announcedFiles.size > 0` is what ARMS
+          // the gate. Adding restored files there turned the gate on for a
+          // node that had never announced, and it then refused to prune
+          // anything at all — three tests said so immediately, "still prunes
+          // normally before it has announced anything" among them. This only
+          // ever grants permission; it never withholds it.
+          this._restoredFiles.add(filePath);
+
           // Preserve mtime
           /* v8 ignore else -- @preserve */
           if (meta.mtime) {
@@ -1658,7 +1698,8 @@ export class FsAgent {
         // make.
         if (
           this._announcedFiles.size > 0 &&
-          !this._announcedFiles.has(fullPath)
+          !this._announcedFiles.has(fullPath) &&
+          !this._restoredFiles.has(fullPath)
         ) {
           continue;
         }
