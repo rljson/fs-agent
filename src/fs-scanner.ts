@@ -552,6 +552,33 @@ export class FsScanner {
     /* v8 ignore stop */
   }
 
+  /**
+   * Whether a watcher event's path should be ignored.
+   *
+   * `fs.watch` in recursive mode reports a path RELATIVE TO THE ROOT
+   * (`sub/dir/.fsagent-tmp-abc`), while the ignore patterns are basenames.
+   * {@link _shouldIgnore} tests `startsWith`, so a nested match never fired:
+   * every atomic write the agent itself makes during a restore came back as a
+   * change event, each event triggered a scan, and the debounce that batches a
+   * push was reset before it could fire.
+   *
+   * Measured on the customer's folder: after a 3 642-file restore the watcher
+   * reported the SAME newly added file nine times and the agent never emitted a
+   * ref for it — `[fs] added: …/probe-….txt` nine times, no `sync:out`. The
+   * file did not fail to arrive; it was never sent.
+   *
+   * Every segment is tested, because the pattern may match a directory as
+   * easily as a file.
+   * @param relativePath - Path as the watcher reports it.
+   * @returns True when any segment matches an ignore pattern.
+   */
+  private _shouldIgnorePath(relativePath: string): boolean {
+    for (const segment of relativePath.split(/[\\/]/)) {
+      if (segment && this._shouldIgnore(segment)) return true;
+    }
+    return false;
+  }
+
   private _shouldIgnore(name: string): boolean {
     /* v8 ignore next -- @preserve */
     if (!this._options.ignore) {
@@ -576,7 +603,7 @@ export class FsScanner {
     /* v8 ignore start -- @preserve native watcher wiring is not unit-testable */
     const onEvent = async (eventType: string, filename: string | null) => {
       if (!filename) return;
-      if (this._shouldIgnore(filename)) {
+      if (this._shouldIgnorePath(filename)) {
         return;
       }
       await this._handleFileChange(eventType, filename);

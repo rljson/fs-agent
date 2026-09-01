@@ -360,6 +360,33 @@ describe('FsScanner', () => {
   });
 
   describe('ignore patterns', () => {
+    // `fs.watch` in recursive mode reports a path RELATIVE TO THE ROOT, while
+    // the patterns are basenames — and the check tested the whole path with
+    // `startsWith`, so a nested match never fired. Every atomic write the agent
+    // makes during a restore came back as a change event, each event triggered
+    // a scan, and the debounce that batches a push was reset before it fired.
+    //
+    // Measured on the customer's folder: after a 3 642-file restore the watcher
+    // reported the same newly added file NINE times and no ref was ever emitted
+    // for it. The file did not fail to arrive — it was never sent.
+    it('ignores a matching segment anywhere in a watcher path', () => {
+      const scanner = new FsScanner(testDir, {
+        ignore: ['.fsagent-tmp-', 'node_modules'],
+      });
+      const ignores = (p: string): boolean =>
+        (scanner as unknown as { _shouldIgnorePath: (p: string) => boolean })
+          ._shouldIgnorePath(p);
+
+      // The shape that broke it: nested, and reported with separators.
+      expect(ignores('sub/dir/.fsagent-tmp-abc123')).toBe(true);
+      expect(ignores('sub\\dir\\.fsagent-tmp-abc123')).toBe(true);
+      expect(ignores('node_modules/pkg/index.js')).toBe(true);
+      // Still at the root, and still not over-matching real work.
+      expect(ignores('.fsagent-tmp-abc123')).toBe(true);
+      expect(ignores('sub/dir/report.txt')).toBe(false);
+      expect(ignores('my-node_modules-notes.txt')).toBe(false);
+    });
+
     it('should not ignore when no patterns provided', async () => {
       await writeFile(join(testDir, 'file.txt'), 'content');
       await mkdir(join(testDir, 'folder'), { recursive: true });
