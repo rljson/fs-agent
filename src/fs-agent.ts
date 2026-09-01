@@ -1732,11 +1732,44 @@ export class FsAgent {
     const isSilentJoiner =
       initialParentRef === undefined && this._treeIsEmpty(initialTree);
 
+    // A node that comes back UNCHANGED has nothing to announce.
+    //
+    // Its scan reproduces the ref it recorded before it stopped, so
+    // `initialIsNew` is false and `initialPrevious` is undefined — but the
+    // insert still notifies, and the connector then broadcasts that ref with
+    // NO predecessors. An announcement without ancestry is prune-authorising:
+    // a receiver cannot ask "does this sender name a state I am in", so it
+    // grants the prune by default.
+    //
+    // Measured on the lab, ten minutes apart:
+    //
+    //   14:53:18 NB-21624 resuming from recorded ref COpHl4bU… (4 547 files)
+    //   14:53:19 NB-21624 sync:out COpHl4bU…
+    //   15:03:57 NB-2510  sync:in  COpHl4bU…
+    //   15:04:00 NB-2510  applying declaresAncestry=false mayPrune=true
+    //                     incomingFiles=4547 currentFiles=4581
+    //   15:04:00 NB-2510  restore: wrote 0, left 3617 untouched
+    //
+    // Two peers rolled back 35 files — under the mass-delete guard's floor, so
+    // nothing challenged it — and the file that had just been added was undone
+    // rather than lost in transit. One in five probes failed this way.
+    //
+    // The state is already in the network's history; re-announcing it as
+    // current is the whole of the damage. Staying quiet costs nothing: this
+    // node needs to RECEIVE what it missed, not to tell anyone about a state
+    // it has not changed.
+    const resumingUnchanged =
+      initialParentRef !== undefined &&
+      initialTree.rootHash === initialParentRef;
+
     const initialRef = await FsAgent._withTimeout(
       new FsDbAdapter(db, treeKey).storeFsTree(initialTree, {
         ...options,
         previous: initialPrevious,
-        skipNotification: isSilentJoiner ? true : options?.skipNotification,
+        skipNotification:
+          isSilentJoiner || resumingUnchanged
+            ? true
+            : options?.skipNotification,
       }),
       this._timeouts.fetchTree,
       `syncToDb → initial storeFsTree(${treeKey})`,
