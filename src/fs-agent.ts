@@ -902,17 +902,6 @@ export class FsAgent {
       target,
       target === this._rootPath,
     );
-    if (this._restoreSkipped > 0 || this._restorePruned > 0) {
-      console.log(
-        `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
-          `${this._restoreSkipped} already-correct file` +
-          `${this._restoreSkipped === 1 ? '' : 's'} untouched` +
-          (this._restorePruned > 0
-            ? `, DELETED ${this._restorePruned}`
-            : ''),
-      );
-    }
-
     if (options?.cleanTarget) {
       // How much of this folder would the prune take with it?
       //
@@ -955,6 +944,25 @@ export class FsAgent {
         expectedDirs,
         expectedFiles,
         preRestore,
+      );
+    }
+
+    // AFTER the prune, because the prune is the only thing that sets
+    // `_restorePruned`. Reported before it, this line could never say DELETED:
+    // the counter was always still zero, so every restore that removed files
+    // announced itself as one that had removed none.
+    //
+    // That is not a cosmetic fault. `DELETED` absent was read for two days as
+    // evidence that a delete had arrived and been refused, and two changes were
+    // written to fix a refusal that was never happening. A log that cannot
+    // report an event is worse than no log, because it reads as evidence of
+    // absence.
+    if (this._restoreSkipped > 0 || this._restorePruned > 0) {
+      console.log(
+        `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
+          `${this._restoreSkipped} already-correct file` +
+          `${this._restoreSkipped === 1 ? '' : 's'} untouched` +
+          (this._restorePruned > 0 ? `, DELETED ${this._restorePruned}` : ''),
       );
     }
 
