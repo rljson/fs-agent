@@ -270,54 +270,6 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     agent.scanner.stopWatch();
   });
 
-  // A file that ARRIVED from a peer is one the peers know about, and must be
-  // prunable on their authority.
-  //
-  // `_announcedFiles` was maintained only by `_rememberAnnounced`, which runs
-  // when this node announces — and, in the apply path, only when the apply left
-  // it with nothing of its own to say. A node holding any news at all (residue,
-  // a local write, a partial catch-up) therefore never refreshed the set, and
-  // every file it learned about afterwards counted as unannounced. Deletions
-  // were skipped by the gate for the rest of the agent's life.
-  //
-  // Measured on four machines: a probe deleted on one node was applied by its
-  // peers — mayPrune=true, one file out of 4 583, nowhere near the mass-delete
-  // guard — and not removed ("wrote 0, left 3 647 already-correct files
-  // untouched", no DELETED). Each peer then re-advertised it, one pushing the
-  // with-probe state as a CHILD of the without-probe state, so the delete was
-  // undone network-wide and the refs alternated indefinitely.
-  it('prunes a file it received from a peer, even holding news of its own', async () => {
-    const bs = new BsMem();
-    // Converged: both hold the shared file, and this node learned it from the
-    // peer rather than writing it.
-    await writeFile(join(dir, 'from-peer.txt'), 'shared');
-    await writeFile(join(peerDir, 'from-peer.txt'), 'shared');
-    const withFile = await new FsAgent(peerDir, bs).extract();
-
-    const agent = new FsAgent(dir, bs, {
-      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
-    });
-    // The apply path records what the tree brought.
-    (
-      agent as unknown as { _rememberReceived: (t: unknown) => void }
-    )._rememberReceived(withFile);
-
-    // News of its own — the reason `_rememberAnnounced` is skipped in the apply
-    // path, and the reason the gate used to go stale.
-    await writeFile(join(dir, 'ours.txt'), 'only we have this');
-
-    // The peer deletes the shared file and pushes the smaller tree.
-    await rm(join(peerDir, 'from-peer.txt'));
-    const withoutFile = await new FsAgent(peerDir, bs).extract();
-    await agent.restore(withoutFile, dir, { cleanTarget: true });
-
-    // The deletion lands, and our own unannounced work survives it.
-    expect(existsSync(join(dir, 'from-peer.txt'))).toBe(false);
-    expect(existsSync(join(dir, 'ours.txt'))).toBe(true);
-
-    agent.scanner.stopWatch();
-  });
-
   // An agent that has never announced cannot tell "written since" from "always
   // here", and must not withhold pruning on a distinction it cannot make.
   it('still prunes normally before it has announced anything', async () => {

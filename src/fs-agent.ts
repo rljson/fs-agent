@@ -2302,21 +2302,6 @@ export class FsAgent {
     );
   }
 
-  /**
-   * Marks an incoming tree's files as known to the network.
-   *
-   * A union, not a replacement: {@link _rememberAnnounced} answers "what this
-   * node has told the network", and this answers "what the network has told
-   * this node". Both make a file prunable; neither alone is the whole set, and
-   * treating the first as the whole set is what made deletions vanish.
-   * @param tree - The tree just applied.
-   */
-  private _rememberReceived(tree: FsTree): void {
-    for (const path of this._getFileContentMap(tree).keys()) {
-      this._announcedFiles.add(join(this._rootPath, path));
-    }
-  }
-
   private _rememberAnnounced(tree: FsTree): void {
     this._announcedFiles.clear();
     for (const path of this._getFileContentMap(tree).keys()) {
@@ -2855,33 +2840,23 @@ export class FsAgent {
           this._currentRef = postRestoreRef;
           this._persistCurrentRef(postRestoreRef);
 
-          // Everything this tree brought is now known to the network.
+          // NOT recording the incoming tree's files as prunable.
           //
-          // `_announcedFiles` gates pruning: a file the peers cannot know about
-          // must not be deleted on their authority. It was maintained ONLY by
-          // `_rememberAnnounced`, which runs when this node announces — and,
-          // below, only when the apply left it with nothing of its own to say.
-          // So a node holding any news at all (residue, a local write, a
-          // partial catch-up) never refreshed the set, and every file it
-          // learned about afterwards counted as unannounced. Legitimate
-          // deletions were then skipped by the gate for the rest of the
-          // agent's life.
+          // 0.0.61 did exactly that, reasoning that a file which ARRIVED from a
+          // peer is by definition one the peers know about, so a later tree
+          // lacking it is deleting it. The reasoning is sound and the effect
+          // was not: `_announcedFiles` is a GUARD, and widening it made far
+          // more files prunable by any tree that happened to lack them.
           //
-          // Measured on the lab: a probe file deleted on one node was applied
-          // by its peers — `mayPrune=true`, one file out of 4 583, nowhere near
-          // the mass-delete guard — and not removed: `restore: wrote 0, left
-          // 3 647 already-correct files untouched`, no `DELETED`. Each peer's
-          // scanner then found the file still on disk and re-advertised it, one
-          // pushing the with-probe state as a CHILD of the without-probe state.
-          // The delete was undone network-wide and the two refs alternated
-          // indefinitely.
+          // Measured on four machines, from an agreed 3 648 files: with nobody
+          // doing anything but adding one file, the nodes drifted to
+          // 3 493 / 3 513 / 3 630 / 3 553 — 155 files apart, actively losing
+          // data. Before the change the same folder held steady at 3 642–3 647
+          // across dozens of runs; deletion failed, but nothing decayed.
           //
-          // A file that ARRIVED from a peer is, by definition, one the peers
-          // know about. Adding the incoming tree's paths keeps the gate doing
-          // its real job — protecting work this node has not yet told anyone
-          // about — without letting it protect files that came from the very
-          // senders now asking for their removal.
-          this._rememberReceived(incomingTree);
+          // Losing files is worse than failing to delete one. The guard stays
+          // as it was until the deletion path has a fix that does not trade
+          // convergence for it.
 
           // Claim this state as ADVERTISED only if it IS the sender's state.
           //
