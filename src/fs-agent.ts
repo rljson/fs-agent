@@ -315,6 +315,42 @@ export class PartialRestoreError extends RestoreIncompleteError {
 }
 
 /**
+ * Thrown when a restore finished but at least one file's bytes could not be
+ * fetched at all.
+ *
+ * The difference from {@link PartialRestoreError} is "not yet" versus "never".
+ * A locked file's bytes exist and the file is merely busy, so retrying is the
+ * right answer. A blob that cannot be retrieved may never become retrievable —
+ * a file larger than the transport's `maxHttpBufferSize` is the case that
+ * produced this class, and no number of retries makes 63 MB fit through a
+ * 50 MB socket.
+ *
+ * It exists because the failure used to be a bare `throw` in the middle of
+ * `_restoreTree`, which abandoned the ENTIRE tree: no other file in it was
+ * written, and — the part that actually hurt — `_pruneExtraneous` never ran,
+ * so no deletion in that tree was ever applied. The node then retried, failed
+ * on the same blob, and its state never advanced past that ref. Once its
+ * ancestry no longer matched any state its peers were in, every later apply
+ * came through with `mayPrune=false`, and it accepted additions forever while
+ * silently ignoring every delete.
+ *
+ * Measured on four nodes: one 63 MB file (120% of the cap) left three of them
+ * holding a file the fourth had deleted, permanently, and `projekte-shape`'s
+ * deletion had still not propagated after 300 seconds. The customer's largest
+ * file is 45.9 MB against the same 50 MB cap.
+ */
+export class BlobUnavailableError extends RestoreIncompleteError {
+  constructor(public readonly unavailablePaths: string[]) {
+    super(
+      `restore could not fetch ${unavailablePaths.length} blob` +
+        `${unavailablePaths.length === 1 ? '' : 's'}: ` +
+        `${unavailablePaths.join(', ')}`,
+    );
+    this.name = 'BlobUnavailableError';
+  }
+}
+
+/**
  * Thrown when `cleanTarget` would have deleted most of the folder.
  *
  * The dangerous direction of sync is a POPULATED node receiving a tree that
@@ -437,6 +473,13 @@ export class FsAgent {
 
   /** Paths the current {@link restore} could not write because they were held open. */
   private _restoreLocked: string[] = [];
+
+  /**
+   * Paths the current {@link restore} could not write because their blob could
+   * not be fetched — collected rather than thrown, so one unfetchable file
+   * cannot abandon the rest of the tree and, above all, cannot stop the prune.
+   */
+  private _restoreUnavailable: string[] = [];
 
   /**
    * What this agent last wrote to each absolute path, so a repeat restore can
@@ -896,6 +939,7 @@ export class FsAgent {
     this._restoreSkipped = 0;
     this._restorePruned = 0;
     this._restoreLocked = [];
+    this._restoreUnavailable = [];
     await this._restoreTree(
       tree.rootHash,
       tree.trees,
@@ -971,6 +1015,15 @@ export class FsAgent {
     // restore, which is the behaviour this replaces.
     if (this._restoreLocked.length > 0) {
       throw new PartialRestoreError([...this._restoreLocked]);
+    }
+
+    // Reported the same way and for the same reason: the folder does not match
+    // the tree, so this node must not advertise the state or record the ref as
+    // applied. What has changed is only WHEN — after the writes and after the
+    // prune, so the tree's deletions are applied even though one of its files
+    // could not be.
+    if (this._restoreUnavailable.length > 0) {
+      throw new BlobUnavailableError([...this._restoreUnavailable]);
     }
   }
 
@@ -1073,22 +1126,43 @@ export class FsAgent {
           return;
         }
 
-        // Try to fetch the blob
+        // Try to fetch the blob.
+        //
+        // Recorded and stepped over, NOT thrown. A throw here abandoned the
+        // whole tree — every other file in it went unwritten and
+        // `_pruneExtraneous`, which runs after this walk, never ran at all, so
+        // no deletion the tree carried was applied. The node then retried, hit
+        // the same blob, and never advanced past that ref; once its ancestry
+        // no longer matched a state its peers were in, every later apply
+        // arrived with `mayPrune=false` and it took additions forever while
+        // ignoring every delete.
+        //
+        // One 63 MB file — 120% of the 50 MB socket cap, so its blob can never
+        // be fetched at all — left three of four nodes permanently holding a
+        // file the fourth had deleted. The bytes of one file are worth exactly
+        // one missing file, never the tree's deletions as well.
         let fileBlob;
         try {
           fileBlob = await this._bs.getBlob(meta.blobId);
         } catch (error) {
-          throw new Error(
-            `Failed to retrieve blob for file "${meta.relativePath}" (blobId: ${meta.blobId}): ` +
-              `${error instanceof Error ? error.message : String(error)}`,
+          console.warn(
+            `[FsAgent] cannot fetch blob for "${meta.relativePath}" ` +
+              `(blobId: ${meta.blobId}): ` +
+              `${error instanceof Error ? error.message : String(error)} — ` +
+              `skipping this file and applying the rest of the tree.`,
           );
+          this._restoreUnavailable.push(meta.relativePath);
+          return;
         }
 
         if (!fileBlob || !fileBlob.content) {
-          throw new Error(
-            `Missing blob content for file "${meta.relativePath}" (blobId: ${meta.blobId}). ` +
-              `The blob may have been deleted or not synced properly.`,
+          console.warn(
+            `[FsAgent] missing blob content for "${meta.relativePath}" ` +
+              `(blobId: ${meta.blobId}) — skipping this file and applying the ` +
+              `rest of the tree.`,
           );
+          this._restoreUnavailable.push(meta.relativePath);
+          return;
         }
 
         // Create parent directories
@@ -3013,7 +3087,18 @@ export class FsAgent {
             await this._readvertiseAfterRefusal(connector);
             return;
           }
-          if (err instanceof PartialRestoreError) {
+          if (
+            err instanceof PartialRestoreError ||
+            err instanceof BlobUnavailableError
+          ) {
+            // Both mean the same thing here: the folder is a half-applied
+            // version of a newer state, and re-announcing it would assert the
+            // half. For an unfetchable blob the danger is sharper than for a
+            // locked file — this node's folder LACKS the file entirely, so a
+            // broadcast of its own scan reads to every peer as a deletion of
+            // it, and the one node that could not receive a file would order
+            // everyone else to destroy their copy.
+            //
             // The mirror image. Here the incoming ref is the NEWER state and
             // this folder holds a half-applied version of it, with the OLD
             // bytes still in the files that were locked. The watcher wakes on

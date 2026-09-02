@@ -4,7 +4,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { BsMem } from '@rljson/bs';
+import { Bs, BsMem } from '@rljson/bs';
 import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import {
@@ -1571,10 +1571,65 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
       const agent2 = new FsAgent(targetDir, new BsMem());
 
-      // Should fail because blob is missing
+      // Still reported — a folder that does not match the tree must never look
+      // like a success — but now as BlobUnavailableError, raised after the
+      // restore has written and pruned everything it could.
       await expect(agent2.loadFromDb(db, treeKey, treeRootRef)).rejects.toThrow(
-        /Failed to retrieve blob/,
+        /could not fetch 1 blob: test\.txt/,
       );
+    });
+
+    it('applies the rest of a tree, and its deletions, around an unfetchable blob', async () => {
+      // The bug this exists to prevent: a single blob that can never be fetched
+      // used to abandon the whole tree. Nothing else in it was written and
+      // `_pruneExtraneous` never ran, so no deletion the tree carried was
+      // applied — one 63 MB file (above the 50 MB socket cap) left three of
+      // four lab nodes permanently holding a file the fourth had deleted.
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+      // Source: two files. Only ONE of them will be fetchable on the target.
+      const sourceDir = join(testDir, 'src-partial');
+      await mkdir(sourceDir, { recursive: true });
+      await writeFile(join(sourceDir, 'keep.txt'), 'keep me');
+      await writeFile(join(sourceDir, 'unfetchable.txt'), 'cannot travel');
+
+      const sharedBs = new BsMem();
+      const source = new FsAgent(sourceDir, sharedBs);
+      const rootRef = await source.storeInDb(db, treeKey);
+
+      // Target already holds a file the tree does NOT contain. It must be
+      // pruned even though another file in the same tree cannot be fetched.
+      const targetDir = join(testDir, 'dst-partial');
+      await mkdir(targetDir, { recursive: true });
+      await writeFile(join(targetDir, 'deleted-elsewhere.txt'), 'stale');
+
+      // A store that serves every blob except one, which fails the way a file
+      // above the transport's size cap does: it is present and it cannot be
+      // fetched, no matter how often it is asked for.
+      const holed = Object.create(sharedBs) as Bs;
+      holed.getBlob = async (id: string) => {
+        const blob = await sharedBs.getBlob(id);
+        if (blob?.content?.toString() === 'cannot travel') {
+          throw new Error('payload exceeds the transport size cap');
+        }
+        return blob;
+      };
+
+      const target = new FsAgent(targetDir, holed);
+      await expect(
+        target.loadFromDb(db, treeKey, rootRef, undefined, {
+          cleanTarget: true,
+        }),
+      ).rejects.toThrow(/could not fetch 1 blob: unfetchable\.txt/);
+
+      // The whole point: everything else landed, and the deletion applied.
+      expect(existsSync(join(targetDir, 'keep.txt'))).toBe(true);
+      expect(existsSync(join(targetDir, 'unfetchable.txt'))).toBe(false);
+      expect(existsSync(join(targetDir, 'deleted-elsewhere.txt'))).toBe(false);
     });
 
     it('should throw error when scanning non-existent directory', async () => {
