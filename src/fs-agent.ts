@@ -315,6 +315,42 @@ export class PartialRestoreError extends RestoreIncompleteError {
 }
 
 /**
+ * Thrown when a restore finished but at least one file's bytes could not be
+ * fetched at all.
+ *
+ * The difference from {@link PartialRestoreError} is "not yet" versus "never".
+ * A locked file's bytes exist and the file is merely busy, so retrying is the
+ * right answer. A blob that cannot be retrieved may never become retrievable —
+ * a file larger than the transport's `maxHttpBufferSize` is the case that
+ * produced this class, and no number of retries makes 63 MB fit through a
+ * 50 MB socket.
+ *
+ * It exists because the failure used to be a bare `throw` in the middle of
+ * `_restoreTree`, which abandoned the ENTIRE tree: no other file in it was
+ * written, and — the part that actually hurt — `_pruneExtraneous` never ran,
+ * so no deletion in that tree was ever applied. The node then retried, failed
+ * on the same blob, and its state never advanced past that ref. Once its
+ * ancestry no longer matched any state its peers were in, every later apply
+ * came through with `mayPrune=false`, and it accepted additions forever while
+ * silently ignoring every delete.
+ *
+ * Measured on four nodes: one 63 MB file (120% of the cap) left three of them
+ * holding a file the fourth had deleted, permanently, and `projekte-shape`'s
+ * deletion had still not propagated after 300 seconds. The customer's largest
+ * file is 45.9 MB against the same 50 MB cap.
+ */
+export class BlobUnavailableError extends RestoreIncompleteError {
+  constructor(public readonly unavailablePaths: string[]) {
+    super(
+      `restore could not fetch ${unavailablePaths.length} blob` +
+        `${unavailablePaths.length === 1 ? '' : 's'}: ` +
+        `${unavailablePaths.join(', ')}`,
+    );
+    this.name = 'BlobUnavailableError';
+  }
+}
+
+/**
  * Thrown when `cleanTarget` would have deleted most of the folder.
  *
  * The dangerous direction of sync is a POPULATED node receiving a tree that
@@ -395,6 +431,17 @@ export class FsAgent {
 
 
   /**
+   * Absolute paths deleted here since the last announcement.
+   *
+   * The mirror of {@link _announcedFiles}. Between a local unlink and the push
+   * that announces it, this node's advertised state still CONTAINS the file —
+   * so a peer pushing in that window descends from a state the file is in, and
+   * an apply re-creates it. The local scan then sees the file present, and the
+   * deletion is never announced at all: silently undone, everywhere.
+   */
+  private readonly _pendingDeletes = new Set<string>();
+
+  /**
    * The states this node has held, oldest first.
    *
    * A push declaring one of these — but not the current one — comes from a
@@ -426,6 +473,13 @@ export class FsAgent {
 
   /** Paths the current {@link restore} could not write because they were held open. */
   private _restoreLocked: string[] = [];
+
+  /**
+   * Paths the current {@link restore} could not write because their blob could
+   * not be fetched — collected rather than thrown, so one unfetchable file
+   * cannot abandon the rest of the tree and, above all, cannot stop the prune.
+   */
+  private _restoreUnavailable: string[] = [];
 
   /**
    * What this agent last wrote to each absolute path, so a repeat restore can
@@ -885,23 +939,13 @@ export class FsAgent {
     this._restoreSkipped = 0;
     this._restorePruned = 0;
     this._restoreLocked = [];
+    this._restoreUnavailable = [];
     await this._restoreTree(
       tree.rootHash,
       tree.trees,
       target,
       target === this._rootPath,
     );
-    if (this._restoreSkipped > 0 || this._restorePruned > 0) {
-      console.log(
-        `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
-          `${this._restoreSkipped} already-correct file` +
-          `${this._restoreSkipped === 1 ? '' : 's'} untouched` +
-          (this._restorePruned > 0
-            ? `, DELETED ${this._restorePruned}`
-            : ''),
-      );
-    }
-
     if (options?.cleanTarget) {
       // How much of this folder would the prune take with it?
       //
@@ -947,11 +991,39 @@ export class FsAgent {
       );
     }
 
+    // AFTER the prune, because the prune is the only thing that sets
+    // `_restorePruned`. Reported before it, this line could never say DELETED:
+    // the counter was always still zero, so every restore that removed files
+    // announced itself as one that had removed none.
+    //
+    // That is not a cosmetic fault. `DELETED` absent was read for two days as
+    // evidence that a delete had arrived and been refused, and two changes were
+    // written to fix a refusal that was never happening. A log that cannot
+    // report an event is worse than no log, because it reads as evidence of
+    // absence.
+    if (this._restoreSkipped > 0 || this._restorePruned > 0) {
+      console.log(
+        `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
+          `${this._restoreSkipped} already-correct file` +
+          `${this._restoreSkipped === 1 ? '' : 's'} untouched` +
+          (this._restorePruned > 0 ? `, DELETED ${this._restorePruned}` : ''),
+      );
+    }
+
     // Everything writable is now written, and pruning has run. Only now report
     // the locked files — raising earlier would have abandoned the rest of the
     // restore, which is the behaviour this replaces.
     if (this._restoreLocked.length > 0) {
       throw new PartialRestoreError([...this._restoreLocked]);
+    }
+
+    // Reported the same way and for the same reason: the folder does not match
+    // the tree, so this node must not advertise the state or record the ref as
+    // applied. What has changed is only WHEN — after the writes and after the
+    // prune, so the tree's deletions are applied even though one of its files
+    // could not be.
+    if (this._restoreUnavailable.length > 0) {
+      throw new BlobUnavailableError([...this._restoreUnavailable]);
     }
   }
 
@@ -1039,22 +1111,58 @@ export class FsAgent {
           return;
         }
 
-        // Try to fetch the blob
+        // Never re-create a file deleted here and not yet announced.
+        //
+        // The mirror of the prune rule: peers may not remove what they could
+        // not know exists, and they may not restore what they have not yet
+        // been told is gone. Between the unlink and the push, this node's
+        // advertised state still contains the file, so a peer pushing in that
+        // window descends from a state the file is in — and an apply puts it
+        // back. The local scan then sees it present and the deletion is never
+        // announced: silently undone, on every node including the one that
+        // performed it.
+        if (this._pendingDeletes.has(filePath)) {
+          this._restoreSkipped++;
+          return;
+        }
+
+        // Try to fetch the blob.
+        //
+        // Recorded and stepped over, NOT thrown. A throw here abandoned the
+        // whole tree — every other file in it went unwritten and
+        // `_pruneExtraneous`, which runs after this walk, never ran at all, so
+        // no deletion the tree carried was applied. The node then retried, hit
+        // the same blob, and never advanced past that ref; once its ancestry
+        // no longer matched a state its peers were in, every later apply
+        // arrived with `mayPrune=false` and it took additions forever while
+        // ignoring every delete.
+        //
+        // One 63 MB file — 120% of the 50 MB socket cap, so its blob can never
+        // be fetched at all — left three of four nodes permanently holding a
+        // file the fourth had deleted. The bytes of one file are worth exactly
+        // one missing file, never the tree's deletions as well.
         let fileBlob;
         try {
           fileBlob = await this._bs.getBlob(meta.blobId);
         } catch (error) {
-          throw new Error(
-            `Failed to retrieve blob for file "${meta.relativePath}" (blobId: ${meta.blobId}): ` +
-              `${error instanceof Error ? error.message : String(error)}`,
+          console.warn(
+            `[FsAgent] cannot fetch blob for "${meta.relativePath}" ` +
+              `(blobId: ${meta.blobId}): ` +
+              `${error instanceof Error ? error.message : String(error)} — ` +
+              `skipping this file and applying the rest of the tree.`,
           );
+          this._restoreUnavailable.push(meta.relativePath);
+          return;
         }
 
         if (!fileBlob || !fileBlob.content) {
-          throw new Error(
-            `Missing blob content for file "${meta.relativePath}" (blobId: ${meta.blobId}). ` +
-              `The blob may have been deleted or not synced properly.`,
+          console.warn(
+            `[FsAgent] missing blob content for "${meta.relativePath}" ` +
+              `(blobId: ${meta.blobId}) — skipping this file and applying the ` +
+              `rest of the tree.`,
           );
+          this._restoreUnavailable.push(meta.relativePath);
+          return;
         }
 
         // Create parent directories
@@ -1706,11 +1814,44 @@ export class FsAgent {
     const isSilentJoiner =
       initialParentRef === undefined && this._treeIsEmpty(initialTree);
 
+    // A node that comes back UNCHANGED has nothing to announce.
+    //
+    // Its scan reproduces the ref it recorded before it stopped, so
+    // `initialIsNew` is false and `initialPrevious` is undefined — but the
+    // insert still notifies, and the connector then broadcasts that ref with
+    // NO predecessors. An announcement without ancestry is prune-authorising:
+    // a receiver cannot ask "does this sender name a state I am in", so it
+    // grants the prune by default.
+    //
+    // Measured on the lab, ten minutes apart:
+    //
+    //   14:53:18 NB-21624 resuming from recorded ref COpHl4bU… (4 547 files)
+    //   14:53:19 NB-21624 sync:out COpHl4bU…
+    //   15:03:57 NB-2510  sync:in  COpHl4bU…
+    //   15:04:00 NB-2510  applying declaresAncestry=false mayPrune=true
+    //                     incomingFiles=4547 currentFiles=4581
+    //   15:04:00 NB-2510  restore: wrote 0, left 3617 untouched
+    //
+    // Two peers rolled back 35 files — under the mass-delete guard's floor, so
+    // nothing challenged it — and the file that had just been added was undone
+    // rather than lost in transit. One in five probes failed this way.
+    //
+    // The state is already in the network's history; re-announcing it as
+    // current is the whole of the damage. Staying quiet costs nothing: this
+    // node needs to RECEIVE what it missed, not to tell anyone about a state
+    // it has not changed.
+    const resumingUnchanged =
+      initialParentRef !== undefined &&
+      initialTree.rootHash === initialParentRef;
+
     const initialRef = await FsAgent._withTimeout(
       new FsDbAdapter(db, treeKey).storeFsTree(initialTree, {
         ...options,
         previous: initialPrevious,
-        skipNotification: isSilentJoiner ? true : options?.skipNotification,
+        skipNotification:
+          isSilentJoiner || resumingUnchanged
+            ? true
+            : options?.skipNotification,
       }),
       this._timeouts.fetchTree,
       `syncToDb → initial storeFsTree(${treeKey})`,
@@ -1774,6 +1915,12 @@ export class FsAgent {
     };
 
     const debouncedSync = (change?: FsChange) => {
+      // A local deletion, recorded the moment the watcher reports it — before
+      // the push that will announce it, which is the window an incoming apply
+      // can undo it in.
+      if (change?.type === 'deleted' && change.path !== '.') {
+        this._pendingDeletes.add(join(this._rootPath, change.path));
+      }
       // A rescan-driven push during a remote apply re-asserts stale state.
       // Real watcher events are unambiguous local changes and still go out.
       if (change?.type === 'safety-rescan' && this._remoteApplyInFlight) {
@@ -2275,6 +2422,9 @@ export class FsAgent {
     for (const path of this._getFileContentMap(tree).keys()) {
       this._announcedFiles.add(join(this._rootPath, path));
     }
+    // Announced state and pending deletions are the same clock: once peers have
+    // been told, a file's absence is theirs to know about.
+    this._pendingDeletes.clear();
   }
 
   private _adoptAppliedRef(connector: Connector, treeRef: string): void {
@@ -2805,6 +2955,24 @@ export class FsAgent {
           this._currentRef = postRestoreRef;
           this._persistCurrentRef(postRestoreRef);
 
+          // NOT recording the incoming tree's files as prunable.
+          //
+          // 0.0.61 did exactly that, reasoning that a file which ARRIVED from a
+          // peer is by definition one the peers know about, so a later tree
+          // lacking it is deleting it. The reasoning is sound and the effect
+          // was not: `_announcedFiles` is a GUARD, and widening it made far
+          // more files prunable by any tree that happened to lack them.
+          //
+          // Measured on four machines, from an agreed 3 648 files: with nobody
+          // doing anything but adding one file, the nodes drifted to
+          // 3 493 / 3 513 / 3 630 / 3 553 — 155 files apart, actively losing
+          // data. Before the change the same folder held steady at 3 642–3 647
+          // across dozens of runs; deletion failed, but nothing decayed.
+          //
+          // Losing files is worse than failing to delete one. The guard stays
+          // as it was until the deletion path has a fix that does not trade
+          // convergence for it.
+
           // Claim this state as ADVERTISED only if it IS the sender's state.
           //
           // An apply does not always leave the folder equal to the incoming
@@ -2919,7 +3087,18 @@ export class FsAgent {
             await this._readvertiseAfterRefusal(connector);
             return;
           }
-          if (err instanceof PartialRestoreError) {
+          if (
+            err instanceof PartialRestoreError ||
+            err instanceof BlobUnavailableError
+          ) {
+            // Both mean the same thing here: the folder is a half-applied
+            // version of a newer state, and re-announcing it would assert the
+            // half. For an unfetchable blob the danger is sharper than for a
+            // locked file — this node's folder LACKS the file entirely, so a
+            // broadcast of its own scan reads to every peer as a deletion of
+            // it, and the one node that could not receive a file would order
+            // everyone else to destroy their copy.
+            //
             // The mirror image. Here the incoming ref is the NEWER state and
             // this folder holds a half-applied version of it, with the OLD
             // bytes still in the files that were locked. The watcher wakes on
