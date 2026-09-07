@@ -1,6 +1,6 @@
 {
   "name": "@rljson/fs-agent",
-  "version": "0.0.67",
+  "version": "0.0.68",
   "description": "Rljson fs-agent description",
   "homepage": "https://github.com/rljson/fs-agent",
   "bugs": "https://github.com/rljson/fs-agent/issues",
@@ -50,12 +50,12 @@
     "vitest-dom": "^0.1.1"
   },
   "dependencies": {
-    "@rljson/bs": "^0.0.21",
-    "@rljson/db": "0.0.36",
-    "@rljson/hash": "^0.0.18",
-    "@rljson/io": "^0.0.66",
-    "@rljson/json": "^0.0.23",
-    "@rljson/rljson": "^0.0.78",
+    "@rljson/bs": "0.0.25",
+    "@rljson/db": "0.0.38",
+    "@rljson/hash": "0.0.19",
+    "@rljson/io": "0.0.73",
+    "@rljson/json": "0.0.23",
+    "@rljson/rljson": "0.0.80",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
   },
