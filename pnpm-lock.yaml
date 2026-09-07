@@ -12,19 +12,19 @@ importers:
   .:
     dependencies:
       '@rljson/bs':
-        specifier: ^0.0.21
-        version: 0.0.21
+        specifier: 0.0.25
+        version: 0.0.25
       '@rljson/db':
-        specifier: 0.0.36
-        version: 0.0.36
+        specifier: 0.0.38
+        version: 0.0.38
       '@rljson/hash':
-        specifier: ^0.0.18
-        version: 0.0.18
+        specifier: 0.0.19
+        version: 0.0.19
       '@rljson/io':
-        specifier: ^0.0.66
-        version: 0.0.66
+        specifier: 0.0.73
+        version: 0.0.73
       '@rljson/json':
-        specifier: ^0.0.23
+        specifier: 0.0.23
         version: 0.0.23
       '@rljson/rljson':
         specifier: ^0.0.78
@@ -400,10 +400,6 @@ packages:
   '@microsoft/tsdoc@0.16.0':
     resolution: {integrity: sha512-xgAyonlVVS+q7Vc7qLW0UrJU7rSFcETRWsqdXZtjzRU8dF+6CkozTK4V4y1LwOX7j8r/vHphjDeMeGI4tNGeGA==}
 
-  '@rljson/bs@0.0.21':
-    resolution: {integrity: sha512-B/YxRBMNFcS7T3J++ynHfClFFRJ+QXO0bVJWqGjn1coU2GbvYzzTskw61ppuCe9nO9CqM9RA/Xg6OMmNxajmZQ==}
-    engines: {node: '>=22.14.0'}
-
   '@rljson/bs@0.0.25':
     resolution: {integrity: sha512-qEykxK793yTdtGXYQP3UyYmn/x8rhbIvLxxq9IAEJI8Wdh8boFfudqnyO0revCSBa8vJ+ow1yhT4nCuIoQAkYw==}
     engines: {node: '>=22.14.0'}
@@ -412,8 +408,8 @@ packages:
     resolution: {integrity: sha512-MZDMsPBAGZcOxnbgr2gkjxS3GXX/dyoyUFP72wP/DeUawYj85fb50OXeN+CmgGoT3XqJBitPStHXHFXv8GtasA==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/db@0.0.36':
-    resolution: {integrity: sha512-hG0gFuyp44B/pHdTztXQC2fuRk31SrwK2DgQYS+MIQtN7PvjgwShYXpFnCsRAWNFyUcqpGtyTU8qFjmEdtj1SQ==}
+  '@rljson/db@0.0.38':
+    resolution: {integrity: sha512-PDRiatON58b0UBTreUBhQgoeyBhIbqeEt6AyHuxw/t8c3U3sVYf/uiQtTBAjiHoo4SKs6J3Fs8znLCPr5ujztg==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/hash@0.0.16':
@@ -2151,12 +2147,6 @@ snapshots:
 
   '@microsoft/tsdoc@0.16.0': {}
 
-  '@rljson/bs@0.0.21':
-    dependencies:
-      '@rljson/hash': 0.0.18
-      '@rljson/json': 0.0.23
-      '@rljson/rljson': 0.0.78
-
   '@rljson/bs@0.0.25':
     dependencies:
       '@rljson/hash': 0.0.18
@@ -2174,7 +2164,7 @@ snapshots:
       object-traversal: 1.0.1
       rxjs: 7.8.2
 
-  '@rljson/db@0.0.36':
+  '@rljson/db@0.0.38':
     dependencies:
       '@rljson/hash': 0.0.19
       '@rljson/io': 0.0.71
