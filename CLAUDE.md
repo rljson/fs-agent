@@ -13,6 +13,27 @@ Synchronizes filesystem changes with RLJSON databases using tree structures and 
 
 ---
 
+## Branch & Workspace Discipline (MANDATORY)
+
+- **Every fix and every larger feature set gets its own branch.** Never work on
+  `main`, and never bundle unrelated changes into one branch.
+- **Check the branch out as a SEPARATE CLONE next to the repo**, named
+  `<repo>-<branch>`, and add that folder to the VS Code workspace. Develop
+  there. The primary clone stays on `main` and stays usable.
+
+```bash
+git clone --no-hardlinks <repo> <repo>-<branch-name>
+cd <repo>-<branch-name>
+git remote set-url origin <origin-url>
+git checkout -b <branch-name>
+pnpm install
+```
+
+- **When the branch is merged: remove the folder from the workspace and delete
+  it.** A stale clone is a source of work against a dead branch.
+
+---
+
 ## Commit Discipline (MANDATORY — NEVER SKIP)
 
 - **Commit small and often** — one logical unit = one commit. Never accumulate more than ~5 changed files before committing.
@@ -145,6 +166,19 @@ Uses **pnpm**. **Never modify the `scripts` section in `package.json`** without 
 
 After `pnpm update --latest`, always verify: `pnpm ls eslint`.
 
+### rljson package versions (MANDATORY)
+
+- **Every package declares the versions it is built and tested against.** Exact
+  pins, no ranges. On a `0.0.x` version `^` allows no range anyway, so a caret
+  is a hard pin — usually on a version nobody runs.
+- **Never leave a dependency that only a consuming app's `pnpm.overrides`
+  corrects.** The moment the declared graph stops matching what runs, every
+  green test result is about a stack nobody ships.
+- `pnpm install --force` does **not** re-resolve a changed specifier. Use
+  `pnpm install --no-frozen-lockfile`, or the old version stays installed while
+  `package.json` claims the new one.
+
+
 Also:
 - **TypeScript**: ESM modules (`"type": "module"`)
 - **Node**: >=22.14.0
@@ -167,6 +201,27 @@ Tests require `cross-env NODE_OPTIONS=--max-old-space-size=8192` for heap-intens
 ---
 
 ## Publish Workflow (MANDATORY)
+
+### Hard rules (NEVER SKIP)
+
+- **Publish only from `main`.** Never from a branch, never from a worktree,
+  never with an uncommitted version bump. Merge first, `git checkout main &&
+  git pull`, publish from there.
+- **Then build the cascade through the npm packages**, bottom-up, one level at
+  a time. Publish a level only once it is green and only from its own `main`,
+  and wait for the registry before starting the next: `pnpm view <pkg>@<version>`
+  must resolve.
+- **If the repo's version disagrees with npm, STOP.** Diff a build of `main`
+  against the published tarball before doing anything else. A mismatch means
+  releases were cut off-branch and `main` is missing shipped code — publishing
+  would silently undo it.
+
+*Why these are hard rules: `@rljson/fs-agent` 0.0.61–0.0.67 were cut from an
+unmerged branch, so `main` was missing ten commits of field-validated fixes
+that existed only in the tarball. Separately, an `io` fix was shipped by
+pinning it in one app's overrides, leaving `db`, `server` and `mongo-agent`
+declaring a version they did not run. Each cost half a day.*
+
 
 ### Pre-publish checklist
 
@@ -202,163 +257,12 @@ pnpm publish
 | 2 | `@rljson/io` | `@rljson/rljson` |
 | 3 | `@rljson/bs` | `@rljson/rljson`, `@rljson/io` |
 | 3 | `@rljson/db` | `@rljson/rljson`, `@rljson/io` |
+| 4 | `@rljson/bs-fs` | `@rljson/bs` |
 | 4 | `@rljson/server` | `@rljson/rljson`, `@rljson/io`, `@rljson/bs`, `@rljson/db`, `@rljson/network` |
 | 5 | `@rljson/fs-agent` | all of the above |
+| 6 | `@rljson/mongo-agent` | all of the above |
+| 7 | consuming app (e.g. `cos-one-client`) | all of the above |
 
-After publishing an upstream package, downstream packages must run `pnpm update --latest` before their own publish.
-
----
-
-## Architecture: Critical Rules (NEVER VIOLATE)
-
-### 1. Socket-Only Client-Server Communication
-
-**Clients MUST communicate via sockets ONLY — never access server resources directly.**
-
-```typescript
-// ✅ CORRECT: Client uses own Io/Bs, syncs via socket
-const client = new Client(socket, localIo, localBs);
-const agent = new FsAgent(folderA, client.bs);
-
-// ❌ FORBIDDEN: Direct server resource access
-const agent = new FsAgent(folderA, serverBs); // WRONG
-```
-
-### 2. Connector Route Matching
-
-**Connector routes MUST match Server route exactly.** Route must be based on the tree table name (treeKey).
-
-```typescript
-// ✅ CORRECT
-const treeKey = 'sharedTree';
-const route = Route.fromFlat(`/${treeKey}`);
-const server = new Server(route, serverIo, serverBs);
-const connectorA = new Connector(clientDbA, route, socketA);
-
-// ❌ WRONG
-const route = Route.fromFlat('myapp.sync'); // not based on treeKey
-const route = Route.fromFlat(`/${treeKey}+`); // unnecessary suffix
-```
-
-### 3. Use Server/Client Classes Directly
-
-Never manually construct `BsMulti` with `BsPeer` or `IoMulti` with `IoPeer`. Use `Server` and `Client` from `@rljson/server`.
-
-### 4. Self-Broadcast Filtering
-
-Connectors receive their own messages via local socket echo. FsAgent filters using `_lastSentRef`:
-
-```typescript
-this._lastSentRef = ref;
-connector.send(ref);
-// In listener:
-if (treeRef === this._lastSentRef) return; // Skip self-broadcast
-```
-
----
-
-## Core Components
-
-| Component | Purpose |
-|---|---|
-| `FsScanner` | Scans filesystem, builds tree structures with hash-based nodes |
-| `FsBlobAdapter` | Converts files ↔ blobs with content-addressed storage |
-| `FsDbAdapter` | Stores/loads tree structures in database with insert history |
-| `FsAgent` | Orchestrates scanning, syncing (fs→db and db→fs), watching |
-
----
-
-## Client-Server Test Setup
-
-```typescript
-const { server, clientA, clientDbA, connectorA } = await runClientServerSetup({ numClients: 2 });
-const agentA = new FsAgent(folderA, clientA.bs);
-await agentA.syncToDb(clientDbA, connectorA, 'sharedTree');
-```
-
-**Socket Architecture**: Always use `createSocketPair()` from `@rljson/io`:
-
-```typescript
-// ✅ CORRECT: DirectionalSocketMock with createSocketPair
-const [serverSocketA, clientSocketA] = createSocketPair();
-serverSocketA.connect();
-await server.addSocket(serverSocketA);
-const clientA = new Client(clientSocketA, localIoA, localBsA);
-
-// ❌ WRONG: Single SocketMock (causes issues)
-const socket = new SocketMock();
-```
-
----
-
-## Key Patterns
-
-### TreeKey Rules
-- Tree keys MUST end with "Tree": `'projectFilesTree'` ✅ · `'files'` ❌
-- Route derives from treeKey: `Route.fromFlat(\`/${treeKey}\`)` (no `+` suffix)
-
-### Correct Initialization Order
-```typescript
-const client = new Client(socket, localIo, localBs);
-await client.init(); // FIRST — sets up client.io as IoMulti
-const db = new Db(client.io!); // THEN — now has correct IoMulti reference
-```
-
-### Deprecated Constructor Pattern
-```typescript
-// ❌ DEPRECATED: Auto-sync via constructor
-new FsAgent(folder, bs, { db, treeKey: 'myTree', bidirectional: true });
-
-// ✅ CORRECT: Use syncToDb/syncFromDb methods
-const agent = new FsAgent(folder, bs);
-await agent.syncToDb(db, connector, treeKey);
-```
-
-### CleanTarget Behavior
-`cleanTarget: true` removes files/directories not in the tree:
-```typescript
-await agent.restore(tree, undefined, { cleanTarget: true });
-```
-
-### Always Clean Up Watchers
-```typescript
-const stopSync = await agent.syncToDb(db, connector, treeKey);
-// ... do work ...
-stopSync(); // Stops file watching
-agent.dispose(); // Cleans up remaining resources
-```
-
----
-
-## Common Pitfalls
-
-1. **Mismatched routes**: Most client-server issues stem from route mismatches — always derive route from treeKey
-2. **Direct server access**: Never access `serverBs`, `serverIo`, `serverDb` from clients
-3. **Missing tree key suffix**: Tree keys must end with "Tree"
-4. **Self-broadcast loops**: Connectors receive own messages locally — filter with `_lastSentRef`
-5. **Golden updates**: Run `pnpm updateGoldens` after intentional output changes
-6. **Wrong socket pattern**: Use `createSocketPair()` for tests, not single `SocketMock`
-7. **Route `+` suffix**: NEVER add `+` suffix to routes — causes routing mismatches
-8. **syncFromDb without initial tree**: Must call `storeInDb()` first, then `syncFromDb()` responds to updates
-9. **Forgetting dispose**: File watchers keep the process alive — must explicitly stop them
-
----
-
-## API Design Principles
-
-### Preserve Backward Compatibility — Always Prefer Additive Changes
-
-```typescript
-// ❌ WRONG: Breaking change
-class FsAgent {
-  constructor(rootPath: string, treeKey: string, clientIo: Io, ...) {} // BREAKS existing
-}
-
-// ✅ CORRECT: Additive factory method
-class FsAgent {
-  constructor(rootPath: string, bs?: Bs, options?: FsAgentOptions) {} // UNCHANGED
-  static async fromClient(filePath: string, treeKey: string, client: Client, ...): Promise<FsAgent> {}
-}
-```
-
-If a refactoring is going wrong: `git status --short` → `git restore <files>` → start fresh. Clean reverts are faster than salvaging broken refactors.
+After publishing an upstream package, each downstream package pins the new
+version EXPLICITLY, runs its own tests against it, and publishes from its own
+`main` before the next level starts.
