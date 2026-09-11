@@ -2603,13 +2603,25 @@ export class FsAgent {
             `[FsAgent] ref=${treeRef.slice(0, 8)}… ${VERDICT_REASON[verdict]} ` +
               `— ignoring it.`,
           );
-          if (verdict === 'stale') {
-            // Hand it back to the connector's dedup. It was marked received on
-            // arrival and never applied, so leaving it marked would block a
-            // later, genuine return to this exact state — refs are content
-            // hashes, and that trap has been paid for once already.
-            connector.invalidateReceived(treeRef);
-          }
+          // Hand it back to the connector's dedup, WHATEVER the verdict was.
+          // It was marked received on arrival and never applied, so leaving it
+          // marked blocks a later, genuine return to this exact state — refs
+          // are content hashes, so that state re-derives the identical ref.
+          //
+          // This used to run for `stale` only, and the gap cost a class of lost
+          // deletions. Delete a file and the folder returns to the state it
+          // held before the file existed; that state's ref is the one a peer
+          // may already have sent us and we may already have suppressed. The
+          // delete then never reaches this verdict at all — the connector
+          // dedups it on arrival — so nothing is logged, nothing is applied,
+          // and it never heals, because every re-announcement carries the same
+          // content hash.
+          //
+          // Safe for a true own-echo too: invalidating only means the ref is
+          // judged again if it comes back. If this agent is still in that
+          // state, `_lastSentRef` still matches and it is suppressed again at
+          // no cost; if it has moved on, the ref is genuinely news.
+          connector.invalidateReceived(treeRef);
           return;
         }
 

@@ -1878,6 +1878,52 @@ describe('FsAgent', () => {
       errorSpy.mockRestore();
     });
 
+    it('hands back a ref it suppressed as its own echo, so a later return to that state is not deduped away', async () => {
+      // The sibling of the bug below, on the other gate, and it cost the same
+      // thing: lost deletions that never heal.
+      //
+      // Refs are content hashes. Delete a file and the folder returns to the
+      // state it held before that file existed — re-deriving that state's exact
+      // ref. If a peer already announced that ref once and this agent dismissed
+      // it as its own echo WITHOUT handing it back, the connector's dedup keeps
+      // it marked received. The deletion's announcement is then dropped on
+      // arrival: it never reaches the verdict, nothing is logged, nothing is
+      // applied, and no re-announcement can ever rescue it, because every one
+      // carries the identical hash.
+      //
+      // Invalidating is safe for a genuine echo too: it only means the ref is
+      // judged again if it returns. Still in that state -> suppressed again at
+      // no cost. Moved on -> it was news after all.
+      const io = new IoMem();
+      await io.init();
+      const db = new Db(io);
+      const treeKey = 'fsTree';
+      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const agent = new FsAgent(testDir, undefined, {
+        timeouts: { debounceMs: 1 },
+      });
+      await agent.scanner.watch();
+      const connector = createMockConnector(db, treeKey);
+      const invalidateSpy = vi.spyOn(connector, 'invalidateReceived');
+      const stopSync = await agent.syncFromDb(db, connector, treeKey);
+
+      // The agent believes this is the last state it advertised, so the ref
+      // coming back reads as its own echo.
+      (agent as unknown as { _lastSentRef?: string })._lastSentRef = 'ownRef';
+      connector.simulateIncoming('ownRef');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(invalidateSpy).toHaveBeenCalledWith('ownRef');
+
+      stopSync();
+      agent.scanner.stopWatch();
+      invalidateSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
     it('retires a ref adopted WITHOUT a restore, so the folder can be told to return to that state', async () => {
       // A ref whose tree already matches the folder is adopted through the
       // equivalent-content path: nothing to restore, nothing to do. It is
