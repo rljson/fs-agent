@@ -67,7 +67,14 @@ const createProbeConnector = (db: Db, treeKey: string) => {
   });
 };
 
-describe('FsAgent — a file held open by another process', () => {
+// The mock above only intercepts fs/promises.writeFile against the final
+// target path. On win32, FsAgent._atomicWriteFile writes to a random temp
+// file and renames it over the target instead, which the mock never sees —
+// so the simulated lock silently has no effect. Only meaningful on the
+// platforms where the write path above actually applies.
+describe.skipIf(process.platform === 'win32')(
+  'FsAgent — a file held open by another process',
+  () => {
   const sourceDir = join(process.cwd(), 'test-temp-locked-source');
   const targetDir = join(process.cwd(), 'test-temp-locked-target');
 
@@ -270,4 +277,5 @@ describe('FsAgent — a file held open by another process', () => {
     );
     warnSpy.mockRestore();
   });
-});
+  },
+);

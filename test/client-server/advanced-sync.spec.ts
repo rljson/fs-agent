@@ -195,12 +195,26 @@ describe('Advanced Sync Tests', () => {
   const baseDir = join(process.cwd(), 'test-tmp', 'advanced-sync');
 
   beforeEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    // maxRetries/retryDelay: a preceding test's teardown closes the FsAgent's
+    // fs.watch handle, but on Windows the OS does not release the directory
+    // handle synchronously with close() — an immediate rm can race it and
+    // fail with ENOTEMPTY/EBUSY.
+    await rm(baseDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
     await mkdir(baseDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    await rm(baseDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   // ===========================================================================

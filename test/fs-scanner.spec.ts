@@ -520,8 +520,12 @@ describe('FsScanner', () => {
       // Delete the file
       await rm(join(testDir, 'delete-me.txt'));
 
-      // Wait for change detection
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Wait for change detection. On Windows, confirming a deletion retries
+      // stat() up to 4 times with 80/160/240ms backoff before FsScanner even
+      // emits the 'deleted' change (see FsScanner._handleFileChange) — 480ms
+      // of intentional delay alone, before the event delivery on top. 500ms
+      // left almost no margin.
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
       scanner.stopWatch();
 

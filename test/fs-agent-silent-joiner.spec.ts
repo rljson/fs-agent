@@ -90,7 +90,11 @@ describe('FsAgent — an agent with nothing to say does not speak', () => {
 
     sent.length = 0;
     await rm(join(dir, 'a.txt'));
-    await new Promise((r) => setTimeout(r, 400));
+    // On Windows, confirming a deletion retries stat() up to 4 times with
+    // 80/160/240ms backoff before FsScanner even emits the 'deleted' change
+    // (see FsScanner._handleFileChange) — 480ms of intentional delay alone,
+    // before debounce/rescan/send. 400ms was shorter than that floor.
+    await new Promise((r) => setTimeout(r, 1000));
 
     expect(sent.length).toBeGreaterThan(0);
 
