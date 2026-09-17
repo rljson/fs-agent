@@ -2710,3 +2710,47 @@ describe('PartialRestoreError', () => {
   });
 });
 
+
+describe('FsAgent timeouts — defaults reach callers that override only some', () => {
+  // `_timeouts` is built as `{ ...DEFAULT_TIMEOUTS, ...options.timeouts }`, so
+  // every key with a default reaches callers that never asked for it. The One
+  // Client sets exactly the three below (see its fs-sync-options.ts) and
+  // inherits the rest, which is why adding a default here is a production
+  // change, not a local one. These assertions exist to make that visible the
+  // moment someone adds one.
+  const asOneClientConfiguresIt = {
+    extract: 60_000,
+    restore: 60_000,
+    fetchTree: 30_000,
+  };
+
+  it('leaves the retry schedule at 5s/10s/15s when only extract/restore/fetchTree are set', () => {
+    const agent = new FsAgent(join(process.cwd(), 'test-temp-timeouts'), undefined, {
+      timeouts: asOneClientConfiguresIt,
+    });
+
+    expect(agent.timeouts.processRefRetries).toBe(3);
+    expect(agent.timeouts.processRefRetryDelayMs).toBe(5_000);
+    expect(agent.timeouts.recoveryRetries).toBe(10);
+  });
+
+  it('does not hand such a caller a fastFirstRetryDelayMs it never asked for', () => {
+    const agent = new FsAgent(join(process.cwd(), 'test-temp-timeouts'), undefined, {
+      timeouts: asOneClientConfiguresIt,
+    });
+
+    // Opt-in only. A default here would silently shorten the first retry for
+    // every existing deployment.
+    expect(agent.timeouts.fastFirstRetryDelayMs).toBeUndefined();
+  });
+
+  it('honours the fast first retry once a caller opts in', () => {
+    const agent = new FsAgent(join(process.cwd(), 'test-temp-timeouts'), undefined, {
+      timeouts: { ...asOneClientConfiguresIt, fastFirstRetryDelayMs: 250 },
+    });
+
+    expect(agent.timeouts.fastFirstRetryDelayMs).toBe(250);
+    // The slower schedule the later attempts use is untouched by opting in.
+    expect(agent.timeouts.processRefRetryDelayMs).toBe(5_000);
+  });
+});
