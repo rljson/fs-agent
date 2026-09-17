@@ -131,21 +131,29 @@ export interface TimeoutConfig {
   processRefRetries?: number;
   /**
    * Base delay between processRef retries (milliseconds). Default: 5 000 ms.
-   * The retry after attempt 1 waits `fastFirstRetryDelayMs` instead (see
-   * below); later retries wait `attempt * processRefRetryDelayMs`
-   * (i.e. 10s, 15s for attempts 2 and 3).
+   * Each retry waits `attempt * processRefRetryDelayMs` (i.e. 5s, 10s, 15s),
+   * unless `fastFirstRetryDelayMs` overrides the first one.
    */
   processRefRetryDelayMs?: number;
   /**
-   * Delay before the SECOND attempt only (milliseconds). Default: 250 ms.
-   * A restore's first failure is usually a file the OS hasn't released yet
+   * Delay before the SECOND attempt only (milliseconds). **Opt-in: there is
+   * no default.** When unset, the first retry waits the normal
+   * `1 * processRefRetryDelayMs` like every other attempt.
+   *
+   * A restore's first failure is often a file the OS hasn't released yet
    * (Windows reports a just-closed handle as EPERM/EBUSY for a moment —
    * antivirus/indexer scans, or this agent's own scanner touching the file
    * it just wrote). That clears in milliseconds, not the 5s+ that
    * `processRefRetryDelayMs` assumes for a genuinely stuck condition
-   * (transport down, blob unfetchable). Retrying fast here avoids adding
-   * seconds of latency to the common case, while later attempts still fall
-   * back to the slower schedule for the uncommon one.
+   * (transport down, blob unfetchable), so a caller that knows it is on such
+   * a platform can set this to retry fast without shortening the later,
+   * slower attempts.
+   *
+   * Deliberately NOT in {@link DEFAULT_TIMEOUTS}: `_timeouts` is built as
+   * `{ ...DEFAULT_TIMEOUTS, ...options.timeouts }`, so a default here would
+   * silently change the retry schedule for every existing caller — including
+   * ones that override only `extract`/`restore`/`fetchTree`. Callers that
+   * want it ask for it.
    */
   fastFirstRetryDelayMs?: number;
   /**
@@ -161,8 +169,23 @@ export interface TimeoutConfig {
   recoveryRetries?: number;
 }
 
-/** Sensible defaults – every operation is bounded */
-const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
+/**
+ * A {@link TimeoutConfig} with every default filled in. Every key is resolved
+ * except `fastFirstRetryDelayMs`, which stays optional because it has no
+ * default — see {@link TimeoutConfig.fastFirstRetryDelayMs}.
+ */
+export type ResolvedTimeouts = Required<
+  Omit<TimeoutConfig, 'fastFirstRetryDelayMs'>
+> &
+  Pick<TimeoutConfig, 'fastFirstRetryDelayMs'>;
+
+/**
+ * Sensible defaults – every operation is bounded.
+ *
+ * `fastFirstRetryDelayMs` is intentionally absent: it is opt-in, and a value
+ * here would reach every caller through the spread in the constructor.
+ */
+const DEFAULT_TIMEOUTS: Required<Omit<TimeoutConfig, 'fastFirstRetryDelayMs'>> = {
   dbQuery: 10_000,
   fetchTree: 20_000,
   extract: 15_000,
@@ -171,7 +194,6 @@ const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
   debounceMs: 300,
   processRefRetries: 3,
   processRefRetryDelayMs: 5_000,
-  fastFirstRetryDelayMs: 250,
   recoveryRetries: 10,
 };
 
@@ -504,7 +526,7 @@ export class FsAgent {
     string,
     { blobId: string; size: number; mtime: number }
   >();
-  private _timeouts: Required<TimeoutConfig>;
+  private _timeouts: ResolvedTimeouts;
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
   /**
@@ -579,7 +601,7 @@ export class FsAgent {
   /**
    * Gets the current timeout configuration
    */
-  get timeouts(): Required<TimeoutConfig> {
+  get timeouts(): ResolvedTimeouts {
     return this._timeouts;
   }
 
@@ -2418,14 +2440,17 @@ export class FsAgent {
   }
 
   /**
-   * Delay before the retry following `attempt`. Attempt 1 gets the fast
-   * path (see {@link TimeoutConfig.fastFirstRetryDelayMs}); later attempts
-   * use the slower `attempt * processRefRetryDelayMs` schedule.
+   * Delay before the retry following `attempt`. Attempt 1 takes the fast
+   * path only when the caller opted in via
+   * {@link TimeoutConfig.fastFirstRetryDelayMs}; otherwise every attempt —
+   * the first included — uses `attempt * processRefRetryDelayMs`, which is
+   * the schedule callers had before that option existed.
    * @param attempt - The attempt that just failed (1-based).
    */
   private _processRefRetryDelay(attempt: number): number {
-    return attempt === 1
-      ? this._timeouts.fastFirstRetryDelayMs
+    const fast = this._timeouts.fastFirstRetryDelayMs;
+    return attempt === 1 && fast !== undefined
+      ? fast
       : attempt * this._timeouts.processRefRetryDelayMs;
   }
 
