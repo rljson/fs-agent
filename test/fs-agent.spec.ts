@@ -1816,6 +1816,7 @@ describe('FsAgent', () => {
           debounceMs: 1,
           processRefRetries: 1,
           processRefRetryDelayMs: 1,
+          fastFirstRetryDelayMs: 1,
           recoveryRetries: 1,
         },
       });

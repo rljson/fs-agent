@@ -131,9 +131,23 @@ export interface TimeoutConfig {
   processRefRetries?: number;
   /**
    * Base delay between processRef retries (milliseconds). Default: 5 000 ms.
-   * Each retry waits `attempt * processRefRetryDelayMs` (i.e. 5s, 10s, 15s).
+   * The retry after attempt 1 waits `fastFirstRetryDelayMs` instead (see
+   * below); later retries wait `attempt * processRefRetryDelayMs`
+   * (i.e. 10s, 15s for attempts 2 and 3).
    */
   processRefRetryDelayMs?: number;
+  /**
+   * Delay before the SECOND attempt only (milliseconds). Default: 250 ms.
+   * A restore's first failure is usually a file the OS hasn't released yet
+   * (Windows reports a just-closed handle as EPERM/EBUSY for a moment —
+   * antivirus/indexer scans, or this agent's own scanner touching the file
+   * it just wrote). That clears in milliseconds, not the 5s+ that
+   * `processRefRetryDelayMs` assumes for a genuinely stuck condition
+   * (transport down, blob unfetchable). Retrying fast here avoids adding
+   * seconds of latency to the common case, while later attempts still fall
+   * back to the slower schedule for the uncommon one.
+   */
+  fastFirstRetryDelayMs?: number;
   /**
    * Number of **recovery re-queues** for a ref whose per-cycle retries were
    * all exhausted (e.g. `db.get` kept timing out because the transport was
@@ -157,6 +171,7 @@ const DEFAULT_TIMEOUTS: Required<TimeoutConfig> = {
   debounceMs: 300,
   processRefRetries: 3,
   processRefRetryDelayMs: 5_000,
+  fastFirstRetryDelayMs: 250,
   recoveryRetries: 10,
 };
 
@@ -2403,6 +2418,18 @@ export class FsAgent {
   }
 
   /**
+   * Delay before the retry following `attempt`. Attempt 1 gets the fast
+   * path (see {@link TimeoutConfig.fastFirstRetryDelayMs}); later attempts
+   * use the slower `attempt * processRefRetryDelayMs` schedule.
+   * @param attempt - The attempt that just failed (1-based).
+   */
+  private _processRefRetryDelay(attempt: number): number {
+    return attempt === 1
+      ? this._timeouts.fastFirstRetryDelayMs
+      : attempt * this._timeouts.processRefRetryDelayMs;
+  }
+
+  /**
    * Whether a push comes from a sender this node has already moved past.
    * @param predecessorRefs - What the push declares it descends from.
    * @returns True when every declared parent is a state this node has left.
@@ -3174,11 +3201,10 @@ export class FsAgent {
               // processed and supersedes this one; nothing to do.
             }
           } else {
-            const delaySec =
-              (attempt * this._timeouts.processRefRetryDelayMs) / 1000;
+            const delayMs = this._processRefRetryDelay(attempt);
             console.warn(
               `[FsAgent] syncFromDb: attempt ${attempt}/${maxAttempts} failed ` +
-                `for ref=${treeRef.slice(0, 8)}…, retrying in ${delaySec}s: ` +
+                `for ref=${treeRef.slice(0, 8)}…, retrying in ${delayMs}ms: ` +
                 `${FsAgent._errMessage(err)}`,
             );
           }
@@ -3193,7 +3219,7 @@ export class FsAgent {
         // Wait before next attempt (only reached on non-final failure)
         /* v8 ignore next -- @preserve */
         await new Promise((r) =>
-          setTimeout(r, attempt * this._timeouts.processRefRetryDelayMs),
+          setTimeout(r, this._processRefRetryDelay(attempt)),
         );
       }
     };
