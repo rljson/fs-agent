@@ -27,6 +27,16 @@ describe('FsScanner', () => {
     await rm(testDir, { recursive: true, force: true });
   });
 
+  describe('_compareNames', () => {
+    it('orders names ascending regardless of the OS-specific readdir order', () => {
+      // readdir's actual order is filesystem-dependent, so this is tested
+      // directly rather than relying on directory scans happening to
+      // exercise both directions on every OS.
+      expect((FsScanner as any)._compareNames('a', 'b')).toBeLessThan(0);
+      expect((FsScanner as any)._compareNames('b', 'a')).toBeGreaterThan(0);
+    });
+  });
+
   describe('scan', () => {
     it('should scan an empty directory', async () => {
       const scanner = new FsScanner(testDir);

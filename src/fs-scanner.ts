@@ -335,10 +335,8 @@ export class FsScanner {
   ): Promise<Tree> {
     // readdir's order is filesystem-dependent (e.g. differs between NTFS and
     // ext4), which would otherwise make tree/child ordering OS-dependent.
-    // Entry names within one directory are always unique, so a two-way
-    // comparison is enough — there is no tie case to handle.
     const entries = (await readdir(absolutePath, { withFileTypes: true })).sort(
-      (a, b) => (a.name < b.name ? -1 : 1),
+      (a, b) => FsScanner._compareNames(a.name, b.name),
     );
     const childTrees: Tree[] = [];
     const childRefs: TreeRef[] = [];
@@ -753,6 +751,18 @@ export class FsScanner {
   /** Whether the host is Windows — gates Windows-specific watcher hardening. */
   private static get _isWindows(): boolean {
     return process.platform === 'win32';
+  }
+
+  /**
+   * Orders two directory entry names for deterministic, OS-independent
+   * scan results. Entry names within one directory are always unique, so a
+   * two-way comparison is enough — there is no tie case to handle.
+   * @param a - The first entry name.
+   * @param b - The second entry name.
+   * @returns A negative number if `a` sorts before `b`, else a positive one.
+   */
+  private static _compareNames(a: string, b: string): number {
+    return a < b ? -1 : 1;
   }
 
   private async _handleFileChange(
