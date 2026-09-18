@@ -30,9 +30,15 @@ describe('example', () => {
       [cwd, jsonEscapedCwd].map(escapeRegExp).join('|'),
       'g',
     );
+    // File hashes (root hash and the truncated per-file hashes) depend on
+    // the exact bytes read from disk, which differ between CRLF (Windows
+    // checkout) and LF (Linux/macOS checkout) — so they can never be equal
+    // across platforms and must be normalized out too.
     const output = logMessages
       .join('\n')
-      .replace(projectRootPattern, '<PROJECT_ROOT>');
+      .replace(projectRootPattern, '<PROJECT_ROOT>')
+      .replace(/Root hash: [\w-]+/g, 'Root hash: <HASH>')
+      .replace(/\[[\w-]{8}\.\.\.\]/g, '[<HASH>...]');
 
     // Write golden file
     await expectGolden('example.log').toBe(output);
