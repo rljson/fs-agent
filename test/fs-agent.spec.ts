@@ -20,7 +20,12 @@ import { mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent';
+import {
+  FsAgent,
+  PartialRestoreError,
+  RestoreIncompleteError,
+  SYNC_ERROR_FILE,
+} from '../src/fs-agent';
 import { FsDbAdapter } from '../src/fs-db-adapter';
 
 /**
@@ -1811,6 +1816,7 @@ describe('FsAgent', () => {
           debounceMs: 1,
           processRefRetries: 1,
           processRefRetryDelayMs: 1,
+          fastFirstRetryDelayMs: 1,
           recoveryRetries: 1,
         },
       });
@@ -2675,6 +2681,32 @@ describe('FsAgent.fromClient — disconnect must not silence the node', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('PartialRestoreError', () => {
+  it('reports a single locked file without pluralizing', () => {
+    const err = new PartialRestoreError(['open.dbf']);
+
+    expect(err.message).toBe('restore could not write 1 locked file: open.dbf');
+    expect(err.lockedPaths).toEqual(['open.dbf']);
+  });
+
+  it('pluralizes and lists every locked file', () => {
+    const err = new PartialRestoreError(['one.dbf', 'two.PRJZ']);
+
+    expect(err.message).toBe(
+      'restore could not write 2 locked files: one.dbf, two.PRJZ',
+    );
+    expect(err.lockedPaths).toEqual(['one.dbf', 'two.PRJZ']);
+  });
+
+  it('names itself and extends RestoreIncompleteError', () => {
+    const err = new PartialRestoreError(['open.dbf']);
+
+    expect(err.name).toBe('PartialRestoreError');
+    expect(err).toBeInstanceOf(RestoreIncompleteError);
+    expect(err).toBeInstanceOf(Error);
   });
 });
 

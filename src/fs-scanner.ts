@@ -333,7 +333,11 @@ export class FsScanner {
     depth: number,
     trees: Map<TreeRef, Tree>,
   ): Promise<Tree> {
-    const entries = await readdir(absolutePath, { withFileTypes: true });
+    // readdir's order is filesystem-dependent (e.g. differs between NTFS and
+    // ext4), which would otherwise make tree/child ordering OS-dependent.
+    const entries = (await readdir(absolutePath, { withFileTypes: true })).sort(
+      (a, b) => FsScanner._compareNames(a.name, b.name),
+    );
     const childTrees: Tree[] = [];
     const childRefs: TreeRef[] = [];
 
@@ -484,11 +488,11 @@ export class FsScanner {
     // Create directory tree node. The root's name is normalised to '.' (the
     // mount-point folder name is environment-specific and would otherwise make
     // the root hash folder-dependent, breaking shared cross-client refs).
+    // relativePath is always built as `${parent}/${entry.name}` (see the
+    // recursive call below) with a non-empty entry.name, so pop() can never
+    // return undefined here.
     const dirName =
-      relativePath === '.'
-        ? '.'
-        : /* v8 ignore next -- @preserve */
-          relativePath.split('/').pop() || '';
+      relativePath === '.' ? '.' : relativePath.split('/').pop()!;
 
     const dirMeta: FsNodeMeta = {
       name: dirName,
@@ -747,6 +751,18 @@ export class FsScanner {
   /** Whether the host is Windows — gates Windows-specific watcher hardening. */
   private static get _isWindows(): boolean {
     return process.platform === 'win32';
+  }
+
+  /**
+   * Orders two directory entry names for deterministic, OS-independent
+   * scan results. Entry names within one directory are always unique, so a
+   * two-way comparison is enough — there is no tie case to handle.
+   * @param a - The first entry name.
+   * @param b - The second entry name.
+   * @returns A negative number if `a` sorts before `b`, else a positive one.
+   */
+  private static _compareNames(a: string, b: string): number {
+    return a < b ? -1 : 1;
   }
 
   private async _handleFileChange(

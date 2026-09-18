@@ -94,8 +94,8 @@ export class FsBlobAdapter {
     const blobProps = await bs.setBlob(content);
 
     // Extract file name from path
-    /* v8 ignore next -- @preserve */
-    const name = filePath.split('/').pop() || filePath.split('\\').pop() || '';
+    /* v8 ignore next -- @preserve pop() is only falsy for a path ending in a separator */
+    const name = filePath.split(/[/\\]/).pop() || '';
 
     // Build metadata
     const metadata: FileBlobMeta = {

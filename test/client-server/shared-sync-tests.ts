@@ -197,7 +197,16 @@ export function defineProductionSyncTests(
     let folderB: string;
 
     beforeEach(async () => {
-      await rm(baseDir, { recursive: true, force: true });
+      // maxRetries/retryDelay: a preceding test's teardown() closes the
+      // FsAgent's fs.watch handle, but on Windows the OS does not release
+      // the directory handle synchronously with close() — an immediate rm
+      // can race it and fail with ENOTEMPTY/EBUSY.
+      await rm(baseDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
       folderA = join(baseDir, 'folder-a');
       folderB = join(baseDir, 'folder-b');
       await mkdir(folderA, { recursive: true });
@@ -205,7 +214,12 @@ export function defineProductionSyncTests(
     });
 
     afterEach(async () => {
-      await rm(baseDir, { recursive: true, force: true });
+      await rm(baseDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
     });
 
     // =========================================================================

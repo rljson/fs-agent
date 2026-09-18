@@ -27,6 +27,16 @@ describe('FsScanner', () => {
     await rm(testDir, { recursive: true, force: true });
   });
 
+  describe('_compareNames', () => {
+    it('orders names ascending regardless of the OS-specific readdir order', () => {
+      // readdir's actual order is filesystem-dependent, so this is tested
+      // directly rather than relying on directory scans happening to
+      // exercise both directions on every OS.
+      expect((FsScanner as any)._compareNames('a', 'b')).toBeLessThan(0);
+      expect((FsScanner as any)._compareNames('b', 'a')).toBeGreaterThan(0);
+    });
+  });
+
   describe('scan', () => {
     it('should scan an empty directory', async () => {
       const scanner = new FsScanner(testDir);
@@ -520,8 +530,12 @@ describe('FsScanner', () => {
       // Delete the file
       await rm(join(testDir, 'delete-me.txt'));
 
-      // Wait for change detection
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Wait for change detection. On Windows, confirming a deletion retries
+      // stat() up to 4 times with 80/160/240ms backoff before FsScanner even
+      // emits the 'deleted' change (see FsScanner._handleFileChange) — 480ms
+      // of intentional delay alone, before the event delivery on top. 500ms
+      // left almost no margin.
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
       scanner.stopWatch();
 
