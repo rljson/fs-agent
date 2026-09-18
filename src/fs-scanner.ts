@@ -333,7 +333,13 @@ export class FsScanner {
     depth: number,
     trees: Map<TreeRef, Tree>,
   ): Promise<Tree> {
-    const entries = await readdir(absolutePath, { withFileTypes: true });
+    // readdir's order is filesystem-dependent (e.g. differs between NTFS and
+    // ext4), which would otherwise make tree/child ordering OS-dependent.
+    // Entry names within one directory are always unique, so a two-way
+    // comparison is enough — there is no tie case to handle.
+    const entries = (await readdir(absolutePath, { withFileTypes: true })).sort(
+      (a, b) => (a.name < b.name ? -1 : 1),
+    );
     const childTrees: Tree[] = [];
     const childRefs: TreeRef[] = [];
 
