@@ -484,11 +484,11 @@ export class FsScanner {
     // Create directory tree node. The root's name is normalised to '.' (the
     // mount-point folder name is environment-specific and would otherwise make
     // the root hash folder-dependent, breaking shared cross-client refs).
+    // relativePath is always built as `${parent}/${entry.name}` (see the
+    // recursive call below) with a non-empty entry.name, so pop() can never
+    // return undefined here.
     const dirName =
-      relativePath === '.'
-        ? '.'
-        : /* v8 ignore next -- @preserve */
-          relativePath.split('/').pop() || '';
+      relativePath === '.' ? '.' : relativePath.split('/').pop()!;
 
     const dirMeta: FsNodeMeta = {
       name: dirName,
