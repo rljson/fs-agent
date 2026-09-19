@@ -2785,7 +2785,15 @@ export class FsAgent {
           // four times for being shipped on reasoning. It needs its own
           // rollout and a lab measurement, not a flag flip at the end of
           // another one. See section 11 of doc/large-folder-plan.md.
-          const ancestryExpected = this._resolveConflicts;
+          // Ancestry is expected wherever it would actually be carried —
+          // either because this client resolves conflicts, or because the
+          // transport puts predecessors on the wire at all.
+          // Ancestry is expected wherever it would actually be carried —
+          // either because this client resolves conflicts, or because the
+          // transport puts predecessors on the wire at all.
+          const ancestryExpected =
+            this._resolveConflicts ||
+            connector.syncConfig?.causalOrdering === true;
           const declaresAncestry = (predecessorRefs?.length ?? 0) > 0;
 
           // THE PRUNE RULE. One comparison, and the only question that
