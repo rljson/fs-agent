@@ -111,6 +111,59 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     warnSpy.mockRestore();
   });
 
+  // The same rule, on the configuration a CARAT One Client actually runs.
+  //
+  // **The lab incident of 2026-09-19.** Nine files were written into the synced
+  // folder on one machine while it was — unknowingly — attached to a server
+  // that had lost the hub election. Thirty-seven minutes later those files were
+  // deleted from the machine that wrote them, by a peer pushing the older,
+  // empty state of the folder without declaring what it descended from.
+  //
+  // The rule above would have refused that prune. It did not run, because it
+  // was gated on `resolveConflicts`, which a One Client deliberately leaves off
+  // — an earlier attempt to turn the whole merge on dropped the four-node lab
+  // to 4 of 11. But the client DOES set `causalOrdering`, so ancestry is on the
+  // wire and its absence means exactly what the rule says it means.
+  it('never prunes on a no-ancestry push from a causally-ordered peer', async () => {
+    const db = await makeDb();
+    const bs = new BsMem();
+
+    // What the machine wrote while it was cut off.
+    await writeFile(join(targetDir, 'Preisliste.txt'), 'seed');
+    await writeFile(join(targetDir, 'shared.txt'), 'shared');
+
+    // What the rest of the branch still held: the folder without those files.
+    await writeFile(join(sourceDir, 'shared.txt'), 'shared');
+    const staleRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
+      await new FsAgent(sourceDir, bs).extract(),
+    );
+
+    // A One Client's fs-client, exactly: conflict resolution OFF, causal
+    // ordering ON.
+    const agent = new FsAgent(targetDir, bs, {
+      resolveConflicts: false,
+      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+    });
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat('/fsTree+'), socket, {
+      causalOrdering: true,
+      includeClientIdentity: true,
+    });
+    const stop = await agent.syncFromDb(db, connector, 'fsTree', {
+      cleanTarget: true,
+    });
+
+    // No predecessors — the shape a hub relays after its cache was wiped, and
+    // the shape any sender has before it knows a ref of its own.
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: staleRef });
+    await new Promise((r) => setTimeout(r, 400));
+
+    expect(existsSync(join(targetDir, 'Preisliste.txt'))).toBe(true);
+
+    stop();
+    agent.scanner.stopWatch();
+  });
+
   it('still prunes when the sender DOES declare ancestry', async () => {
     const db = await makeDb();
     const bs = new BsMem();
