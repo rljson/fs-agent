@@ -910,6 +910,12 @@ export class FsScanner {
     // weeks. The rescan is the one notification that must survive a pause,
     // because it is what notices the writes the pause swallowed.
     if (this._paused && !this._pauseLooksStuck(change)) {
+      // Dropping is right — this must not escape mid-restore. Forgetting it is
+      // not. `_handleFileChange` records the miss before it bails, but a
+      // change whose processing straddled the start of the pause arrives
+      // HERE instead, and recording nothing left `resumeWatch()` — which
+      // rescans only when something was missed — with nothing to rescan for.
+      this._missedChangesDuringPause = true;
       return;
     }
 

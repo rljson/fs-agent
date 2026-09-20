@@ -639,6 +639,35 @@ describe('FsScanner', () => {
       expect(changes).toEqual([]);
     });
 
+    it('remembers a change it swallowed, so the resume rescans for it', async () => {
+      // `_handleFileChange` records `_missedChangesDuringPause` before it
+      // bails; `_notifyChange` dropped the change and recorded nothing. A
+      // local write whose processing STRADDLES the start of a pause therefore
+      // took the second gate, and `resumeWatch()` — which rescans only when
+      // something was missed — saw nothing to rescan for. The write then
+      // waited on the safety rescan, which is itself swallowed until the pause
+      // looks stuck: the node's own change went unreported for as long as
+      // inbound traffic kept re-pausing it.
+      //
+      // Dropping is right. Forgetting is not.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+
+      scanner.pauseWatch();
+      await writeFile(join(testDir, 'straddle.txt'), 's');
+      await (
+        scanner as unknown as {
+          _notifyChange: (c: { type: string; path: string }) => Promise<void>;
+        }
+      )._notifyChange({ type: 'modified', path: 'straddle.txt' });
+      expect(changes).toEqual([]);
+
+      scanner.resumeWatch();
+      await vi.waitFor(() => expect(changes).toEqual(['modified']));
+    });
+
     it('re-pausing replaces the pending auto-release', async () => {
       vi.useFakeTimers();
       try {
