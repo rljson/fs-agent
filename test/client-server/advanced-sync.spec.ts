@@ -274,6 +274,61 @@ describe('Advanced Sync Tests', () => {
       }
     });
 
+    it('leaves unchanged files untouched when a new file arrives', async () => {
+      // Off-lab reduction of the `restore-is-incremental` recipe, which went
+      // red on the lab with "restore rewrote 1 unchanged file" straight after
+      // 0.0.78 shipped. The fix in that release makes a node rescan after a
+      // pause it had swallowed a change in — deliberately MORE rescans — and a
+      // rescan that ends in a restore is exactly what would touch a file it
+      // had no business touching. A restore already rewrites a file whose
+      // mtime moved even when the content matches, so the two together are a
+      // plausible regression and had to be measured rather than argued.
+      //
+      // It is not: this passes with the fix and without it, three runs each.
+      // So it does not reproduce the lab condition — two clients and no hub
+      // churn are evidently not enough — and it stays as an INVARIANT GUARD
+      // rather than a reproduction, the same way `fs-agent-self-parent` did.
+      // The lab red is therefore unattributed, not attributed to 0.0.78.
+      const folderA = join(baseDir, 'inc-a');
+      const folderB = join(baseDir, 'inc-b');
+      await mkdir(folderA, { recursive: true });
+      await mkdir(folderB, { recursive: true });
+
+      const STABLE = ['incr-a.txt', 'incr-b.txt', 'incr-c.txt'];
+      for (const name of STABLE) {
+        await writeFile(join(folderA, name), `stable ${name}`);
+      }
+
+      const setup = await createMultiClientSetup([folderA, folderB]);
+      const { stopAll } = await startAllSync(setup);
+
+      try {
+        for (const name of STABLE) {
+          await waitForFile(join(folderB, name), `stable ${name}`);
+        }
+        const before = new Map<string, number>();
+        for (const name of STABLE) {
+          before.set(name, (await stat(join(folderB, name))).mtimeMs);
+        }
+
+        // The trigger: one NEW file, which must reach B without B rewriting
+        // anything it already had.
+        await writeFile(join(folderA, 'incr-trigger.txt'), 'trigger');
+        await waitForFile(join(folderB, 'incr-trigger.txt'), 'trigger');
+
+        const rewritten: string[] = [];
+        for (const name of STABLE) {
+          if ((await stat(join(folderB, name))).mtimeMs !== before.get(name)) {
+            rewritten.push(name);
+          }
+        }
+        expect(rewritten).toEqual([]);
+      } finally {
+        stopAll();
+        await setup.tearDown();
+      }
+    });
+
     it('should propagate files from all three clients', async () => {
       const folderA = join(baseDir, 'a');
       const folderB = join(baseDir, 'b');
