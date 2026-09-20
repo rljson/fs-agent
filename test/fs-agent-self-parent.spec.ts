@@ -67,6 +67,68 @@ describe('FsAgent — a push that parents itself', () => {
     return db;
   };
 
+  it('does not happen when this node has news of its own', async () => {
+    // **The trigger, found by reading rather than guessing.** In the apply
+    // path, `_currentRef` is set to the post-restore ref unconditionally —
+    // but `_lastSentContentKey` is only set when the node has NO news of its
+    // own. Hold one file the incoming tree lacks and that branch is skipped,
+    // so the echo suppression is looking at a stale content key. The watcher
+    // then re-scans the folder it has just been given, derives the very ref
+    // `_currentRef` already names, and pushes it — with itself as parent.
+    //
+    // That is the shape the lab produced 5 times in 38 pushes, and every peer
+    // not already in that state refused its deletions.
+    const db = await makeDb();
+    const bs = new BsMem();
+    const adapter = new FsDbAdapter(db, 'fsTree');
+
+    // A peer's tree, holding a file this agent does not have.
+    const sourceDir = join(process.cwd(), 'test-temp-self-parent-news-src');
+    await rm(sourceDir, { recursive: true, force: true });
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(join(sourceDir, 'from-peer.txt'), 'peer');
+    const peerRef = await adapter.storeFsTree(
+      await new FsAgent(sourceDir, bs).extract(),
+    );
+
+    // ...and a file of OUR OWN that the peer's tree does not know about. This
+    // is what makes `hasNewsOfOurOwn` true.
+    await writeFile(join(dir, 'ours.txt'), 'ours');
+
+    const agent = new FsAgent(dir, bs, {
+      timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
+    });
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat('/fsTree+'), socket, {
+      causalOrdering: true,
+      includeClientIdentity: true,
+    });
+
+    const sent: Array<{ r: string; p?: string[] }> = [];
+    socket.on(connector.events.ref, (payload: { r: string; p?: string[] }) => {
+      sent.push(payload);
+    });
+
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree', {
+      cleanTarget: true,
+    });
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
+    await new Promise((r) => setTimeout(r, 900));
+
+    const selfParented = sent.filter((one) => one.p?.includes(one.r));
+    expect(
+      selfParented,
+      `self-parented pushes: ${JSON.stringify(selfParented)}`,
+    ).toEqual([]);
+
+    stopFrom();
+    stopTo();
+    agent.scanner.stopWatch();
+    await rm(sourceDir, { recursive: true, force: true });
+  });
+
   it('never happens: the state it would announce is the one it just adopted', async () => {
     const db = await makeDb();
     const bs = new BsMem();

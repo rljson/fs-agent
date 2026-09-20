@@ -1960,7 +1960,35 @@ export class FsAgent {
 
             const dbAdapter = new FsDbAdapter(db, treeKey);
             // Ancestry: this local edit descends from the current head ref.
-            const parentRef = this._currentRef;
+            //
+            // **Unless the head IS what this push is about to announce.** The
+            // apply path sets `_currentRef` to the post-restore ref whether or
+            // not this node had news of its own, and only records the content
+            // key when it had none. Holding one file the incoming tree lacked
+            // therefore leaves the echo check looking at a stale key: the
+            // watcher re-scans the folder it was just given, derives the ref
+            // `_currentRef` already names, and announces it — declaring itself
+            // as its own parent.
+            //
+            // A receiver prunes only for a sender that names a state the
+            // RECEIVER is in, and no receiver is ever in a state named by the
+            // ref being announced. So every deletion such a push carried was
+            // refused by everyone it reached. Measured on four machines: 5 of
+            // 38 pushes in one run, with the peers saying so —
+            // `descends from P5pEmrvZ, not from a state this node is in`.
+            //
+            // The honest parent in that case is the state it actually built
+            // on: the ref it last applied. That is a claim peers can check,
+            // and the ones sitting in it can act on.
+            //
+            // `tree.rootHash` is that ref: a tree's hash is its content, which
+            // is what the store derives too — the startup path already
+            // compares the two this way.
+            const head = this._currentRef;
+            const parentRef =
+              head !== undefined && head === tree.rootHash
+                ? (this._lastAppliedRef ?? head)
+                : head;
             const previous = await this._ancestryPrevious(
               db,
               treeKey,
