@@ -155,6 +155,58 @@ describe.each([
   // pass unnoticed.
   const contest = merge ? it : it.fails;
 
+  it('lets one writer\'s second edit win, which is not a conflict at all', async () => {
+    // **Not a contest.** One node writes, everybody converges, the SAME node
+    // writes again. Nothing else touched the file, so the second version must
+    // reach every peer — there is no disagreement to resolve.
+    //
+    // The lab's `content-variety` recipe does exactly this (`shrink.txt`:
+    // "long original content here", converge, then "tiny") and reported, with
+    // the merge enabled on the sandbox route:
+    //
+    //     file "shrink.txt" content mismatch on NB-21624
+    //     [NB-21624=other-content, NB-2505=other-content, NB-2744=other-content]
+    //
+    // Three peers agreeing with each other on the version the writer had
+    // already replaced.
+    //
+    // **It does not reproduce here**, with or without the merge — so whatever
+    // the lab hit needs more than two sequential writes. The recipe writes
+    // five files first, one of them 200 KB, and the second edit lands while
+    // that is still moving. This test stays as the invariant it asserts: a
+    // lone writer's second edit must reach every peer, because nothing
+    // competed for it. If that ever stops being true in THIS shape, it is a
+    // much simpler bug than the one on the lab.
+    const writer = nodes[0]!;
+
+    await writeFile(join(writer.folder, 'shared.txt'), 'long original content');
+    for (let i = 0; i < 100; i += 1) {
+      const seen = await held();
+      if (seen.every((one) => one === 'long original content')) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(await held()).toEqual([
+      'long original content',
+      'long original content',
+      'long original content',
+    ]);
+
+    // The second edit, by the same writer, with nobody competing.
+    await writeFile(join(writer.folder, 'shared.txt'), 'tiny');
+
+    let seen = await held();
+    for (let i = 0; i < 100 && !seen.every((one) => one === 'tiny'); i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      seen = await held();
+    }
+
+    expect(seen, `peers did not take the writer's second edit`).toEqual([
+      'tiny',
+      'tiny',
+      'tiny',
+    ]);
+  }, 60_000);
+
   contest('converges on one version, whichever wins', async () => {
     // Seed, and let every node agree before the contest starts. Without this
     // the test measures the first propagation rather than the conflict.
