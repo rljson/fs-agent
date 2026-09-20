@@ -274,6 +274,48 @@ describe('Advanced Sync Tests', () => {
       }
     });
 
+    it(
+      'keeps BOTH files when two clients write at the same instant',
+      { timeout: 60_000 },
+      async () => {
+        // The one case nothing covered. The existing "concurrent writes" test
+        // is sequential on purpose — "Sequential to avoid sync contention" —
+        // so simultaneity, which is the whole risk, was never exercised.
+        //
+        // Two clients write DIFFERENT files against the same parent state at
+        // the same instant. Each push therefore describes a folder the other's
+        // file is not in, and whichever lands second can prune it. On the lab
+        // that is exactly what happens: written 30 ms apart, and
+        // `concur-b.txt` ends up missing on all four nodes — including the one
+        // that wrote it.
+        const folderA = join(baseDir, 'sim-a');
+        const folderB = join(baseDir, 'sim-b');
+        await mkdir(folderA, { recursive: true });
+        await mkdir(folderB, { recursive: true });
+        await writeFile(join(folderA, 'seed.txt'), 'seed');
+        await writeFile(join(folderB, 'seed.txt'), 'seed');
+
+        const setup = await createMultiClientSetup([folderA, folderB]);
+        const { stopAll } = await startAllSync(setup);
+
+        try {
+          await Promise.all([
+            writeFile(join(folderA, 'sim-a.txt'), 'from-A'),
+            writeFile(join(folderB, 'sim-b.txt'), 'from-B'),
+          ]);
+
+          // Both files, on both nodes. Neither write may erase the other.
+          await waitForFile(join(folderB, 'sim-a.txt'), 'from-A');
+          await waitForFile(join(folderA, 'sim-b.txt'), 'from-B');
+          await waitForFile(join(folderA, 'sim-a.txt'), 'from-A');
+          await waitForFile(join(folderB, 'sim-b.txt'), 'from-B');
+        } finally {
+          stopAll();
+          await setup.tearDown();
+        }
+      },
+    );
+
     it('should propagate files from all three clients', async () => {
       const folderA = join(baseDir, 'a');
       const folderB = join(baseDir, 'b');
