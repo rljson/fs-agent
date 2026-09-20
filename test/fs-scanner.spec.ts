@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
 
-import { FsScanner } from '../src/fs-scanner.ts';
+import { FsScanner, STUCK_PAUSE_MS } from '../src/fs-scanner.ts';
 
 
 describe('FsScanner', () => {
@@ -637,6 +637,106 @@ describe('FsScanner', () => {
         }
       )._notifyChange({ type: 'modified', path: 'y.txt' });
       expect(changes).toEqual([]);
+    });
+
+    it('remembers a change it swallowed, so the resume rescans for it', async () => {
+      // `_handleFileChange` records `_missedChangesDuringPause` before it
+      // bails; `_notifyChange` dropped the change and recorded nothing. A
+      // local write whose processing STRADDLES the start of a pause therefore
+      // took the second gate, and `resumeWatch()` — which rescans only when
+      // something was missed — saw nothing to rescan for. The write then
+      // waited on the safety rescan, which is itself swallowed until the pause
+      // looks stuck: the node's own change went unreported for as long as
+      // inbound traffic kept re-pausing it.
+      //
+      // Dropping is right. Forgetting is not.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+
+      scanner.pauseWatch();
+      await writeFile(join(testDir, 'straddle.txt'), 's');
+      await (
+        scanner as unknown as {
+          _notifyChange: (c: { type: string; path: string }) => Promise<void>;
+        }
+      )._notifyChange({ type: 'modified', path: 'straddle.txt' });
+      expect(changes).toEqual([]);
+
+      scanner.resumeWatch();
+      await vi.waitFor(() => expect(changes).toEqual(['modified']));
+    });
+
+    it('recovers from SHORT pauses without waiting for one to look stuck', async () => {
+      // Why a lost change could go unreported for minutes rather than the ~20s
+      // the safety rescan suggests.
+      //
+      // The rescan runs every 5s and is swallowed by a pause unless that pause
+      // has lasted 15s. `_pausedAt` is cleared on every resume, so the 15s
+      // clock restarts with each new pause. A node whose peers apply changes
+      // to it more often than every 5s is therefore paused each time a rescan
+      // fires, while no single pause ever lasts long enough to look stuck —
+      // every rescan is dropped, and the stuck threshold is never reached.
+      // The node stays silent about its own write for as long as the traffic
+      // keeps up, which is what turned a 3s recipe into a 121s timeout that
+      // converged once the lab went quiet.
+      //
+      // Remembering the drop ends that: the next resume rescans, whatever the
+      // pause was worth.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+
+      // No write: the real watcher would set the missed flag through the FIRST
+      // gate and this would pass either way. The drop below must be the only
+      // thing that can make the resume rescan.
+      const notify = (
+        scanner as unknown as {
+          _notifyChange: (c: { type: string; path: string }) => Promise<void>;
+        }
+      )._notifyChange.bind(scanner);
+
+      const startedAt = Date.now();
+      scanner.pauseWatch();
+      await notify({ type: 'safety-rescan', path: '.' });
+      expect(changes).toEqual([]);
+      expect(
+        (scanner as unknown as { _pauseLooksStuck: (c: unknown) => boolean })
+          ._pauseLooksStuck({ type: 'safety-rescan' }),
+      ).toBe(false);
+
+      scanner.resumeWatch();
+      await vi.waitFor(() => expect(changes).toEqual(['modified']));
+      expect(Date.now() - startedAt).toBeLessThan(STUCK_PAUSE_MS);
+    });
+
+    it('a second pause does not erase what the first one missed', async () => {
+      // `pauseWatch()` clears the missed-change flag unconditionally, and the
+      // flag is only ever set while already paused. So the clear cannot
+      // protect anything — but it can destroy: two inbound applies that
+      // overlap pause twice with no resume between them, and the second call
+      // wipes the record the first one made. The resume then rescans for
+      // nothing, which is the same silence this whole fix exists to end, under
+      // exactly the overlapping traffic that provokes it.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+
+      const notify = (
+        scanner as unknown as {
+          _notifyChange: (c: { type: string; path: string }) => Promise<void>;
+        }
+      )._notifyChange.bind(scanner);
+
+      scanner.pauseWatch();
+      await notify({ type: 'safety-rescan', path: '.' });
+      scanner.pauseWatch(); // a second apply starts before the first resumes
+      scanner.resumeWatch();
+
+      await vi.waitFor(() => expect(changes).toEqual(['modified']));
     });
 
     it('re-pausing replaces the pending auto-release', async () => {
