@@ -712,6 +712,33 @@ describe('FsScanner', () => {
       expect(Date.now() - startedAt).toBeLessThan(STUCK_PAUSE_MS);
     });
 
+    it('a second pause does not erase what the first one missed', async () => {
+      // `pauseWatch()` clears the missed-change flag unconditionally, and the
+      // flag is only ever set while already paused. So the clear cannot
+      // protect anything — but it can destroy: two inbound applies that
+      // overlap pause twice with no resume between them, and the second call
+      // wipes the record the first one made. The resume then rescans for
+      // nothing, which is the same silence this whole fix exists to end, under
+      // exactly the overlapping traffic that provokes it.
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => changes.push(c.type));
+
+      const notify = (
+        scanner as unknown as {
+          _notifyChange: (c: { type: string; path: string }) => Promise<void>;
+        }
+      )._notifyChange.bind(scanner);
+
+      scanner.pauseWatch();
+      await notify({ type: 'safety-rescan', path: '.' });
+      scanner.pauseWatch(); // a second apply starts before the first resumes
+      scanner.resumeWatch();
+
+      await vi.waitFor(() => expect(changes).toEqual(['modified']));
+    });
+
     it('re-pausing replaces the pending auto-release', async () => {
       vi.useFakeTimers();
       try {

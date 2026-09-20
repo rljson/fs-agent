@@ -964,9 +964,16 @@ export class FsScanner {
    *   Omit to pause until an explicit `resumeWatch()`.
    */
   pauseWatch(autoResumeMs?: number): void {
-    if (!this._paused) this._pausedAt = Date.now();
+    // Both of these belong to the START of a pause, not to every call. The
+    // missed-change flag is only ever set while already paused, so clearing it
+    // on a re-pause cannot protect anything and can destroy: two inbound
+    // applies that overlap pause twice with no resume between them, and the
+    // second call would wipe the record the first one made.
+    if (!this._paused) {
+      this._pausedAt = Date.now();
+      this._missedChangesDuringPause = false;
+    }
     this._paused = true;
-    this._missedChangesDuringPause = false;
     if (this._autoResumeTimer) {
       clearTimeout(this._autoResumeTimer);
       this._autoResumeTimer = null;
