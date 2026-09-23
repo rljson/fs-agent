@@ -18,13 +18,13 @@ describe('FsScanner', () => {
 
   beforeEach(async () => {
     // Create test directory structure
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
   });
 
   afterEach(async () => {
     // Clean up
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   describe('scan', () => {
@@ -321,41 +321,33 @@ describe('FsScanner', () => {
 
   describe('symlink handling', () => {
     it('should skip symlinks when followSymlinks is false', async () => {
-      // Create a file and a symlink to it
-      await writeFile(join(testDir, 'target.txt'), 'target content');
+      // A directory and a link to it. On Windows the link is a junction: a
+      // symlink needs admin rights or developer mode there, a junction does
+      // not, and the scanner sees both as a symbolic link.
+      //
+      // This used to catch every error and log "skipped" — which also caught
+      // its own failing assertions, so it could not fail anywhere, and on
+      // Windows it never ran at all.
+      await mkdir(join(testDir, 'target'), { recursive: true });
+      await writeFile(join(testDir, 'target', 'inside.txt'), 'target content');
+      const { symlink } = await import('fs/promises');
+      await symlink(
+        join(testDir, 'target'),
+        join(testDir, 'link'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
 
-      try {
-        // Create a symbolic link (may fail on Windows without proper permissions)
-        const { symlink } = await import('fs/promises');
-        await symlink(
-          join(testDir, 'target.txt'),
-          join(testDir, 'link.txt'),
-          'file',
-        );
+      const scanner = new FsScanner(testDir, { followSymlinks: false });
+      const tree = await scanner.scan();
+      const names = Array.from(tree.trees.values()).map(
+        (t) => (t.meta as any)?.relativePath,
+      );
 
-        const scanner = new FsScanner(testDir, { followSymlinks: false });
-        const tree = await scanner.scan();
-
-        // Check that the symlink is not in the tree
-        const allTrees = Array.from(tree.trees.values());
-        const hasSymlink = allTrees.some((t) => {
-          const meta = t.meta as any;
-          return meta?.name === 'link.txt';
-        });
-
-        // The symlink should be skipped
-        expect(hasSymlink).toBe(false);
-
-        // But the target file should be there
-        const hasTarget = allTrees.some((t) => {
-          const meta = t.meta as any;
-          return meta?.name === 'target.txt';
-        });
-        expect(hasTarget).toBe(true);
-      } catch {
-        // Skip test if symlinks are not supported
-        console.log('Symlink test skipped - not supported on this platform');
-      }
+      // The link is skipped, and nothing is reached through it…
+      expect(names).not.toContain('link');
+      expect(names).not.toContain('link/inside.txt');
+      // …but the real directory is there.
+      expect(names).toContain('target/inside.txt');
     });
   });
 
@@ -520,8 +512,18 @@ describe('FsScanner', () => {
       // Delete the file
       await rm(join(testDir, 'delete-me.txt'));
 
-      // Wait for change detection
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Wait for change detection — polled, not a fixed sleep. On Windows the
+      // scanner stats a vanished path four times (80/160/240 ms apart) before
+      // it believes a deletion, because antivirus and the indexer briefly
+      // report ENOENT for files that are there; a fixed 500 ms ended inside
+      // that window and the test failed on every Windows run.
+      for (
+        let i = 0;
+        i < 30 && !changes.some((c) => c.type === 'deleted');
+        i++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
 
       scanner.stopWatch();
 
@@ -938,7 +940,7 @@ describe('FsScanner', () => {
     it('survives a scan failure (root removed) without throwing', async () => {
       const scanner = new FsScanner(testDir);
       await scanner.scan();
-      await rm(testDir, { recursive: true, force: true });
+      await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
       await expect(runRescan(scanner)).resolves.toBeUndefined();
     });
 

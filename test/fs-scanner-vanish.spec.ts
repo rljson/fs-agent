@@ -63,7 +63,7 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
 
   beforeEach(async () => {
     failures.length = 0;
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -71,7 +71,7 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
   afterEach(async () => {
     failures.length = 0;
     warnSpy.mockRestore();
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   const warned = (needle: string): boolean =>
@@ -225,7 +225,14 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
   // walks straight into it.
   it('skips a dangling symlink when following symlinks', async () => {
     await writeFile(join(testDir, 'stays.txt'), 'stays');
-    await symlink(join(testDir, 'no-such-target.txt'), join(testDir, 'dangling.txt'));
+    // A junction on Windows: a file symlink needs admin rights or developer
+    // mode there (EPERM otherwise), a junction does not — and it dangles just
+    // the same when its target does not exist.
+    await symlink(
+      join(testDir, 'no-such-target.txt'),
+      join(testDir, 'dangling.txt'),
+      process.platform === 'win32' ? 'junction' : undefined,
+    );
 
     const tree = await new FsScanner(testDir, {
       bs: new BsMem(),
