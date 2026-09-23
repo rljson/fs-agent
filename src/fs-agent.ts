@@ -20,6 +20,11 @@ import {
 } from 'fs/promises';
 import { dirname, join } from 'path';
 
+import {
+  AntiEntropyOptions,
+  AntiEntropyStatus,
+  FsAntiEntropy,
+} from './fs-anti-entropy.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
   ConflictResolverDeps,
@@ -29,7 +34,7 @@ import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
 import type { Connector, Db } from '@rljson/db';
-import type { InsertHistoryRow } from '@rljson/rljson';
+import type { ConnectorPayload, InsertHistoryRow } from '@rljson/rljson';
 import type { FsChange, FsNodeMeta } from './fs-scanner.ts';
 
 // .............................................................................
@@ -91,6 +96,14 @@ export interface FsAgentOptions {
    * (the default). See `doc/conflict-resolution-design.md`.
    */
   resolveConflicts?: boolean;
+  /**
+   * Repair a divergence from the hub that no message is going to fix — a
+   * push the hub never received, a forward this node never received, an
+   * apply that gave up. Driven by the hub's heartbeat
+   * (`syncConfig.bootstrapHeartbeatMs` on the server); without one it never
+   * fires. On by default. See `src/fs-anti-entropy.ts`.
+   */
+  antiEntropy?: AntiEntropyOptions;
 }
 
 /** Restore options */
@@ -393,6 +406,21 @@ export class FsAgent {
   private _lastSentRef?: string;
 
   /**
+   * The ref this agent last pushed as its OWN work.
+   *
+   * Not the same as {@link _lastSentRef}, which an apply also sets when it
+   * leaves the folder equal to — or short of — what it applied. Only a state
+   * this agent authored may be re-announced by the anti-entropy: re-announcing
+   * one it is still catching up to would roll its peers back.
+   */
+  private _lastPushedRef?: string;
+
+  /** Tuning for the anti-entropy, as passed in. */
+  private readonly _antiEntropyOptions?: AntiEntropyOptions;
+  /** The running anti-entropy, while {@link syncFromDb} is active. */
+  private _antiEntropy?: FsAntiEntropy;
+
+  /**
    * The incoming ref most recently applied. Retired from the connector's dedup
    * sets when the next one supersedes it, so a peer returning the tree to that
    * state can still reach this agent.
@@ -507,6 +535,7 @@ export class FsAgent {
     this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
+    this._antiEntropyOptions = options.antiEntropy;
     this._scanner = new FsScanner(rootPath, {
       ...options,
       ignore: [
@@ -566,6 +595,17 @@ export class FsAgent {
    */
   get timeouts(): Required<TimeoutConfig> {
     return this._timeouts;
+  }
+
+  /**
+   * Whether this node and the hub agree, and what the anti-entropy has done
+   * about it when they did not. `null` until {@link syncFromDb} runs.
+   *
+   * A divergence that lasts is the one thing a lost message leaves behind, and
+   * until now nothing reported it: this is what a diagnostics view should show.
+   */
+  get antiEntropyStatus(): AntiEntropyStatus | null {
+    return this._antiEntropy?.status ?? null;
   }
 
   /**
@@ -1891,6 +1931,7 @@ export class FsAgent {
     /* v8 ignore next -- @preserve */
     if (initialRef && !isSilentJoiner) {
       this._lastSentRef = initialRef;
+      this._lastPushedRef = initialRef;
       this._currentRef = initialRef;
       this._persistCurrentRef(initialRef);
       this._lastSentContentKey = this._contentKeyFromTree(initialTree);
@@ -2045,6 +2086,7 @@ export class FsAgent {
 
             // Track the ref and content we're sending
             this._lastSentRef = ref;
+            this._lastPushedRef = ref;
             this._lastSentContentKey = contentKey;
             this._rememberAnnounced(tree);
 
@@ -2538,6 +2580,7 @@ export class FsAgent {
         // no-op rather than re-broadcasting the merge. The merge revision D is
         // also the new ancestry head.
         this._lastSentRef = ref;
+        this._lastPushedRef = ref;
         this._lastSentContentKey = this._contentKeyFromTree(tree);
         this._rememberAnnounced(tree);
         this._currentRef = ref;
@@ -2596,6 +2639,12 @@ export class FsAgent {
     let pendingPredecessorRefs: string[] | undefined;
     /** Whether the pending ref was the newest thing its sender had said. */
     let pendingIsNewest = true;
+    /**
+     * Whether a `processRef` is running, including the pauses between its
+     * retries — `_remoteApplyInFlight` is clear during those, and a repair
+     * started then would run a second apply alongside the first.
+     */
+    let processing = false;
 
     const processRef = async (
       treeRef: string,
@@ -3274,7 +3323,12 @@ export class FsAgent {
         pendingRef = null;
         /* v8 ignore if -- @preserve a scheduled timer always has a pending ref */
         if (r) {
-          await processRef(r, ra, pr, newest);
+          processing = true;
+          try {
+            await processRef(r, ra, pr, newest);
+          } finally {
+            processing = false;
+          }
         }
       }, delayMs);
     };
@@ -3311,9 +3365,71 @@ export class FsAgent {
     // race the sync loop; hubs leave `resolveConflicts` off and stay dumb relays.
     connector.listen(syncCallback);
 
+    // Anti-entropy: compare every hub announcement with our own state, and
+    // repair a divergence that no message is going to fix.
+    //
+    // Read off the socket rather than through `listen`, on purpose. The
+    // connector drops a heartbeat it has already delivered, and delivers an
+    // invalidated one as "not newest" — both correct for deciding whether an
+    // announcement is NEWS, and both exactly what hides a lost message: the
+    // repeat that would show the hub and this node disagree never arrives.
+    // Nothing is applied from here directly; every repair goes through the
+    // same `processRef` / `_sendRef` as an ordinary message.
+    const antiEntropy = new FsAntiEntropy(this._antiEntropyOptions, {
+      view: () => ({
+        origin: connector.origin,
+        currentRef: this._currentRef,
+        lastAppliedRef: this._lastAppliedRef,
+        lastPushedRef: this._lastPushedRef,
+      }),
+      // A pending ref that IS the announced state does not count. The
+      // connector hears the same heartbeat first, and after a failed apply it
+      // queues every repeat of it — as "not newest", to be ignored. Counting
+      // that as busy would block the repair on exactly the node that needs it,
+      // on every heartbeat, forever. The repair takes over that pending slot.
+      busy: (hubRef) =>
+        (pendingRef !== null && pendingRef !== hubRef) ||
+        processing ||
+        this._remoteApplyInFlight,
+      repair: (action, hubRef, hubPredecessors, attempt) => {
+        if (action === 'push') {
+          // The hub missed our push. Re-announce the state we are in, as a
+          // descendant of the one the hub holds — which it is: the decision
+          // only says `push` when the hub holds an earlier push of ours or
+          // the state our push was made from.
+          const ref = this._currentRef as string;
+          this._lastSentRef = ref;
+          this._sendRef(connector, ref, [hubRef]).catch((err) =>
+            this._writeSyncError('antiEntropy/push', err),
+          );
+          return;
+        }
+        // `merge` first tries the ordinary rules, ancestry included. Only if
+        // that made no progress does it drop the ancestry, which makes the
+        // apply additive: nothing is pruned, both sides end up with the union,
+        // and the next round pushes it. Losing a deletion that way is
+        // recoverable; guessing which side deleted is not.
+        const predecessors =
+          action === 'pull' || attempt === 1 ? hubPredecessors : [];
+        scheduleProcess(hubRef, 0, 0, predecessors, true);
+      },
+    });
+    this._antiEntropy = antiEntropy;
+    const onHubAnnouncement = (payload: ConnectorPayload) => {
+      if (typeof payload?.r !== 'string') return;
+      antiEntropy.observe({
+        ref: payload.r,
+        origin: payload.o,
+        predecessors: Array.isArray(payload.p) ? payload.p : [],
+      });
+    };
+    const bootstrapEvent = connector.events.bootstrap;
+    connector.socket.on(bootstrapEvent, onHubAnnouncement);
+
     // Return cleanup function
     return () => {
       if (fromDbTimer) clearTimeout(fromDbTimer);
+      connector.socket.off(bootstrapEvent, onHubAnnouncement);
       connector.tearDown();
     };
   }

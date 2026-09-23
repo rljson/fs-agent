@@ -12,6 +12,18 @@ export {
   type TimeoutConfig,
 } from './fs-agent.ts';
 export {
+  antiEntropyDecision,
+  DEFAULT_ANTI_ENTROPY,
+  FsAntiEntropy,
+  type AntiEntropyAction,
+  type AntiEntropyDecision,
+  type AntiEntropyDeps,
+  type AntiEntropyOptions,
+  type AntiEntropyStatus,
+  type AntiEntropyView,
+  type HubAnnouncement,
+} from './fs-anti-entropy.ts';
+export {
   FsBlobAdapter,
   type BlobToFileOptions,
   type FileBlobMeta,
