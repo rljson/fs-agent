@@ -761,6 +761,48 @@ retried up to `processRefRetries` times with increasing delay
 (`attempt * processRefRetryDelayMs`). This prevents a single transient
 timeout from permanently breaking the sync pipeline.
 
+## Anti-Entropy — healing a lost message
+
+Every change reaches a peer as exactly one message. If that message is lost —
+a push the hub never received, a forward a peer never received, an apply that
+gave up — nothing would ever send it again, and two machines would sit on two
+states for good. The anti-entropy notices and repairs that, with nobody doing
+anything.
+
+It is driven by the hub's heartbeat, so the server must have one:
+
+```typescript
+const server = new Server(route, io, bs, {
+  syncConfig: { causalOrdering: true, includeClientIdentity: true,
+                bootstrapHeartbeatMs: 3_000 },
+});
+
+const agent = new FsAgent('./my-project', bs, {
+  antiEntropy: {
+    enabled: true,        // default: true
+    graceMs: 10_000,      // a divergence must last this long (default: 10s)
+    maxBackoffMs: 300_000 // cap for repeated repairs of one divergence (default: 5 min)
+  },
+});
+```
+
+Each heartbeat carries the hub's tree ref — a content hash of the whole
+folder, so comparing it with our own is the per-folder checksum comparison —
+plus who produced it and what it descends from. A divergence that outlives
+`graceMs` while nothing is applying is repaired:
+
+| Hub state | Repair |
+|---|---|
+| an earlier push of ours, or what our push was made from | **push** — re-announce our state |
+| made from the state we are in | **pull** — apply it, deletions included |
+| neither can be shown | **merge** — apply it; if that makes no progress, additively |
+
+Every repair goes through the ordinary apply and push paths, with their
+ancestry and mass-delete rules; the anti-entropy never deletes anything
+itself. Without a heartbeat it never fires. `agent.antiEntropyStatus`
+reports whether this node and the hub agree, since when they have not, and
+the last repair — a lasting divergence is the one trace a lost message leaves.
+
 ## Bounce-Back Prevention
 
 Bidirectional sync can cause infinite loops when both clients detect each

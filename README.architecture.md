@@ -477,6 +477,59 @@ Additionally, all sync callbacks are **debounced** (default 300ms) to coalesce
 rapid filesystem events (e.g. multi-file saves, editor autosave) into a single
 sync operation.
 
+## Anti-Entropy (`src/fs-anti-entropy.ts`)
+
+Nothing in the message path ever asks whether a message arrived. A lost push is
+not resent until the folder changes again; a lost forward is repeated only by
+the hub's heartbeat, which the connector drops as a duplicate or delivers as
+"not newest". The anti-entropy closes that gap.
+
+**Trigger.** `syncFromDb` subscribes to the `${route}:bootstrap` event on the
+connector's socket directly — not through `listen`, whose dedup is exactly
+what hides the repeat that would show a disagreement. Each announcement
+(`r`, `o`, `p`) goes to `FsAntiEntropy.observe()`.
+
+**Decision** (`antiEntropyDecision`, pure):
+
+1. `r === _currentRef` → in sync.
+2. `_currentRef === _lastPushedRef` and (`o` is our connector's origin, or
+   `r === _lastAppliedRef`) → **push**: the hub missed our own push.
+3. `p` contains `_currentRef` or `_lastAppliedRef` → **pull**: we missed the
+   hub's state.
+4. otherwise → **merge**.
+
+Rule 2 precedes rule 3 because of a collision the hash cannot resolve:
+"B deleted the file A created" (hub `S0` made from `S1`, A at `S1`) and "A
+deleted its own file and that push was lost" (hub `S1` made from `S0`, A at the
+re-derived `S0`) are identical in refs and ancestry. Only the origin of the
+hub's state tells them apart, and each wrong answer puts a deleted file back.
+
+`_lastPushedRef` is set only where the agent authors a state (initial push,
+debounced push, merge revision) — never by an apply, which can leave the folder
+short of what it applied. Re-announcing such a state would roll peers back.
+
+**Repair**, only once the same divergence (`hubRef|currentRef`) has lasted
+`graceMs` and nothing is pending, processing or applying:
+
+- push → `_sendRef(connector, _currentRef, [hubRef])`
+- pull → `scheduleProcess(hubRef, …, p)` — the ordinary `processRef`
+- merge → the same with `p` on the first attempt, then with `[]`, which makes
+  the apply additive (union), after which the next round pushes it
+
+Repeated repairs of one divergence back off exponentially up to
+`maxBackoffMs`. `processing` covers the pauses between `processRef` retries,
+where `_remoteApplyInFlight` is clear.
+
+**Why not a copy of the mongo anti-entropy.** That one is triggered by noticing
+a PEER's root, so a node that receives nothing never starts it, and it applies
+a peer tombstone without a recency check. This one is triggered by the hub's
+own announcement and never applies anything outside the ordinary rules.
+
+**Tested by** `test/client-server/heals-after-forced-divergence.spec.ts`: three
+clients, a real server with heartbeat, one ref message dropped on purpose per
+case — including both halves of the collision above — plus a control run with
+the repair off that must stay divergent.
+
 ## Known Constraints
 
 ### macOS Finder Paste and Rename

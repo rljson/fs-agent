@@ -4,6 +4,21 @@
 
 ### Added
 
+- **Anti-entropy: a lost message no longer leaves the network divergent**
+  (ONE-446). Every hub heartbeat is compared with the agent's own state (the
+  tree ref is the folder's checksum); a divergence that outlives a grace period
+  while nothing is applying is repaired — **push** when the hub holds an
+  earlier push of ours or the state our push was made from, **pull** when the
+  hub's state descends from ours, **merge** (then additively) when neither can
+  be shown. Every repair goes through the ordinary apply / push paths and their
+  guards. On by default (`antiEntropy: { enabled, graceMs, maxBackoffMs }`);
+  needs a server heartbeat (`bootstrapHeartbeatMs`) and, for pull/merge
+  ancestry, `@rljson/server` with `p` on its announcements.
+  `agent.antiEntropyStatus` reports divergence and repairs.
+  Covered by `test/client-server/heals-after-forced-divergence.spec.ts`: one
+  ref message dropped on purpose per case, including a node deleting its own
+  file and a peer deleting it, plus a control run that must stay divergent.
+
 - **Persistent scan cache (`scanCachePath`)**: `FsScanOptions` / `FsAgentOptions`
   gain an opt-in `scanCachePath`. When set, a file whose `mtime` **and** `size`
   are unchanged since the last scan is no longer re-read or re-hashed — its
