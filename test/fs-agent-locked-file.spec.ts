@@ -27,19 +27,29 @@ let writeErrorCode = 'EPERM';
 
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
+  const isLocked = (path: unknown) =>
+    [...lockedPaths].some((p) => String(path).endsWith(p));
+  const lockError = () => {
+    const err = new Error(`${writeErrorCode}: locked`) as NodeJS.ErrnoException;
+    err.code = writeErrorCode;
+    return err;
+  };
   return {
     ...actual,
     writeFile: (path: unknown, ...rest: never[]) => {
-      const target = String(path);
-      if ([...lockedPaths].some((p) => target.endsWith(p))) {
-        const err = new Error(`${writeErrorCode}: locked`) as NodeJS.ErrnoException;
-        err.code = writeErrorCode;
-        return Promise.reject(err);
-      }
+      if (isLocked(path)) return Promise.reject(lockError());
       return (actual.writeFile as (...a: never[]) => Promise<void>)(
         path as never,
         ...rest,
       );
+    },
+    // On Windows the agent writes a temp file and RENAMES it over the target
+    // (`_atomicWriteFile`), so the lock is met by the rename, not the write —
+    // exactly where a real open .dbf refuses it. Without this the locked file
+    // was never locked on Windows and every case here failed.
+    rename: (from: unknown, to: unknown) => {
+      if (isLocked(to)) return Promise.reject(lockError());
+      return actual.rename(from as string, to as string);
     },
   };
 });
@@ -75,7 +85,7 @@ describe('FsAgent — a file held open by another process', () => {
     lockedPaths.clear();
     writeErrorCode = 'EPERM';
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
@@ -83,7 +93,7 @@ describe('FsAgent — a file held open by another process', () => {
   afterEach(async () => {
     lockedPaths.clear();
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 
