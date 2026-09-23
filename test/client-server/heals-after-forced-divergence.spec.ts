@@ -103,6 +103,29 @@ describe.each([
 
   const all = (value: string) => nodes.map(() => value);
 
+  /**
+   * Polls until every node holds `expected` at `path` AND has settled on the
+   * hub's state — the precondition for dropping anything.
+   *
+   * The file being on disk is not enough. A node can hold it while its apply
+   * is still being retried (on Windows a scan of a file that was just written
+   * fails with EPERM and is tried again), and a deletion made in that window
+   * is undone by the retry. That is a separate defect of the apply path; a
+   * test of the anti-entropy must not start inside it.
+   */
+  const agreeOn = async (path: string, expected: string) => {
+    const seen = await until(path, expected);
+    const deadline = Date.now() + HEAL_BUDGET_MS;
+    const settled = () =>
+      nodes.every((n) => {
+        const s = n.agent.antiEntropyStatus;
+        return !!s && !s.diverged && s.hubRef === s.localRef;
+      });
+    while (!settled() && Date.now() < deadline) await sleep(50);
+    expect(settled(), 'nodes did not settle on the hub state').toBe(true);
+    return seen;
+  };
+
   beforeEach(async () => {
     await rm(root, { recursive: true, force: true, maxRetries: 5 });
     const treeCfg = createTreesTableCfg(TREE);
@@ -176,7 +199,7 @@ describe.each([
     // Agree on a starting point before anything is dropped, so each case
     // measures the loss and not the first propagation.
     await writeFile(join(node('A').folder, 'seed.txt'), 'seed');
-    expect(await until('seed.txt', 'seed')).toEqual(all('seed'));
+    expect(await agreeOn('seed.txt', 'seed')).toEqual(all('seed'));
   }, 60_000);
 
   afterEach(async () => {
@@ -207,7 +230,7 @@ describe.each([
     // pulling it would put the deleted file back on A itself.
     it('delivers a deletion whose push the hub never received', async () => {
       await writeFile(join(node('A').folder, 'doomed.txt'), 'x');
-      expect(await until('doomed.txt', 'x')).toEqual(all('x'));
+      expect(await agreeOn('doomed.txt', 'x')).toEqual(all('x'));
 
       node('A').dropPushes = 1;
       await unlink(join(node('A').folder, 'doomed.txt'));
@@ -222,7 +245,7 @@ describe.each([
 
     it('delivers a deletion a peer never received', async () => {
       await writeFile(join(node('A').folder, 'doomed.txt'), 'x');
-      expect(await until('doomed.txt', 'x')).toEqual(all('x'));
+      expect(await agreeOn('doomed.txt', 'x')).toEqual(all('x'));
 
       node('B').dropForwards = 1;
       await unlink(join(node('A').folder, 'doomed.txt'));
@@ -237,7 +260,7 @@ describe.each([
     // one a repair by hash alone would get backwards.
     it('does not undo a peer deletion it missed', async () => {
       await writeFile(join(node('A').folder, 'doomed.txt'), 'x');
-      expect(await until('doomed.txt', 'x')).toEqual(all('x'));
+      expect(await agreeOn('doomed.txt', 'x')).toEqual(all('x'));
 
       node('A').dropForwards = 1;
       await unlink(join(node('B').folder, 'doomed.txt'));

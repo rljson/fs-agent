@@ -74,6 +74,19 @@ describe('antiEntropyDecision', () => {
         ),
       ).toBe('push');
     });
+
+    it('pulls it when the state it returns to is one we once applied', () => {
+      // A adopted S0 (the seed), created a file (S1), and B deleted it —
+      // back to S0, which is also A's last applied state. The ancestry says
+      // S0 was made FROM S1, and that outranks "the hub holds what we
+      // applied". Pushing here put the deleted file back on every node.
+      expect(
+        antiEntropyDecision(
+          { ref: 'S0', origin: 'B', predecessors: ['S1'] },
+          view({ currentRef: 'S1', lastPushedRef: 'S1', lastAppliedRef: 'S0' }),
+        ),
+      ).toBe('pull');
+    });
   });
 
   it('pushes when the hub still holds what we applied before our push', () => {

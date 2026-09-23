@@ -492,11 +492,18 @@ what hides the repeat that would show a disagreement. Each announcement
 **Decision** (`antiEntropyDecision`, pure):
 
 1. `r === _currentRef` → in sync.
-2. `_currentRef === _lastPushedRef` and (`o` is our connector's origin, or
-   `r === _lastAppliedRef`) → **push**: the hub missed our own push.
+2. `_currentRef === _lastPushedRef` and `o` is our connector's origin →
+   **push**: the hub holds an earlier push of ours and missed the later one.
 3. `p` contains `_currentRef` or `_lastAppliedRef` → **pull**: we missed the
    hub's state.
-4. otherwise → **merge**.
+4. `_currentRef === _lastPushedRef` and `r === _lastAppliedRef` → **push**:
+   the hub still holds what our push was made from.
+5. otherwise → **merge**.
+
+Rule 4 comes AFTER the ancestry check: a peer that deletes what we added can
+return the folder to exactly the state we last applied — same hash, but made
+from ours. Measured under load: pushing there put the deleted file back on
+every node.
 
 Rule 2 precedes rule 3 because of a collision the hash cannot resolve:
 "B deleted the file A created" (hub `S0` made from `S1`, A at `S1`) and "A

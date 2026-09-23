@@ -135,16 +135,23 @@ export function antiEntropyDecision(
   if (hub.ref === currentRef) return 'in-sync';
 
   // Only a state this agent AUTHORED may be re-announced (see
-  // `lastPushedRef`). The hub then either holds an earlier push of ours or
-  // the state our push was made from — both mean it missed the push.
-  if (currentRef === lastPushedRef) {
-    if (hub.origin === origin) return 'push';
-    if (hub.ref === lastAppliedRef) return 'push';
-  }
+  // `lastPushedRef`).
+  const authored = currentRef === lastPushedRef;
+
+  // The hub holds an earlier push of OURS: it missed the later one. The
+  // origin is the one fact a returning hash cannot fake, so this goes first.
+  if (authored && hub.origin === origin) return 'push';
 
   // The hub's state was made FROM ours: we are the one behind.
   const statesIAmIn = [currentRef, lastAppliedRef];
   if (predecessors.some((r) => statesIAmIn.includes(r))) return 'pull';
+
+  // The hub still holds the state our push was made from. Only after the
+  // ancestry check: a peer that deletes what we added returns the folder to
+  // exactly that state — the same hash, but made FROM ours, and pushing over
+  // it would put the deleted file back. Measured: under load, a node that had
+  // adopted the seed state re-pushed a peer's deletion away on all three.
+  if (authored && hub.ref === lastAppliedRef) return 'push';
 
   return 'merge';
 }
