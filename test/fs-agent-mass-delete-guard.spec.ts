@@ -27,10 +27,17 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 // mounted, a bootstrap that raced its own first scan — advertises an empty
 // tree, and every other node faithfully deletes everything it has.
 describe('FsAgent — the mass-delete guard', () => {
-  const sourceDir = join(process.cwd(), 'test-temp-guard-source');
-  const targetDir = join(process.cwd(), 'test-temp-guard-target');
+  // Fresh folders per test. A stopped agent can still have an apply queued,
+  // and under load it lands in the NEXT test's freshly filled folder — the
+  // guard then appears to have lost files it never touched (115 of 120).
+  let run = 0;
+  let sourceDir = '';
+  let targetDir = '';
 
   beforeEach(async () => {
+    run++;
+    sourceDir = join(process.cwd(), `test-temp-guard-${run}-source`);
+    targetDir = join(process.cwd(), `test-temp-guard-${run}-target`);
     for (const d of [sourceDir, targetDir]) {
       await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
@@ -58,6 +65,20 @@ describe('FsAgent — the mass-delete guard', () => {
     (await readdir(targetDir)).filter((f) => f !== SYNC_ERROR_FILE);
 
   const POPULATED = MASS_DELETE_MIN_FILES + 20;
+
+  /**
+   * Polls until `condition` holds. A restore of 120 files under a loaded
+   * machine takes longer than the fixed 300–500 ms these tests used to sleep.
+   */
+  const waitFor = async (condition: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 100 && !(await condition()); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+
+  /** Whether a spied console carried a line containing `text`. */
+  const said = (spy: { mock: { calls: unknown[][] } }, text: string) =>
+    spy.mock.calls.filter((c) => String(c[0]).includes(text)).length;
 
   it('refuses an empty incoming tree against a populated folder', async () => {
     const bs = new BsMem();
@@ -226,7 +247,7 @@ describe('FsAgent — the mass-delete guard', () => {
     // has already sent one ref.
     sent.length = 0;
     socket.emit(connector.events.ref, { o: 'remote-peer', r: sparseRef });
-    await new Promise((r) => setTimeout(r, 500));
+    await waitFor(async () => sent.length > 0);
 
     // Refused: nothing DELETED. The two incoming files were still added —
     // the restore is additive and only the prune is refused, which is the
@@ -301,7 +322,7 @@ describe('FsAgent — the mass-delete guard', () => {
 
     sent.length = 0;
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 500));
+    await waitFor(() => said(warnSpy, 're-announcing') > 0);
 
     // Nothing was deleted…
     expect(
@@ -371,12 +392,12 @@ describe('FsAgent — the mass-delete guard', () => {
       ).length;
 
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitFor(() => refusals() >= 1);
     expect(refusals()).toBe(1);
 
     // The very same ref, exactly as an emptied peer re-derives it.
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitFor(() => refusals() >= 2);
     expect(refusals()).toBe(2);
 
     expect(
@@ -419,9 +440,11 @@ describe('FsAgent — the mass-delete guard', () => {
     const stopFirst = await first.syncFromDb(db, connector, treeKey, {
       cleanTarget: true,
     });
+    const peerFiles = async () =>
+      (await targetFiles()).filter((f) => f.startsWith('peer')).length;
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
-    await new Promise((r) => setTimeout(r, 800));
-    expect((await targetFiles()).filter((f) => f.startsWith('peer'))).toHaveLength(4);
+    await waitFor(async () => (await peerFiles()) === 4);
+    expect(await peerFiles()).toBe(4);
     stopFirst();
     first.scanner.stopWatch();
 
@@ -439,8 +462,8 @@ describe('FsAgent — the mass-delete guard', () => {
     // The peer re-advertises exactly what it advertised before. Without the
     // reset this is dropped as already-delivered and the folder stays empty.
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
-    await new Promise((r) => setTimeout(r, 800));
-    expect((await targetFiles()).filter((f) => f.startsWith('peer'))).toHaveLength(4);
+    await waitFor(async () => (await peerFiles()) === 4);
+    expect(await peerFiles()).toBe(4);
 
     stopSecond();
     second.scanner.stopWatch();
@@ -483,9 +506,9 @@ describe('FsAgent — the mass-delete guard', () => {
 
     warnSpy.mockClear();
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => said(errSpy, 'MASS DELETE REFUSED') >= 1);
     socket.emit(connector.events.ref, { o: 'other-peer', r: otherSparseRef });
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => said(errSpy, 'MASS DELETE REFUSED') >= 2);
 
     const answers = warnSpy.mock.calls.filter((c) =>
       String(c[0]).includes('re-announcing'),
@@ -533,7 +556,10 @@ describe('FsAgent — the mass-delete guard', () => {
     });
     warnSpy.mockClear();
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for the refusal itself, so "no answer" means "did not answer" and
+    // not "had not got there yet".
+    await waitFor(() => said(errSpy, 'MASS DELETE REFUSED') >= 1);
+    expect(said(errSpy, 'MASS DELETE REFUSED')).toBeGreaterThan(0);
 
     expect(
       warnSpy.mock.calls.some((c) => String(c[0]).includes('re-announcing')),
