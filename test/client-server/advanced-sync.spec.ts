@@ -195,12 +195,12 @@ describe('Advanced Sync Tests', () => {
   const baseDir = join(process.cwd(), 'test-tmp', 'advanced-sync');
 
   beforeEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    await rm(baseDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(baseDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    await rm(baseDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   // ===========================================================================

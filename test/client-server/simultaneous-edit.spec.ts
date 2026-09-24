@@ -77,7 +77,7 @@ describe.each([
   let nodes: Node[] = [];
 
   beforeEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
     const treeCfg = createTreesTableCfg(TREE);
     const sharedBs = new BsMem();
 
@@ -130,7 +130,7 @@ describe.each([
       for (const stop of node.stops) stop();
       node.agent.scanner.stopWatch();
     }
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   });
 
   /**
