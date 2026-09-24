@@ -484,10 +484,17 @@ not resent until the folder changes again; a lost forward is repeated only by
 the hub's heartbeat, which the connector drops as a duplicate or delivers as
 "not newest". The anti-entropy closes that gap.
 
-**Trigger.** `syncFromDb` subscribes to the `${route}:bootstrap` event on the
-connector's socket directly — not through `listen`, whose dedup is exactly
-what hides the repeat that would show a disagreement. Each announcement
-(`r`, `o`, `p`) goes to `FsAntiEntropy.observe()`.
+**Trigger.** `syncFromDb` subscribes to two events on the connector's socket
+directly — `${route}:bootstrap` and the server's state beacon
+`stateBeaconEvent(route)` = `${route}:state` — not through `listen`, whose
+dedup is exactly what hides the repeat that would show a disagreement. Each
+announcement (`r`, `o`, `p`) goes to `FsAntiEntropy.observe()`.
+
+The beacon is the signal to run on. The connector does not listen to it, so it
+enters no apply path; the bootstrap heartbeat does, which is why the CARAT One
+Client runs with it off. The event name is derived here, not imported — this
+package does not depend on `@rljson/server` at runtime — and must match the
+server's `stateBeaconEvent`.
 
 **Decision** (`antiEntropyDecision`, pure):
 

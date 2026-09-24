@@ -5,15 +5,16 @@
 ### Added
 
 - **Anti-entropy: a lost message no longer leaves the network divergent**
-  (ONE-446). Every hub heartbeat is compared with the agent's own state (the
+  (ONE-446). Every hub announcement — the server's state beacon, or its
+  bootstrap heartbeat — is compared with the agent's own state (the
   tree ref is the folder's checksum); a divergence that outlives a grace period
   while nothing is applying is repaired — **push** when the hub holds an
   earlier push of ours or the state our push was made from, **pull** when the
   hub's state descends from ours, **merge** (then additively) when neither can
   be shown. Every repair goes through the ordinary apply / push paths and their
   guards. On by default (`antiEntropy: { enabled, graceMs, maxBackoffMs }`);
-  needs a server heartbeat (`bootstrapHeartbeatMs`) and, for pull/merge
-  ancestry, `@rljson/server` with `p` on its announcements.
+  needs `@rljson/server` 0.0.67+ with `stateBeaconMs` (or a
+  `bootstrapHeartbeatMs`), whose announcements carry `p`.
   `agent.antiEntropyStatus` reports divergence and repairs.
   Covered by `test/client-server/heals-after-forced-divergence.spec.ts`: one
   ref message dropped on purpose per case, including a node deleting its own

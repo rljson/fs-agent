@@ -769,12 +769,17 @@ gave up — nothing would ever send it again, and two machines would sit on two
 states for good. The anti-entropy notices and repairs that, with nobody doing
 anything.
 
-It is driven by the hub's heartbeat, so the server must have one:
+It is driven by the hub's periodic announcement of its state, so the server
+must send one. Use the **state beacon** (`@rljson/server` 0.0.67+): it goes on
+its own event, which the connector never processes, so it costs nothing in
+the apply path. The bootstrap heartbeat works too, but a periodic heartbeat
+is delivered into every agent's apply path and has been measured
+net-harmful in production.
 
 ```typescript
 const server = new Server(route, io, bs, {
-  syncConfig: { causalOrdering: true, includeClientIdentity: true,
-                bootstrapHeartbeatMs: 3_000 },
+  syncConfig: { causalOrdering: true, includeClientIdentity: true },
+  stateBeaconMs: 30_000,
 });
 
 const agent = new FsAgent('./my-project', bs, {
@@ -786,7 +791,7 @@ const agent = new FsAgent('./my-project', bs, {
 });
 ```
 
-Each heartbeat carries the hub's tree ref — a content hash of the whole
+Each announcement carries the hub's tree ref — a content hash of the whole
 folder, so comparing it with our own is the per-folder checksum comparison —
 plus who produced it and what it descends from. A divergence that outlives
 `graceMs` while nothing is applying is repaired:
@@ -799,7 +804,7 @@ plus who produced it and what it descends from. A divergence that outlives
 
 Every repair goes through the ordinary apply and push paths, with their
 ancestry and mass-delete rules; the anti-entropy never deletes anything
-itself. Without a heartbeat it never fires. `agent.antiEntropyStatus`
+itself. Without a beacon or heartbeat it never fires. `agent.antiEntropyStatus`
 reports whether this node and the hub agree, since when they have not, and
 the last repair — a lasting divergence is the one trace a lost message leaves.
 
