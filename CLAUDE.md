@@ -209,6 +209,26 @@ Tests require `cross-env NODE_OPTIONS=--max-old-space-size=8192` for heap-intens
 
 ---
 
+## Anti-entropy (ONE-446) — rules
+
+- **The rule order in `antiEntropyDecision` is load-bearing**: origin-push,
+  then pull, then last-applied-push, then merge. Each reorder was tried and
+  each one put a deleted file back (see `README.architecture.md` →
+  *Anti-Entropy*). Change it only with a failing case in
+  `test/fs-anti-entropy.spec.ts` first.
+- **Only a state this agent authored is re-announced** (`_lastPushedRef`).
+  Set it only where the agent itself pushes a state (initial push, debounced
+  push, merge revision) — never in an apply path.
+- **Every repair goes through `processRef` / `_sendRef`.** The anti-entropy
+  must never write, prune or delete on its own.
+- **`heals-after-forced-divergence` must stay green** on the state beacon and
+  on the heartbeat, and its control run must stay divergent. Its deletion
+  cases need `@rljson/server` ≥ 0.0.67 (the announcement's `p`); against an
+  older server they fail — that is the test working.
+- **`stateBeaconEvent` mirrors `@rljson/server`'s.** Change both together.
+
+---
+
 ## Publish Workflow (MANDATORY)
 
 ### Hard rules (NEVER SKIP)
