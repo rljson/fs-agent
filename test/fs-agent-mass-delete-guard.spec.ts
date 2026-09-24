@@ -32,14 +32,14 @@ describe('FsAgent — the mass-delete guard', () => {
 
   beforeEach(async () => {
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
 
   afterEach(async () => {
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 
@@ -427,7 +427,7 @@ describe('FsAgent — the mass-delete guard', () => {
 
     // …the folder is then lost, and a NEW agent takes over the same connector.
     for (const f of await targetFiles()) {
-      await rm(join(targetDir, f), { recursive: true, force: true });
+      await rm(join(targetDir, f), { recursive: true, force: true, maxRetries: 10 });
     }
     const second = new FsAgent(targetDir, bs, {
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
