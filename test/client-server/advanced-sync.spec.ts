@@ -192,15 +192,22 @@ function waitForSync(ms = 3000): Promise<void> {
 // =============================================================================
 
 describe('Advanced Sync Tests', () => {
-  const baseDir = join(process.cwd(), 'test-tmp', 'advanced-sync');
+  // Fresh folders per test. Every test used `advanced-sync/a|b|c`, and a
+  // stopped agent can still have an apply or a push queued: under a loaded
+  // machine it landed in the NEXT test's folders, and a sequential A-then-B
+  // edit failed to converge one run in two — while passing in 2 s alone.
+  let run = 0;
+  let baseDir = '';
 
   beforeEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    run++;
+    baseDir = join(process.cwd(), 'test-tmp', `advanced-sync-${run}`);
+    await rm(baseDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(baseDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    await rm(baseDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   // ===========================================================================

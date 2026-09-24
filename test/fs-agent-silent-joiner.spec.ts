@@ -28,12 +28,12 @@ describe('FsAgent — an agent with nothing to say does not speak', () => {
   const dir = join(process.cwd(), 'test-temp-silent-joiner');
 
   beforeEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(dir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   const setup = async () => {
@@ -90,7 +90,12 @@ describe('FsAgent — an agent with nothing to say does not speak', () => {
 
     sent.length = 0;
     await rm(join(dir, 'a.txt'));
-    await new Promise((r) => setTimeout(r, 400));
+    // Polled: on Windows the scanner stats a vanished path four times
+    // (up to ~480 ms) before it believes a deletion, so a fixed 400 ms ended
+    // before the push on every Windows run.
+    for (let i = 0; i < 30 && sent.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     expect(sent.length).toBeGreaterThan(0);
 

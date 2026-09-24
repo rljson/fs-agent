@@ -27,13 +27,13 @@ describe('FsAgent — is an inbound ref news to this agent', () => {
   const dir = join(process.cwd(), 'test-temp-verdict');
 
   beforeEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'a.txt'), 'a');
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   /** Reaches the private decision, which is the point of the exercise. */

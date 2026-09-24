@@ -30,14 +30,14 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
 
   beforeEach(async () => {
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
 
   afterEach(async () => {
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 

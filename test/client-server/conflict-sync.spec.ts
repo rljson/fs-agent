@@ -73,7 +73,7 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
   };
 
   beforeEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
     const treeCfg = createTreesTableCfg(TREE);
 
     // One shared blob store across both peers + server. Blob *replication* is
@@ -119,7 +119,7 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
   afterEach(async () => {
     stopSync(a);
     stopSync(b);
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   });
 
   it('does NOT false-detect conflicts on a clean linear propagation', async () => {

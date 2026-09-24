@@ -34,14 +34,14 @@ describe('FsAgent — restore only writes what changed', () => {
 
   beforeEach(async () => {
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
 
   afterEach(async () => {
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 

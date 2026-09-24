@@ -39,12 +39,12 @@ describe('FsAgent — its own advertisement echoed back', () => {
   const dir = join(process.cwd(), 'test-temp-own-echo');
 
   beforeEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(dir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   const makeDb = async () => {

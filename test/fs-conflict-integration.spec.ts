@@ -31,7 +31,7 @@ describe('FsAgent conflict resolution (integration)', () => {
   let agent: FsAgent;
 
   beforeEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
 
     io = new IoMem();
@@ -43,13 +43,13 @@ describe('FsAgent conflict resolution (integration)', () => {
   });
 
   afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   /** Write a flat set of files, replacing the working dir contents. */
   const putFiles = async (files: Record<string, string>) => {
     for (const name of await readdir(testDir)) {
-      await rm(join(testDir, name), { recursive: true, force: true });
+      await rm(join(testDir, name), { recursive: true, force: true, maxRetries: 10 });
     }
     for (const [name, content] of Object.entries(files)) {
       await writeFile(join(testDir, name), content);

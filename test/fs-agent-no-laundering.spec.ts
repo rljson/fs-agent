@@ -38,14 +38,14 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
 
   beforeEach(async () => {
     for (const d of [dir, peerDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
 
   afterEach(async () => {
     for (const d of [dir, peerDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 

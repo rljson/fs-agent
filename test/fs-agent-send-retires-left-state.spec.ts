@@ -34,12 +34,12 @@ describe('FsAgent — leaving a state by its own edit retires that state', () =>
   const dir = join(process.cwd(), 'test-temp-send-retire');
 
   beforeEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(dir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   it('hands the previous ref back to the connector on every push', async () => {

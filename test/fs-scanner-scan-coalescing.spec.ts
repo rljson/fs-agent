@@ -47,7 +47,7 @@ describe('FsScanner — scan coalescing', () => {
 
   afterEach(async () => {
     scanner.stopWatch();
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   });
 
   it('collapses a burst of any size into at most two passes', async () => {

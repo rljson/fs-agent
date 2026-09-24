@@ -51,7 +51,7 @@ describe('FsDbAdapter', () => {
 
   afterEach(async () => {
     // Clean up test directory
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   describe('store filesystem trees', () => {

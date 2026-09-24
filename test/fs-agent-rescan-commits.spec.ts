@@ -32,7 +32,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
   const dir = join(process.cwd(), 'test-temp-rescan-commit');
 
   beforeEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(dir, { recursive: true });
     // Sized like the folder the field report is about. The small-folder case
     // works; the report is that the large one does not, so the fixture has to
@@ -45,7 +45,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   /** Agent + connector wired together, with every outgoing ref recorded. */
@@ -122,7 +122,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
     // only the seed, which is what a peer that has not heard the news looks
     // like.
     const peerDir = `${dir}-peer`;
-    await rm(peerDir, { recursive: true, force: true });
+    await rm(peerDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(join(peerDir, 'nested'), { recursive: true });
     for (const name of await readdir(join(dir, 'nested'))) {
       if (name === 'during-an-apply.txt') continue;
@@ -139,7 +139,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
 
     expect(sent.length).toBeGreaterThan(0);
     stopFrom();
-    await rm(`${dir}-peer`, { recursive: true, force: true });
+    await rm(`${dir}-peer`, { recursive: true, force: true, maxRetries: 10 });
 
     stop();
     agent.scanner.stopWatch();

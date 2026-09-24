@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`FsBlobAdapter` on Windows**: a file's `name` was its whole absolute path
+  (the `/`-split never fell back to `\`), so `blobsToFiles` wrote to
+  `<targetDir>/C:\…\file`. It is now the last path segment on either separator.
+- The test suite passes on Windows: locks are met at the rename, links are
+  junctions, deletion waits are polled, cleanups retry.
+
 ### Added
 
 - **Persistent scan cache (`scanCachePath`)**: `FsScanOptions` / `FsAgentOptions`
