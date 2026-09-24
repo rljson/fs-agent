@@ -16,7 +16,9 @@
 // states for good — and nothing says so.
 //
 // WHAT THIS DOES
-// The hub's heartbeat carries the state the hub holds and, since
+// The hub announces the state it holds — on the STATE BEACON
+// (`@rljson/server` `stateBeaconMs`, event `${route}:state`), which the
+// connector never processes, or on the bootstrap heartbeat — and, since
 // `@rljson/server` 0.0.67, what that state descends from. A tree ref is a
 // content hash of the whole folder, so comparing it with our own IS the
 // per-folder checksum comparison: equal refs cost one string compare. When they
@@ -55,6 +57,18 @@
 // apply with its ancestry and mass-delete rules — this module never deletes
 // anything itself.
 // .............................................................................
+
+/**
+ * The event `@rljson/server`'s state beacon is sent on, for a route.
+ *
+ * Derived here rather than imported: this package does not depend on the
+ * server at runtime. It must match `stateBeaconEvent` in `@rljson/server` —
+ * change both together.
+ * @param routeFlat - The route, as `Route.flat`.
+ * @returns The event name.
+ */
+export const stateBeaconEvent = (routeFlat: string): string =>
+  `${routeFlat}:state`;
 
 /** Tuning for {@link FsAntiEntropy}. */
 export interface AntiEntropyOptions {

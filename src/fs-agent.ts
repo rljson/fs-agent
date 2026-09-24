@@ -24,6 +24,7 @@ import {
   AntiEntropyOptions,
   AntiEntropyStatus,
   FsAntiEntropy,
+  stateBeaconEvent,
 } from './fs-anti-entropy.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
@@ -99,8 +100,9 @@ export interface FsAgentOptions {
   /**
    * Repair a divergence from the hub that no message is going to fix — a
    * push the hub never received, a forward this node never received, an
-   * apply that gave up. Driven by the hub's heartbeat
-   * (`syncConfig.bootstrapHeartbeatMs` on the server); without one it never
+   * apply that gave up. Driven by the hub's periodic announcement: the state
+   * beacon (`stateBeaconMs` on the server — the one to use) or the bootstrap
+   * heartbeat (`syncConfig.bootstrapHeartbeatMs`). Without either it never
    * fires. On by default. See `src/fs-anti-entropy.ts`.
    */
   antiEntropy?: AntiEntropyOptions;
@@ -3423,13 +3425,26 @@ export class FsAgent {
         predecessors: Array.isArray(payload.p) ? payload.p : [],
       });
     };
-    const bootstrapEvent = connector.events.bootstrap;
-    connector.socket.on(bootstrapEvent, onHubAnnouncement);
+    // Two sources of the same announcement. The bootstrap (and its optional
+    // heartbeat) reaches every connector anyway. The STATE BEACON is the one a
+    // deployment should run: `@rljson/server`'s `stateBeaconMs` sends the same
+    // payload on an event the connector never processes, so it costs nothing
+    // in the apply path — the CARAT One Client runs with the heartbeat OFF
+    // because a periodic one was measured net-harmful there.
+    const hubEvents = [
+      connector.events.bootstrap,
+      stateBeaconEvent(connector.route.flat),
+    ];
+    for (const event of hubEvents) {
+      connector.socket.on(event, onHubAnnouncement);
+    }
 
     // Return cleanup function
     return () => {
       if (fromDbTimer) clearTimeout(fromDbTimer);
-      connector.socket.off(bootstrapEvent, onHubAnnouncement);
+      for (const event of hubEvents) {
+        connector.socket.off(event, onHubAnnouncement);
+      }
       connector.tearDown();
     };
   }

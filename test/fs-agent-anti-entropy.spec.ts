@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
+import { stateBeaconEvent } from '../src/fs-anti-entropy.ts';
 
 // The anti-entropy's wiring inside the agent, driven by hand: a hub
 // announcement is a `bootstrap` event on the connector's socket, so a test can
@@ -61,7 +62,9 @@ describe('FsAgent — anti-entropy wiring', () => {
     stops.push(await agent.syncFromDb(db, connector, 'fsTree'));
     const announce = (payload: unknown) =>
       socket.emit(connector.events.bootstrap, payload);
-    return { agent, connector, announce };
+    const beacon = (payload: unknown) =>
+      socket.emit(stateBeaconEvent(connector.route.flat), payload);
+    return { agent, connector, socket, announce, beacon };
   };
 
   it('reports nothing before it has started', () => {
@@ -72,6 +75,21 @@ describe('FsAgent — anti-entropy wiring', () => {
     const { agent, announce } = await start();
     announce({ o: 'hub' });
     announce({ o: 'hub', r: 42 });
+    expect(agent.antiEntropyStatus?.hubRef).toBeNull();
+  });
+
+  // The signal a CARAT One Client runs on: its heartbeat is off.
+  it('hears the state beacon, which the connector ignores', async () => {
+    const { agent, beacon } = await start();
+    beacon({ o: 'hub', r: 'hub-state', p: ['x'] });
+    expect(agent.antiEntropyStatus?.hubRef).toBe('hub-state');
+  });
+
+  it('stops listening when sync stops', async () => {
+    const { agent, beacon } = await start();
+    for (const stop of stops) stop();
+    stops = [];
+    beacon({ o: 'hub', r: 'after-stop' });
     expect(agent.antiEntropyStatus?.hubRef).toBeNull();
   });
 

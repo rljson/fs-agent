@@ -12,6 +12,7 @@ import {
   AntiEntropyView,
   DEFAULT_ANTI_ENTROPY,
   FsAntiEntropy,
+  stateBeaconEvent,
 } from '../src/fs-anti-entropy.ts';
 
 const view = (v: Partial<AntiEntropyView> = {}): AntiEntropyView => ({
@@ -317,5 +318,12 @@ describe('FsAntiEntropy', () => {
     ae.observe(hub);
     expect(repairs[0][2]).toEqual(['S1']);
     expect(repairs[0][2]).not.toBe(hub.predecessors);
+  });
+});
+
+describe('stateBeaconEvent', () => {
+  // Must match @rljson/server's own helper; this package does not import it.
+  it('is the route with :state', () => {
+    expect(stateBeaconEvent('/sharedTree')).toBe('/sharedTree:state');
   });
 });
