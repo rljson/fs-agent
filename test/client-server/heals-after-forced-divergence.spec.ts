@@ -30,14 +30,24 @@ import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
  * because it does not care WHICH message went missing.
  *
  * The configuration is the one a CARAT One Client ships: `causalOrdering` and
- * client identity on, and a hub heartbeat — the heartbeat is what carries the
- * hub's state to a node that missed it.
+ * client identity on, the bootstrap heartbeat OFF, and the server's STATE
+ * BEACON carrying the hub's state to a node that missed it. The heartbeat is
+ * run as a second signal: the anti-entropy must work with either.
  */
 
 const TREE = 'sharedTree';
 const SYNC: SyncConfig = { causalOrdering: true, includeClientIdentity: true };
 const HEARTBEAT_MS = 150;
 const AE: AntiEntropyOptions = { graceMs: 500, maxBackoffMs: 2_000 };
+
+/** How the hub tells clients what it holds. */
+type Signal = 'beacon' | 'heartbeat';
+
+/** Server options for a signal: exactly one of the two, never both. */
+const serverSignal = (signal: Signal) =>
+  signal === 'beacon'
+    ? { syncConfig: SYNC, stateBeaconMs: HEARTBEAT_MS }
+    : { syncConfig: { ...SYNC, bootstrapHeartbeatMs: HEARTBEAT_MS } };
 
 /** How long a healed network may take, and how long an unhealed one is given. */
 const HEAL_BUDGET_MS = 15_000;
@@ -57,13 +67,26 @@ interface Node {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe.each([
-  { antiEntropy: AE, label: 'with anti-entropy' },
-  { antiEntropy: { enabled: false }, label: 'CONTROL: anti-entropy off' },
-])('heals-after-forced-divergence, $label', ({ antiEntropy }) => {
+  {
+    antiEntropy: AE,
+    signal: 'beacon' as Signal,
+    label: 'with anti-entropy, on the state beacon (as shipped)',
+  },
+  {
+    antiEntropy: AE,
+    signal: 'heartbeat' as Signal,
+    label: 'with anti-entropy, on the bootstrap heartbeat',
+  },
+  {
+    antiEntropy: { enabled: false },
+    signal: 'beacon' as Signal,
+    label: 'CONTROL: anti-entropy off',
+  },
+])('heals-after-forced-divergence, $label', ({ antiEntropy, signal }) => {
   const healing = antiEntropy.enabled !== false;
   const root = join(
     process.cwd(),
-    `test-temp-heals-${healing ? 'on' : 'off'}`,
+    `test-temp-heals-${healing ? 'on' : 'off'}-${signal}`,
   );
   const route = Route.fromFlat(`/${TREE}`);
   let server: Server;
@@ -134,9 +157,7 @@ describe.each([
     const serverIo = new IoMem();
     await serverIo.init();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-    server = new Server(route, serverIo, sharedBs, {
-      syncConfig: { ...SYNC, bootstrapHeartbeatMs: HEARTBEAT_MS },
-    });
+    server = new Server(route, serverIo, sharedBs, serverSignal(signal));
     await server.init();
 
     nodes = [];
