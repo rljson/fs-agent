@@ -18,13 +18,13 @@ describe('FsBlobAdapter', () => {
 
   beforeEach(async () => {
     // Create test directory structure
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
   });
 
   afterEach(async () => {
     // Clean up
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   describe('constructor', () => {
