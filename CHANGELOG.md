@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`@rljson` dependencies lifted to the published releases**: `db` 0.0.45,
+  `io` 0.0.79, and the `server` dev-dependency 0.0.67 — the release that sends
+  the state beacon and carries `p`, which is what the client-server tests below
+  need. `db` and `io` move together because `db` declares `io` itself.
+
 ### Added
 
 - **Anti-entropy: a lost message no longer leaves the network divergent**
