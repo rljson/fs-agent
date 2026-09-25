@@ -785,7 +785,7 @@ const server = new Server(route, io, bs, {
 const agent = new FsAgent('./my-project', bs, {
   antiEntropy: {
     enabled: true,        // default: true
-    graceMs: 10_000,      // a divergence must last this long (default: 10s)
+    graceMs: 10_000,      // how long this node may sit still, out of step, before a repair (default: 10s)
     maxBackoffMs: 300_000 // cap for repeated repairs of one divergence (default: 5 min)
   },
 });

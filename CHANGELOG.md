@@ -14,7 +14,11 @@
   be shown. Every repair goes through the ordinary apply / push paths and their
   guards. On by default (`antiEntropy: { enabled, graceMs, maxBackoffMs }`);
   needs `@rljson/server` 0.0.67+ with `stateBeaconMs` (or a
-  `bootstrapHeartbeatMs`), whose announcements carry `p`.
+  `bootstrapHeartbeatMs`), whose announcements carry `p`, and
+  `@rljson/db` 0.0.44 (`stateBeaconEvent`). The grace period is measured
+  while this node's OWN state stands still — however often the hub's
+  changes — so a node that misses every forward while another machine keeps
+  writing is still repaired. A stopped sync reports no status.
   `agent.antiEntropyStatus` reports divergence and repairs.
   Covered by `test/client-server/heals-after-forced-divergence.spec.ts`: one
   ref message dropped on purpose per case, including a node deleting its own

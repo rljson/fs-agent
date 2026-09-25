@@ -492,9 +492,9 @@ announcement (`r`, `o`, `p`) goes to `FsAntiEntropy.observe()`.
 
 The beacon is the signal to run on. The connector does not listen to it, so it
 enters no apply path; the bootstrap heartbeat does, which is why the CARAT One
-Client runs with it off. The event name is derived here, not imported — this
-package does not depend on `@rljson/server` at runtime — and must match the
-server's `stateBeaconEvent`.
+Client runs with it off. The event name comes from `@rljson/db`
+(`stateBeaconEvent`), next to the Connector that deliberately ignores it; the
+server imports the same function.
 
 **Decision** (`antiEntropyDecision`, pure):
 
@@ -522,8 +522,14 @@ hub's state tells them apart, and each wrong answer puts a deleted file back.
 debounced push, merge revision) — never by an apply, which can leave the folder
 short of what it applied. Re-announcing such a state would roll peers back.
 
-**Repair**, only once the same divergence (`hubRef|currentRef`) has lasted
-`graceMs` and nothing is pending, processing or applying:
+**Repair**, only once this node has been out of step with the hub for
+`graceMs` **without its own state moving**, and nothing is pending,
+processing or applying. The divergence is keyed on `_currentRef` alone: a node
+keeping up with the traffic changes its own state with every forward it
+applies, while a node that lost a message sits still. Keying on the hub's
+state as well restarted the grace period on every change there, so a node
+that missed every forward while another machine kept writing was never
+repaired (review, ONE-446). The repair answers the latest announcement:
 
 - push → `_sendRef(connector, _currentRef, [hubRef])`
 - pull → `scheduleProcess(hubRef, …, p)` — the ordinary `processRef`
