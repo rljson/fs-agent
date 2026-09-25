@@ -22,7 +22,8 @@
 // `@rljson/server` 0.0.67, what that state descends from. A tree ref is a
 // content hash of the whole folder, so comparing it with our own IS the
 // per-folder checksum comparison: equal refs cost one string compare. When they
-// differ, and keep differing for a grace period while nothing else is in
+// differ, and keep differing — our own state unchanged — for a grace period
+// while nothing else is in
 // flight, the history decides which side is behind:
 //
 //   push   The hub holds an earlier announcement of OURS, or the state we
@@ -57,18 +58,6 @@
 // apply with its ancestry and mass-delete rules — this module never deletes
 // anything itself.
 // .............................................................................
-
-/**
- * The event `@rljson/server`'s state beacon is sent on, for a route.
- *
- * Derived here rather than imported: this package does not depend on the
- * server at runtime. It must match `stateBeaconEvent` in `@rljson/server` —
- * change both together.
- * @param routeFlat - The route, as `Route.flat`.
- * @returns The event name.
- */
-export const stateBeaconEvent = (routeFlat: string): string =>
-  `${routeFlat}:state`;
 
 /** Tuning for {@link FsAntiEntropy}. */
 export interface AntiEntropyOptions {
@@ -223,15 +212,27 @@ export interface AntiEntropyDeps {
 /**
  * Notices a divergence between this agent and the hub, and repairs it.
  *
- * Fed with every hub announcement; decides nothing on the first sighting of a
- * divergence, only once the same one has lasted {@link AntiEntropyOptions.graceMs}.
+ * Fed with every hub announcement; decides nothing while this node's own state
+ * is still moving, only once it has sat still and out of step with the hub for
+ * {@link AntiEntropyOptions.graceMs} — however often the hub's state changed
+ * meanwhile.
  */
 export class FsAntiEntropy {
   private readonly _options: Required<AntiEntropyOptions>;
   private readonly _now: () => number;
   private readonly _log: (message: string) => void;
 
-  /** Identifies the divergence being watched: hub state + our state. */
+  /**
+   * Identifies the divergence being watched: OUR state, and only ours.
+   *
+   * It used to include the hub's state, so every change on the hub restarted
+   * the grace period — and a node that missed every forward while another
+   * machine wrote every few seconds never got a repair at all, showing "weicht
+   * ab, noch kein Reparaturversuch" for good (review, ONE-446). What makes a
+   * divergence a lost message is that THIS node is not moving: a node keeping
+   * up with the traffic changes its own state with every forward it applies.
+   * Which hub state the repair answers is read from the latest announcement.
+   */
   private _key: string | null = null;
   private _divergedSince: number | null = null;
   /** Earliest moment the next repair of {@link _key} may start. */
@@ -292,10 +293,11 @@ export class FsAntiEntropy {
     }
 
     const now = this._now();
-    const key = `${hubRef}|${view.currentRef}`;
+    const key = view.currentRef as string;
     if (key !== this._key) {
-      // A new divergence. Live traffic makes these all the time; only one
-      // that is still here after the grace period is a lost message.
+      // Our state moved (or this is the first sighting). A node that keeps
+      // moving is keeping up; only one that sits still, out of step, for the
+      // whole grace period has lost a message.
       this._key = key;
       this._divergedSince ??= now;
       this._attempts = 0;

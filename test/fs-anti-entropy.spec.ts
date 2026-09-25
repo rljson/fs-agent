@@ -12,7 +12,6 @@ import {
   AntiEntropyView,
   DEFAULT_ANTI_ENTROPY,
   FsAntiEntropy,
-  stateBeaconEvent,
 } from '../src/fs-anti-entropy.ts';
 
 const view = (v: Partial<AntiEntropyView> = {}): AntiEntropyView => ({
@@ -260,19 +259,41 @@ describe('FsAntiEntropy', () => {
     expect(repairs[0][2]).toEqual([]);
   });
 
-  it('starts over when the divergence changes', () => {
+  // The review's case (ONE-446): another machine writes every few seconds, so
+  // the hub's state never holds still. The grace period used to restart on
+  // every one of those changes — and a node that missed them all never got a
+  // repair, showing "noch kein Reparaturversuch" for good.
+  it('repairs a node that sits still while the hub keeps moving', () => {
+    const { ae, repairs, advance } = setup();
+    ae.observe({ ref: 'H1', predecessors: ['S1'] });
+    advance(40);
+    ae.observe({ ref: 'H2', predecessors: ['H1'] });
+    advance(40);
+    ae.observe({ ref: 'H3', predecessors: ['H2'] });
+    expect(repairs).toHaveLength(0); // 80 ms: still inside the grace
+    advance(40);
+    ae.observe({ ref: 'H4', predecessors: ['H3'] });
+    // 120 ms, our state unchanged the whole time: repaired, against the
+    // hub's LATEST state — however often it moved meanwhile.
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0].slice(0, 2)).toEqual(['merge', 'H4']);
+    expect(ae.status.divergedSince).toBe(1_000);
+  });
+
+  it('starts over when OUR state moves — a node keeping up needs no repair', () => {
     const { ae, state, repairs, advance } = setup();
     ae.observe({ ref: 'X' });
-    advance(100);
-    ae.observe({ ref: 'Y' }); // a different divergence: grace again
-    expect(repairs).toHaveLength(0);
+    advance(80);
+    state.currentRef = 'S2'; // applied a forward: keeping up
+    ae.observe({ ref: 'Y' });
+    advance(80);
+    ae.observe({ ref: 'Y' });
+    expect(repairs).toHaveLength(0); // 80 ms since our last move
     // …but it has been diverged since the first sighting.
     expect(ae.status.divergedSince).toBe(1_000);
-
-    state.currentRef = 'S9';
-    advance(100);
+    advance(40);
     ae.observe({ ref: 'Y' });
-    expect(repairs).toHaveLength(0);
+    expect(repairs).toHaveLength(1);
   });
 
   it('forgets a divergence once it heals', () => {
@@ -318,12 +339,5 @@ describe('FsAntiEntropy', () => {
     ae.observe(hub);
     expect(repairs[0][2]).toEqual(['S1']);
     expect(repairs[0][2]).not.toBe(hub.predecessors);
-  });
-});
-
-describe('stateBeaconEvent', () => {
-  // Must match @rljson/server's own helper; this package does not import it.
-  it('is the route with :state', () => {
-    expect(stateBeaconEvent('/sharedTree')).toBe('/sharedTree:state');
   });
 });

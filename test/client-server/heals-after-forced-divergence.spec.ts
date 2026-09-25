@@ -306,6 +306,36 @@ describe.each([
       expect(await until('burst-2.txt', '2')).toEqual(all('2'));
     }, 40_000);
 
+    // The review's case (ONE-446). Another machine writes every few hundred
+    // milliseconds, so the hub's state never holds still — and B loses every
+    // forward. The grace period used to restart on each hub change, so B was
+    // repaired only once the writer STOPPED: "weicht ab, noch kein
+    // Reparaturversuch" for as long as anybody kept working.
+    it('repairs a node that misses every forward while another keeps writing', async () => {
+      node('B').dropForwards = Number.POSITIVE_INFINITY;
+      const writes = 8;
+      for (let i = 0; i < writes; i++) {
+        await writeFile(join(node('C').folder, `busy-${i}.txt`), `w${i}`);
+        await sleep(300);
+      }
+      // Still inside the writing: the first write is > 2 s old, four grace
+      // periods — B must have it by now, not only once the writer rests.
+      const b = await readFile(join(node('B').folder, 'busy-0.txt'), 'utf8').catch(
+        () => '<missing>',
+      );
+      expect(b, 'B was not repaired while the hub kept moving').toBe('w0');
+      // On the beacon it was the anti-entropy; on the heartbeat the heartbeat
+      // itself delivers each new state, and nothing is left to repair.
+      if (signal === 'beacon') {
+        expect(node('B').agent.antiEntropyStatus?.repairs).toBeGreaterThan(0);
+      }
+
+      node('B').dropForwards = 0;
+      expect(await until(`busy-${writes - 1}.txt`, `w${writes - 1}`)).toEqual(
+        all(`w${writes - 1}`),
+      );
+    }, 40_000);
+
     it('reports the divergence, and that it healed', async () => {
       node('A').dropPushes = 1;
       await writeFile(join(node('A').folder, 'seen.txt'), 'seen');
