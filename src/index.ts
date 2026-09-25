@@ -15,7 +15,6 @@ export {
   antiEntropyDecision,
   DEFAULT_ANTI_ENTROPY,
   FsAntiEntropy,
-  stateBeaconEvent,
   type AntiEntropyAction,
   type AntiEntropyDecision,
   type AntiEntropyDeps,

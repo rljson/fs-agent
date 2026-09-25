@@ -9,12 +9,11 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
-import { Connector, Db } from '@rljson/db';
+import { Connector, Db, stateBeaconEvent } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
-import { stateBeaconEvent } from '../src/fs-anti-entropy.ts';
 
 // The anti-entropy's wiring inside the agent, driven by hand: a hub
 // announcement is a `bootstrap` event on the connector's socket, so a test can
@@ -64,7 +63,7 @@ describe('FsAgent — anti-entropy wiring', () => {
       socket.emit(connector.events.bootstrap, payload);
     const beacon = (payload: unknown) =>
       socket.emit(stateBeaconEvent(connector.route.flat), payload);
-    return { agent, connector, socket, announce, beacon };
+    return { agent, db, connector, socket, announce, beacon };
   };
 
   it('reports nothing before it has started', () => {
@@ -85,12 +84,28 @@ describe('FsAgent — anti-entropy wiring', () => {
     expect(agent.antiEntropyStatus?.hubRef).toBe('hub-state');
   });
 
-  it('stops listening when sync stops', async () => {
+  // A stopped sync reports nothing (review, ONE-446): a status left behind
+  // would keep describing a divergence nobody is watching.
+  it('stops listening, and stops reporting, when sync stops', async () => {
     const { agent, beacon } = await start();
+    beacon({ o: 'hub', r: 'before-stop' });
+    expect(agent.antiEntropyStatus?.hubRef).toBe('before-stop');
     for (const stop of stops) stop();
     stops = [];
+    expect(agent.antiEntropyStatus).toBeNull();
     beacon({ o: 'hub', r: 'after-stop' });
-    expect(agent.antiEntropyStatus?.hubRef).toBeNull();
+    expect(agent.antiEntropyStatus).toBeNull();
+  });
+
+  it('keeps a newer sync’s status when an older one stops', async () => {
+    const { agent, db, connector } = await start();
+    const olderStop = stops.pop() as () => void;
+    // A second receive side on the same agent replaces the first…
+    stops.push(await agent.syncFromDb(db, connector, 'fsTree'));
+    const current = agent.antiEntropyStatus;
+    // …and stopping the OLD one must not wipe the new one's reading.
+    olderStop();
+    expect(agent.antiEntropyStatus).toEqual(current);
   });
 
   it('records a re-push that fails, rather than throwing it away', async () => {

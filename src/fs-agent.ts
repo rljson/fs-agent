@@ -24,7 +24,6 @@ import {
   AntiEntropyOptions,
   AntiEntropyStatus,
   FsAntiEntropy,
-  stateBeaconEvent,
 } from './fs-anti-entropy.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
@@ -34,6 +33,7 @@ import {
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
+import { stateBeaconEvent } from '@rljson/db';
 import type { Connector, Db } from '@rljson/db';
 import type { ConnectorPayload, InsertHistoryRow } from '@rljson/rljson';
 import type { FsChange, FsNodeMeta } from './fs-scanner.ts';
@@ -3445,6 +3445,10 @@ export class FsAgent {
       for (const event of hubEvents) {
         connector.socket.off(event, onHubAnnouncement);
       }
+      // A stopped sync reports nothing: a status left behind would keep
+      // describing a divergence nobody is watching any more. Only if it is
+      // still ours — a later syncFromDb may already have replaced it.
+      if (this._antiEntropy === antiEntropy) this._antiEntropy = undefined;
       connector.tearDown();
     };
   }
