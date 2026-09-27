@@ -21,7 +21,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm exec vite build && tsc && node scripts/copy-readme-to-dist.js",
-    "test": "cross-env NODE_OPTIONS=--max-old-space-size=8192 pnpm exec vitest run --coverage && pnpm run lint",
+    "test": "cross-env NODE_OPTIONS=--max-old-space-size=8192 pnpm exec vitest run --coverage --no-file-parallelism && pnpm run lint",
     "prebuild": "npm run test",
     "prepublishOnly": "npm run build",
     "lint": "pnpm exec eslint .",
