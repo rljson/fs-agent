@@ -35,9 +35,17 @@ import { FsAgent } from '../../src/fs-agent.ts';
  * The configuration below is the one a CARAT One Client ships:
  * `causalOrdering` on, `resolveConflicts` OFF. That gate is deliberate (turning
  * the merge on once dropped the lab to 4 of 11), and what this test exists to
- * establish is what it COSTS: whether simultaneous edits still converge without
- * it, or whether the recipe is red because it is asking for a feature that is
- * switched off.
+ * establish is what it COSTS.
+ *
+ * **Since ONE-446 it costs nothing here.** Both cases converge, the shipped one
+ * included — because the hub now announces what it holds (the state beacon) and
+ * the anti-entropy repairs a node that disagrees with it for longer than the
+ * grace period. Measured 2026-09-28: five rounds, three runs, every round on one
+ * version within 18-23 s.
+ *
+ * What is NOT repaired, and is still written down in `doc/known-limits.md`: WHO
+ * wins. The winner is the last advertisement to arrive, not the later save.
+ * Convergence is the promise; "the newer edit survives" is not.
  */
 
 /**
@@ -84,7 +92,14 @@ describe.each([
     const serverIo = new IoMem();
     await serverIo.init();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-    server = new Server(route, serverIo, sharedBs, { syncConfig: SYNC });
+    // The hub announces what it holds — the state beacon a One Client hub
+    // ships (30 s there; 500 ms here so five rounds stay a test). Without an
+    // announcement the anti-entropy has nothing to compare its own state
+    // against, which is why this contest used to end stuck.
+    server = new Server(route, serverIo, sharedBs, {
+      syncConfig: SYNC,
+      stateBeaconMs: 500,
+    });
     await server.init();
 
     nodes = [];
@@ -99,6 +114,10 @@ describe.each([
       const agent = new FsAgent(folder, sharedBs, {
         resolveConflicts: merge,
         timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
+        // On by default; two seconds rather than the shipped ten so five
+        // rounds fit in a test. The mechanism is the same — what is being
+        // measured is whether the repair happens, not how long it waits.
+        antiEntropy: { graceMs: 2_000 },
       });
 
       const [serverSocket, clientSocket] = createSocketPair();
@@ -153,7 +172,13 @@ describe.each([
   // does — so the cost of shipping with the merge switched off is recorded
   // here rather than rediscovered on four machines, and improving it cannot
   // pass unnoticed.
-  const contest = merge ? it : it.fails;
+  // Both cases converge now. Until ONE-446 the second one did not: without
+  // `resolveConflicts` three simultaneous writes settled on three different
+  // versions and stayed there — measured on four machines on 2026-09-19, and
+  // encoded here as `it.fails`. The anti-entropy repairs it: each node notices
+  // it disagrees with the hub for longer than the grace period and pulls, so
+  // the contest ends on one version without the merge being switched on.
+  const contest = it;
 
   it('lets one writer\'s second edit win, which is not a conflict at all', async () => {
     // **Not a contest.** One node writes, everybody converges, the SAME node
@@ -234,7 +259,7 @@ describe.each([
       // definition not instantaneous — the peers have to exchange the
       // competing versions before any of them can settle.
       let seen = await held();
-      for (let i = 0; i < 60 && new Set(seen).size !== 1; i += 1) {
+      for (let i = 0; i < 300 && new Set(seen).size !== 1; i += 1) {
         await new Promise((r) => setTimeout(r, 100));
         seen = await held();
       }

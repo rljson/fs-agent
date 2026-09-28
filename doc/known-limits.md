@@ -43,6 +43,21 @@ this ships in, CARAT Desktop holds its documents open while they are being
 edited (see the `locked-file-does-not-block` recipe), which closes most of that
 window.
 
+### What ONE-446 changed (2026-09-28)
+
+**The divergence half is repaired.** With a hub state beacon running
+(`stateBeaconMs` on the server, 30 s in the One Client) the anti-entropy notices
+a node that disagrees with the hub for longer than its grace period and repairs
+it, so three simultaneous writes end on one version even with `resolveConflicts`
+off. Measured in `test/client-server/simultaneous-edit.spec.ts`: five rounds,
+three runs, every round converged within 18-23 s. Before, the same contest left
+three stable versions.
+
+**The ordering half stands.** Which version wins is still decided by the last
+advertisement to arrive, not by which save was later — everything below still
+applies to that. Without a beacon nothing repairs anything: a deployment that
+sets `stateBeaconMs: 0` keeps the old behaviour in full.
+
 ### What fixing it takes
 
 Making ancestry authoritative on the default path — deciding by what a change

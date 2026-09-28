@@ -4,6 +4,19 @@
 
 ### Changed
 
+- **The simultaneous-write contest now measures what the One Client ships, and
+  passes.** `simultaneous-edit.spec.ts` built its agents without a hub state
+  beacon, so the anti-entropy had no announcement to compare against and could
+  never repair what three simultaneous writes left behind; the shipped case was
+  therefore encoded as an expected failure. With the beacon on, both cases
+  converge — five rounds, three runs, every round on one version within
+  18-23 s. `doc/known-limits.md` records what this does and does not fix: the
+  divergence is repaired, the choice of winner is still arrival order.
+
+## [Unreleased]
+
+### Changed
+
 - **`@rljson` dependencies lifted to the current releases**: `db` 0.0.47, `io`
   0.0.80, `rljson` 0.0.83, and the `server` dev-dependency 0.0.68 — the release
   that sends the state beacon and carries `p`, which is what the client-server
