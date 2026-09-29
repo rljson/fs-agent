@@ -1,6 +1,6 @@
 {
   "name": "@rljson/fs-agent",
-  "version": "0.0.81",
+  "version": "0.0.82",
   "description": "Rljson fs-agent description",
   "homepage": "https://github.com/rljson/fs-agent",
   "bugs": "https://github.com/rljson/fs-agent/issues",
@@ -28,7 +28,7 @@
     "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
   },
   "devDependencies": {
-    "@rljson/server": "0.0.68",
+    "@rljson/server": "0.0.69",
     "@types/node": "^25.3.1",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
@@ -50,7 +50,7 @@
     "vitest-dom": "^0.1.1"
   },
   "dependencies": {
-    "@rljson/bs": "0.0.26",
+    "@rljson/bs": "0.0.27",
     "@rljson/db": "0.0.47",
     "@rljson/hash": "0.0.19",
     "@rljson/io": "0.0.80",
@@ -64,7 +64,13 @@
       "esbuild"
     ],
     "overrides": {
-      "@rljson/rljson": "0.0.83"
+      "@rljson/bs": "0.0.27",
+      "@rljson/db": "0.0.47",
+      "@rljson/hash": "0.0.19",
+      "@rljson/io": "0.0.80",
+      "@rljson/json": "0.0.23",
+      "@rljson/rljson": "0.0.83",
+      "@rljson/server": "0.0.69"
     }
   },
   "packageManager": "pnpm@10.11.0"

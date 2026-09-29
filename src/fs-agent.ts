@@ -10,6 +10,7 @@ import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import {
   mkdir,
+  open,
   readdir,
   rename,
   rm,
@@ -336,9 +337,16 @@ export class PartialRestoreError extends RestoreIncompleteError {
  * The difference from {@link PartialRestoreError} is "not yet" versus "never".
  * A locked file's bytes exist and the file is merely busy, so retrying is the
  * right answer. A blob that cannot be retrieved may never become retrievable —
- * a file larger than the transport's `maxHttpBufferSize` is the case that
- * produced this class, and no number of retries makes 63 MB fit through a
- * 50 MB socket.
+ * an offline peer that held the only copy, a blob deleted between the tree and
+ * the fetch.
+ *
+ * **Size is no longer one of those reasons.** The case that produced this class
+ * was a file larger than the transport's `maxHttpBufferSize`, where no number of
+ * retries made 63 MB fit through a 50 MB socket. Since `@rljson/bs` 0.0.27 a
+ * blob crosses as a series of ranged pulls, so no single message carries the
+ * whole file and the cap no longer bounds file size. The class stays, because a
+ * blob can still be genuinely unreachable; the reason it was first needed is
+ * gone.
  *
  * It exists because the failure used to be a bare `throw` in the middle of
  * `_restoreTree`, which abandoned the ENTIRE tree: no other file in it was
@@ -352,7 +360,8 @@ export class PartialRestoreError extends RestoreIncompleteError {
  * Measured on four nodes: one 63 MB file (120% of the cap) left three of them
  * holding a file the fourth had deleted, permanently, and `projekte-shape`'s
  * deletion had still not propagated after 300 seconds. The customer's largest
- * file is 45.9 MB against the same 50 MB cap.
+ * file was 45.9 MB against the same 50 MB cap — close enough that the next
+ * revision of one document would have reproduced it in production.
  */
 export class BlobUnavailableError extends RestoreIncompleteError {
   constructor(public readonly unavailablePaths: string[]) {
@@ -788,6 +797,96 @@ export class FsAgent {
   }
 
   /**
+   * Whether this error came from reading the blob rather than writing the file.
+   *
+   * The two have different answers. A blob that cannot be fetched costs one
+   * file and the tree applies without it; a file that cannot be written is
+   * usually a CARAT document a user still has open, and that one must not abort
+   * the rest of the restore either. Conflating them would report an offline peer
+   * as a locked file, and the field reports are read by people who act on that
+   * distinction.
+   * @param error - The error thrown while writing the file.
+   * @returns Whether it came from the blob source.
+   */
+  private static _isBlobReadError(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { __blobRead?: boolean }).__blobRead === true
+    );
+  }
+
+  /**
+   * Writes a file from a stream, holding one chunk at a time.
+   *
+   * The twin of {@link FsAgent._atomicWriteFile}, with the same platform rule
+   * and the same reason for it, but never materialising the whole file. A 500 MB
+   * file used to cost 500 MB of Buffer on the receiving agent, another copy in
+   * the socket parser, and — on the serving hub — the same again. That is the
+   * shape that killed the cloud EventHub: memory that is work in flight rather
+   * than garbage, so no collection can reclaim any of it.
+   *
+   * Read failures are tagged, because from here on the bytes arrive during the
+   * write rather than before it, and {@link FsAgent._isBlobReadError} is what
+   * keeps the caller's two error messages telling the truth.
+   * @param filePath - Where the file goes.
+   * @param stream - The bytes.
+   */
+  private static async _atomicWriteStream(
+    filePath: string,
+    stream: ReadableStream<Uint8Array>,
+  ): Promise<void> {
+    /* v8 ignore next -- @preserve win32 branch not exercised on Linux/macOS CI */
+    const target =
+      process.platform !== 'win32'
+        ? filePath
+        : join(
+            dirname(filePath),
+            `${ATOMIC_TMP_PREFIX}${Date.now().toString(36)}-${Math.floor(
+              Math.random() * 1e9,
+            ).toString(36)}`,
+          );
+
+    const handle = await open(target, 'w');
+    try {
+      const reader = stream.getReader();
+      for (;;) {
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await reader.read();
+        } catch (error) {
+          throw Object.assign(
+            error instanceof Error ? error : new Error(String(error)),
+            { __blobRead: true },
+          );
+        }
+        if (chunk.done) break;
+        await handle.write(chunk.value);
+      }
+    } catch (error) {
+      await handle.close();
+      /* v8 ignore start -- @preserve Windows-only temp cleanup; CI runs on Linux */
+      if (target !== filePath) {
+        await unlink(target).catch(() => {});
+      }
+      /* v8 ignore stop -- @preserve */
+      throw error;
+    }
+    await handle.close();
+
+    /* v8 ignore start -- @preserve Windows-only atomic path; CI runs on Linux */
+    if (target !== filePath) {
+      try {
+        await rename(target, filePath);
+      } catch (err) {
+        await unlink(target).catch(() => {});
+        throw err;
+      }
+    }
+    /* v8 ignore stop -- @preserve */
+  }
+
+  /**
    * Wraps a promise with a timeout.
    * Rejects with a descriptive error if the promise does not settle
    * within the given number of milliseconds.
@@ -1179,13 +1278,20 @@ export class FsAgent {
         // arrived with `mayPrune=false` and it took additions forever while
         // ignoring every delete.
         //
-        // One 63 MB file — 120% of the 50 MB socket cap, so its blob can never
+        // One 63 MB file — 120% of the 50 MB socket cap, so its blob could not
         // be fetched at all — left three of four nodes permanently holding a
         // file the fourth had deleted. The bytes of one file are worth exactly
         // one missing file, never the tree's deletions as well.
-        let fileBlob;
+        //
+        // The size cap itself is gone as of the streaming fetch below; this rule
+        // still holds for every other reason a blob can be unreachable.
+        // A stream, not the whole blob. `getBlobStream` asks the source for its
+        // size first, so a blob that is simply not there still fails here with
+        // the same message it always did — and a blob that IS there now crosses
+        // in chunks, which is what lifts the 50 MB ceiling named above.
+        let fileStream;
         try {
-          fileBlob = await this._bs.getBlob(meta.blobId);
+          fileStream = await this._bs.getBlobStream(meta.blobId);
         } catch (error) {
           console.warn(
             `[FsAgent] cannot fetch blob for "${meta.relativePath}" ` +
@@ -1197,7 +1303,7 @@ export class FsAgent {
           return;
         }
 
-        if (!fileBlob || !fileBlob.content) {
+        if (!fileStream) {
           console.warn(
             `[FsAgent] missing blob content for "${meta.relativePath}" ` +
               `(blobId: ${meta.blobId}) — skipping this file and applying the ` +
@@ -1213,7 +1319,7 @@ export class FsAgent {
         try {
           // Write file atomically (temp + fsync + rename) so a crash
           // mid-restore never leaves a half-written, corrupt file on disk.
-          await FsAgent._atomicWriteFile(filePath, fileBlob.content);
+          await FsAgent._atomicWriteStream(filePath, fileStream);
           this._restoreWritten++;
 
           // Preserve mtime
@@ -1252,6 +1358,22 @@ export class FsAgent {
           // Skip the file and keep going. The bytes are not lost: nothing has
           // been recorded as applied, so the caller retries, and by then the
           // file is usually closed.
+          // Now that the bytes arrive DURING the write rather than before it,
+          // a peer going away mid-file surfaces here instead of at the fetch
+          // above. It is the same fault as a blob that could not be fetched at
+          // all and gets the same answer — one file skipped, the tree applied —
+          // and it must not be reported as a locked document, which is a
+          // different problem with a different person to talk to.
+          if (FsAgent._isBlobReadError(error)) {
+            console.warn(
+              `[FsAgent] blob transfer for "${meta.relativePath}" broke off ` +
+                `(blobId: ${meta.blobId}): ` +
+                `${error instanceof Error ? error.message : String(error)} — ` +
+                `skipping this file and applying the rest of the tree.`,
+            );
+            this._restoreUnavailable.push(meta.relativePath);
+            return;
+          }
           if (!FsAgent._isLocked(error)) throw error;
           console.warn(
             `[FsAgent] restore: "${meta.relativePath}" is held open by another ` +

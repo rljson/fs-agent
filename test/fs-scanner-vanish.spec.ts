@@ -16,13 +16,14 @@ import { BsMem } from '@rljson/bs';
 // child used to abort the ENTIRE scan, and the watcher depends on the scan, so
 // a folder under churn could stop syncing altogether.
 //
-// Two of the three race windows (`readFile`, and the `readdir` of a recursive
-// descent) cannot be produced with a real filesystem deterministically, so
+// Two of the three race windows (the `open` of a file's content, and the
+// `readdir` of a recursive descent) cannot be produced with a real filesystem
+// deterministically, so
 // this file mocks `fs/promises` behind a switch that is off by default. It
 // lives apart from `fs-scanner.spec.ts` because `vi.mock` is hoisted per file
 // and that suite must keep talking to the real disk.
 const failures: Array<{
-  op: 'stat' | 'readFile' | 'readdir';
+  op: 'stat' | 'open' | 'readdir';
   match: RegExp;
   code: string;
 }> = [];
@@ -30,7 +31,7 @@ const failures: Array<{
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
   const wrap =
-    (op: 'stat' | 'readFile' | 'readdir', real: (...a: never[]) => unknown) =>
+    (op: 'stat' | 'open' | 'readdir', real: (...a: never[]) => unknown) =>
     (...args: never[]) => {
       const target = String(args[0]);
       const hit = failures.find((f) => f.op === op && f.match.test(target));
@@ -44,7 +45,10 @@ vi.mock('fs/promises', async (importOriginal) => {
   return {
     ...actual,
     stat: wrap('stat', actual.stat as never),
-    readFile: wrap('readFile', actual.readFile as never),
+    // `open`, not `readFile`: the scanner opens a file's content now, so that is
+    // where a vanished file announces itself — and holding the descriptor is
+    // what keeps a delete from truncating the transfer that follows.
+    open: wrap('open', actual.open as never),
     readdir: wrap('readdir', actual.readdir as never),
   };
 });
@@ -94,7 +98,7 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
   it('skips a file deleted between stat and read', async () => {
     await writeFile(join(testDir, 'stays.txt'), 'stays');
     await writeFile(join(testDir, 'racy.txt'), 'racy');
-    failures.push({ op: 'readFile', match: /racy\.txt$/, code: 'ENOENT' });
+    failures.push({ op: 'open', match: /racy\.txt$/, code: 'ENOENT' });
 
     const tree = await new FsScanner(testDir, { bs: new BsMem() }).scan();
 
@@ -213,7 +217,7 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
 
   it('still fails the scan when a read fails for a non-ENOENT reason', async () => {
     await writeFile(join(testDir, 'unreadable.txt'), 'x');
-    failures.push({ op: 'readFile', match: /unreadable\.txt$/, code: 'EIO' });
+    failures.push({ op: 'open', match: /unreadable\.txt$/, code: 'EIO' });
 
     await expect(
       new FsScanner(testDir, { bs: new BsMem() }).scan(),

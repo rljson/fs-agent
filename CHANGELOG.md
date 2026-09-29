@@ -1,6 +1,41 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.82]
+
+### Files move as streams, and the 50 MB ceiling is gone
+
+Every blob on every path was a whole file in memory: the scanner read a file with
+`readFile` and handed the Buffer to `setBlob`; a restore fetched the whole blob
+with `getBlob` and then wrote it. On a remote store that Buffer also had to cross
+as one socket message — so a file larger than the transport's 50 MB
+`maxHttpBufferSize` could not be fetched at all, whatever the memory.
+
+That was not hypothetical. One 63 MB file left three of four nodes permanently
+holding a file the fourth had deleted; the customer's largest document was
+45.9 MB against the same cap.
+
+- **Restore streams to disk.** `_atomicWriteStream` is the streaming twin of
+  `_atomicWriteFile`, same platform rule, one chunk at a time.
+- **Scanning streams off disk** for files above `STREAM_ABOVE_BYTES` (4 MB), and
+  still reads smaller ones whole — below one chunk, the whole-file read costs no
+  more memory than a stream would, and the scanner runs this once per file across
+  trees of hundreds of thousands of files. Files are now **opened** rather than
+  read, so a vanished file still announces itself where it always did and the
+  held descriptor cannot be truncated by a delete mid-transfer.
+- **`FsBlobAdapter` streams both directions**, `fileToBlob` and `blobToFile`.
+- **Error attribution preserved.** Bytes now arrive *during* the write, so a peer
+  going away mid-file surfaces at the write rather than the fetch. Such errors are
+  tagged and reported as an unfetchable blob — one file skipped, the tree applied
+  — never as a locked document, which is a different problem with a different
+  person to talk to.
+- **`BlobUnavailableError`'s record corrected**: the class stays, because a blob
+  can still be genuinely unreachable, but size is no longer one of the reasons.
+
+Requires `@rljson/bs` 0.0.27, where `getBlobStream` became a series of ranged
+pulls. Before that release it returned a deserialised `{}` over any real socket —
+229 test failures' worth of proof that the old contract could not work.
+
+## [0.0.81]
 
 ### Changed
 
