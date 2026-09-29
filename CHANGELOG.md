@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.81]
+## [0.0.82]
 
 ### Files move as streams, and the 50 MB ceiling is gone
 
@@ -35,7 +35,7 @@ Requires `@rljson/bs` 0.0.27, where `getBlobStream` became a series of ranged
 pulls. Before that release it returned a deserialised `{}` over any real socket —
 229 test failures' worth of proof that the old contract could not work.
 
-## [Unreleased]
+## [0.0.81]
 
 ### Changed
 
