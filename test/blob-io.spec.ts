@@ -60,7 +60,7 @@ describe('storeFileAsBlob', () => {
     try {
       return (await storeFileAsBlob(bs, handle, size)).blobId;
     } finally {
-      await handle.close().catch(() => {});
+      await handle.close();
     }
   };
 

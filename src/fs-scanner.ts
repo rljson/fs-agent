@@ -438,11 +438,12 @@ export class FsScanner {
                 `Failed to store blob for file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
               );
             } finally {
-              // `readableWebStream` closes the handle when the stream is fully
-              // read, and closing twice is a no-op — but a store that threw
-              // half-way leaves it open, and a scan over a large tree leaks one
-              // descriptor per failure until it runs out.
-              await handle.close().catch(() => {});
+              // Must run: a store that threw half-way leaves the handle open,
+              // and a scan over a large tree would leak one descriptor per
+              // failure until it ran out. Bare, because `readableWebStream`
+              // closes the handle itself once the stream is fully read and a
+              // second close resolves rather than throwing.
+              await handle.close();
             }
 
             if (!blobProps || !blobProps.blobId) {

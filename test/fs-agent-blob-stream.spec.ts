@@ -132,4 +132,36 @@ describe('FsAgent — restore streams the blob', () => {
       expect((await readFile(partial)).length).not.toBe(4096);
     }
   });
+
+  it('names every unfetchable blob, and counts them in the plural', async () => {
+    // The message goes into a field report, and "could not fetch 1 blob" when
+    // two are missing sends whoever reads it looking for one cause. Both files
+    // have to be listed, and the noun has to agree.
+    const treeKey = 'fsTree';
+    const db = await freshDb(treeKey);
+
+    const sourceDir = join(testDir, 'src3');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(join(sourceDir, 'gone-a.txt'), 'a');
+    await writeFile(join(sourceDir, 'gone-b.txt'), 'b');
+    await writeFile(join(sourceDir, 'here.txt'), 'here');
+
+    const bs = new BsMem();
+    const rootRef = await new FsAgent(sourceDir, bs).storeInDb(db, treeKey);
+
+    const holed = Object.create(bs) as Bs;
+    holed.getBlobStream = async (id: string) => {
+      const { content } = await bs.getBlob(id);
+      if (content.length === 1) throw new Error('no peer holds this blob');
+      return bs.getBlobStream(id);
+    };
+
+    const targetDir = join(testDir, 'dst3');
+    await mkdir(targetDir, { recursive: true });
+    await expect(
+      new FsAgent(targetDir, holed).loadFromDb(db, treeKey, rootRef),
+    ).rejects.toThrow(/could not fetch 2 blobs: gone-a\.txt, gone-b\.txt/);
+
+    expect(await readFile(join(targetDir, 'here.txt'), 'utf8')).toBe('here');
+  });
 });

@@ -99,7 +99,12 @@ export class FsBlobAdapter {
     try {
       blobProps = await storeFileAsBlob(bs, handle, stats.size);
     } finally {
-      await handle.close().catch(() => {});
+      // Unconditional, and bare. `readableWebStream` closes the handle itself
+      // once the stream is fully read, so this is often the second close — and a
+      // second close resolves rather than throwing, verified on Node 24. A
+      // `.catch` here would only be an unreachable branch pretending to handle
+      // something.
+      await handle.close();
     }
 
     // Extract file name from path
