@@ -805,6 +805,8 @@ export class FsAgent {
    * the rest of the restore either. Conflating them would report an offline peer
    * as a locked file, and the field reports are read by people who act on that
    * distinction.
+   * @param error - The error thrown while writing the file.
+   * @returns Whether it came from the blob source.
    */
   private static _isBlobReadError(error: unknown): boolean {
     return (
