@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.83]
+
+### Changed
+
+- **`@rljson/db` 0.0.48 and `@rljson/server` 0.0.71**, the two halves of the
+  gap-fill fix. The server bounds the SIZE of a gap-fill answer (it used to send
+  the whole matching ref log in one `socket.emit` — 124 kB for a full log, 203 kB
+  with predecessors); db bounds the RATE at which one is asked for (an answer is
+  processed ref by ref, so any ref in it that jumped another sender's sequence
+  asked again). The cloud EventHub served 858 answers in 18.2 seconds before
+  dying of `Reached heap limit` at 990 MB. Either half survives that; together a
+  reconnect costs a couple of 25 kB messages.
+
 ## [0.0.82]
 
 ### Files move as streams, and the 50 MB ceiling is gone
