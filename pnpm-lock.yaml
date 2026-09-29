@@ -12,8 +12,8 @@ importers:
   .:
     dependencies:
       '@rljson/bs':
-        specifier: 0.0.26
-        version: 0.0.26
+        specifier: 0.0.27
+        version: 0.0.27
       '@rljson/db':
         specifier: 0.0.47
         version: 0.0.47
@@ -391,6 +391,10 @@ packages:
 
   '@rljson/bs@0.0.26':
     resolution: {integrity: sha512-LN+HGv6vkhAOX5CmykUqrXtdaeUpqJJWSSJEWh00oGxmPmhNAJCHIeAVrmk1LGPszMsRU7fsCT6zxxQOCbJ/FA==}
+    engines: {node: '>=22.14.0'}
+
+  '@rljson/bs@0.0.27':
+    resolution: {integrity: sha512-qM01n2CaKI4i0tGHYV8mPcuovo2yz/OqYhnZvQcxLwFytsvUPf+fIa32GSMDPPTETKQ70GExNUFSneWyMdpNYw==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/db@0.0.47':
@@ -2071,6 +2075,12 @@ snapshots:
   '@microsoft/tsdoc@0.16.0': {}
 
   '@rljson/bs@0.0.26':
+    dependencies:
+      '@rljson/hash': 0.0.19
+      '@rljson/json': 0.0.23
+      '@rljson/rljson': 0.0.83
+
+  '@rljson/bs@0.0.27':
     dependencies:
       '@rljson/hash': 0.0.19
       '@rljson/json': 0.0.23
