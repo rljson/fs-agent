@@ -7,8 +7,10 @@
 import { Bs, BsMem } from '@rljson/bs';
 import { Json } from '@rljson/json';
 
-import { mkdir, readFile, stat, writeFile } from 'fs/promises';
+import { mkdir, open, stat, utimes } from 'fs/promises';
 import { dirname } from 'path';
+
+import { storeFileAsBlob } from './blob-io.ts';
 
 // .............................................................................
 // Types
@@ -86,12 +88,19 @@ export class FsBlobAdapter {
     const bs = options.bs || this._bs;
     const includePath = options.includePath !== false;
 
-    // Read file stats and content
+    // Read file stats, then stream the bytes into blob storage.
+    //
+    // `readFile` + `setBlob(buffer)` held the whole file in RAM — and, on a
+    // remote store, sent it as one socket message, which a file over the 50 MB
+    // socket cap could never cross at all. A stream costs one chunk either way.
     const stats = await stat(filePath);
-    const content = await readFile(filePath);
-
-    // Store content in blob storage
-    const blobProps = await bs.setBlob(content);
+    const handle = await open(filePath, 'r');
+    let blobProps;
+    try {
+      blobProps = await storeFileAsBlob(bs, handle, stats.size);
+    } finally {
+      await handle.close().catch(() => {});
+    }
 
     // Extract file name from path
     /* v8 ignore next -- @preserve */
@@ -144,21 +153,30 @@ export class FsBlobAdapter {
     const createDirs = options.createDirs !== false;
     const preserveMtime = options.preserveMtime !== false;
 
-    // Get blob content
-    const blob = await bs.getBlob(metadata.blobId);
-
     // Create parent directories if needed
     if (createDirs) {
       const dir = dirname(targetPath);
       await mkdir(dir, { recursive: true });
     }
 
-    // Write file
-    await writeFile(targetPath, blob.content);
+    // Stream the blob to disk rather than fetching it whole and then writing
+    // it: two full copies of the file in RAM, for no gain, on a path whose
+    // whole job is moving bytes between two places that are not memory.
+    const stream = await bs.getBlobStream(metadata.blobId);
+    const handle = await open(targetPath, 'w');
+    try {
+      const reader = stream.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await handle.write(value);
+      }
+    } finally {
+      await handle.close();
+    }
 
     // Preserve modification time if requested
     if (preserveMtime && metadata.mtime) {
-      const { utimes } = await import('fs/promises');
       const mtime = new Date(metadata.mtime);
       await utimes(targetPath, mtime, mtime);
     }
@@ -182,7 +200,11 @@ export class FsBlobAdapter {
   }
 
   /**
-   * Retrieves file content from blob storage
+   * Retrieves file content from blob storage.
+   *
+   * Returns a Buffer, so the whole blob is in memory by definition — that is
+   * what the caller asked for. Anything writing the bytes to a destination
+   * should use {@link FsBlobAdapter.blobToFile} instead, which streams.
    * @param blobId - Blob ID
    * @returns File content as Buffer
    */

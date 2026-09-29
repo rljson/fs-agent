@@ -27,17 +27,34 @@ let writeErrorCode = 'EPERM';
 
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
+  const isLocked = (path: unknown): boolean =>
+    [...lockedPaths].some((p) => String(path).endsWith(p));
+  const lockError = (): NodeJS.ErrnoException => {
+    const err = new Error(`${writeErrorCode}: locked`) as NodeJS.ErrnoException;
+    err.code = writeErrorCode;
+    return err;
+  };
   return {
     ...actual,
     writeFile: (path: unknown, ...rest: never[]) => {
-      const target = String(path);
-      if ([...lockedPaths].some((p) => target.endsWith(p))) {
-        const err = new Error(`${writeErrorCode}: locked`) as NodeJS.ErrnoException;
-        err.code = writeErrorCode;
-        return Promise.reject(err);
-      }
+      if (isLocked(path)) return Promise.reject(lockError());
       return (actual.writeFile as (...a: never[]) => Promise<void>)(
         path as never,
+        ...rest,
+      );
+    },
+    // A restore writes through a file handle now, so the lock has to be refused
+    // where Windows actually refuses it: at the open, not at the write. A
+    // document CARAT is holding fails `CreateFile` for write access — this is a
+    // closer model of the real fault than the old `writeFile` mock was, not a
+    // workaround for it. Read opens are left alone: the scanner uses them on
+    // the source folder, and a held document can still be read.
+    open: (path: unknown, flags?: unknown, ...rest: never[]) => {
+      const write = flags === undefined || String(flags).includes('w');
+      if (write && isLocked(path)) return Promise.reject(lockError());
+      return (actual.open as (...a: never[]) => Promise<unknown>)(
+        path as never,
+        flags as never,
         ...rest,
       );
     },

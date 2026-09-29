@@ -1607,16 +1607,21 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
       await writeFile(join(targetDir, 'deleted-elsewhere.txt'), 'stale');
 
-      // A store that serves every blob except one, which fails the way a file
-      // above the transport's size cap does: it is present and it cannot be
+      // A store that serves every blob except one, which fails the way an
+      // unreachable peer does: the blob is named by the tree and cannot be
       // fetched, no matter how often it is asked for.
+      //
+      // The hole is in `getBlobStream`, because that is what a restore calls
+      // now. It used to be in `getBlob`, and leaving it there would have made
+      // this test pass by fetching the file successfully — a green assertion
+      // about an unfetchable blob that was never unfetchable.
       const holed = Object.create(sharedBs) as Bs;
-      holed.getBlob = async (id: string) => {
+      holed.getBlobStream = async (id: string) => {
         const blob = await sharedBs.getBlob(id);
         if (blob?.content?.toString() === 'cannot travel') {
-          throw new Error('payload exceeds the transport size cap');
+          throw new Error('the peer holding this blob is unreachable');
         }
-        return blob;
+        return sharedBs.getBlobStream(id);
       };
 
       const target = new FsAgent(targetDir, holed);

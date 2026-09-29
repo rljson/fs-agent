@@ -5,12 +5,14 @@
 // found in the LICENSE file in the root of this package.
 
 import { Bs, BsMem } from '@rljson/bs';
+
+import { storeFileAsBlob } from './blob-io.ts';
 import { hip } from '@rljson/hash';
 import { Json } from '@rljson/json';
 import { Tree, TreeRef } from '@rljson/rljson';
 
 import { FSWatcher, watch } from 'fs';
-import { mkdir, readdir, readFile, rename, stat, writeFile } from 'fs/promises';
+import { mkdir, open, readdir, readFile, rename, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
 /**
@@ -404,10 +406,15 @@ export class FsScanner {
           ) {
             blobId = cached.blobId;
           } else {
-            // Store ONLY file content in blob storage (NOT tree node)
-            let fileContent: Buffer;
+            // Store ONLY file content in blob storage (NOT tree node).
+            //
+            // Opened rather than read: the open is where a vanished file
+            // announces itself, and holding the descriptor means the transfer
+            // that follows cannot be truncated by a delete. Large files then
+            // stream off that handle — see `storeFileAsBlob`.
+            let handle;
             try {
-              fileContent = await readFile(childPath);
+              handle = await open(childPath, 'r');
             } catch (error) {
               // A file deleted between stat and read is the same race as one
               // deleted before the stat — rethrow it unwrapped so the per-entry
@@ -421,11 +428,21 @@ export class FsScanner {
 
             let blobProps;
             try {
-              blobProps = await this._bs.setBlob(fileContent);
+              blobProps = await storeFileAsBlob(
+                this._bs,
+                handle,
+                childStats.size,
+              );
             } catch (error) {
               throw new Error(
                 `Failed to store blob for file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
               );
+            } finally {
+              // `readableWebStream` closes the handle when the stream is fully
+              // read, and closing twice is a no-op — but a store that threw
+              // half-way leaves it open, and a scan over a large tree leaks one
+              // descriptor per failure until it runs out.
+              await handle.close().catch(() => {});
             }
 
             if (!blobProps || !blobProps.blobId) {
