@@ -24,7 +24,7 @@ import { createTreesTableCfg } from '@rljson/rljson';
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { FsEditChain } from '../src/fs-edit-chain.ts';
+import { DEFAULT_MAX_WALK, FsEditChain } from '../src/fs-edit-chain.ts';
 
 const TREE = 'fileTree';
 
@@ -128,15 +128,35 @@ describe('FsEditChain.classify', () => {
   });
 
   // ...........................................................................
-  it('refuses to answer when the walk is too deep to finish', async () => {
-    // A walk this deep is a cold replay rather than a catch-up. Truncated, it
-    // cannot distinguish "not an ancestor" from "not yet reached", so it says
-    // so instead of guessing.
+  it('calls a walk that ran out of BUDGET a fork, not an unknown', async () => {
+    // **A latent permanent failure, and the earlier version of this test
+    // pinned it.** Running out of budget is not the same truncation as failing
+    // to read a row: everything asked for WAS readable, and no relation was
+    // found within `DEFAULT_MAX_WALK` entries.
+    //
+    // Answering `incomplete` here meant any node more than that many pushes
+    // into its own history said so forever — which the decision turns into
+    // `blocked`, which never repairs. A long-lived node would simply stop
+    // healing, silently, and nothing in the suite would have noticed.
+    //
+    // `fork` instead: both sides keep their work, reconciliation is additive.
+    // Less precise than the truth and never destructive.
     const theirs = await chain.append({ treeRef: 'T0' });
     let last = theirs;
-    for (let i = 1; i <= 700; i++) {
+    for (let i = 1; i <= DEFAULT_MAX_WALK + 200; i++) {
       last = await chain.append({ treeRef: `T${i}` });
     }
-    expect(await chain.classify(last.head, theirs.head)).toBe('incomplete');
+    expect(await chain.classify(last.head, theirs.head)).toBe('fork');
+  }, 120_000);
+
+  it('still answers within the budget for an ordinary history', async () => {
+    // The control for the case above: the same shape, short enough to resolve,
+    // must give the precise answer rather than the safe one.
+    const theirs = await chain.append({ treeRef: 'T0' });
+    let last = theirs;
+    for (let i = 1; i <= 20; i++) {
+      last = await chain.append({ treeRef: `T${i}` });
+    }
+    expect(await chain.classify(last.head, theirs.head)).toBe('ahead');
   }, 60_000);
 });

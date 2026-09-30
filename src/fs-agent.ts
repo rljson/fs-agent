@@ -302,6 +302,27 @@ export const RESTORE_FETCH_CONCURRENCY = 16;
 export const STATE_HISTORY_MAX = 1_000;
 
 /**
+ * How many deletions the tombstone log remembers.
+ *
+ * The log is the one structure in this agent that grows without bound. Measured
+ * on 400 deletions: 337 entries, ~11 bytes each in `.fsagent-state.json`, and
+ * the file is rewritten SYNCHRONOUSLY on every deletion — so the cost of
+ * deleting the next file grows with every file already deleted. A folder with
+ * years of churn turns that into a megabyte rewritten per delete.
+ *
+ * Everything else was measured and is already bounded: the chain grows one
+ * entry per PUSH rather than per change (400 deletions produced 7, because the
+ * debounce coalesces them), `_localPathTimeIds` is pruned by the removals it
+ * records, and `_stateHistory` has {@link STATE_HISTORY_MAX}.
+ *
+ * Ten thousand is chosen to be far past any real partition and still small
+ * enough to rewrite cheaply (~110 KB). Evicting a tombstone can RESURRECT a
+ * file — that is the whole point of keeping it — so eviction is oldest-first
+ * and loud, and the number is deliberately generous rather than tight.
+ */
+export const TOMBSTONE_LOG_MAX = 10_000;
+
+/**
  * What an agent concluded about an inbound ref.
  *
  * See `FsAgent._inboundRefVerdict` for why this is one decision rather than
@@ -772,6 +793,23 @@ export class FsAgent {
    * losing it in that window is the whole defect.
    */
   private _persistTombstones(): void {
+    // Oldest first, because a `Set` preserves insertion order and the oldest
+    // deletion is the one a peer is least likely still to be pushing back.
+    //
+    // LOUD, because evicting a tombstone can resurrect a file: that is what a
+    // tombstone is for, and dropping one is a decision to stop defending a
+    // deletion. If this is ever seen in the field it is a signal that the log
+    // needs a real garbage-collection rule — one that knows when every peer
+    // has seen a deletion — rather than a bigger number.
+    while (this._pendingDeletes.size > TOMBSTONE_LOG_MAX) {
+      const oldest = this._pendingDeletes.values().next().value as string;
+      this._pendingDeletes.delete(oldest);
+      console.warn(
+        `[FsAgent] tombstone log full at ${TOMBSTONE_LOG_MAX} — forgetting ` +
+          `the deletion of ${oldest}. A peer that never saw it can now put ` +
+          `it back.`,
+      );
+    }
     this._writeAgentState();
   }
 
@@ -813,7 +851,12 @@ export class FsAgent {
       const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'));
       const paths = (parsed as { tombstones?: unknown })?.tombstones;
       if (!Array.isArray(paths)) return;
-      for (const path of paths) {
+      // Capped on the way IN as well. A log written by a build without the
+      // cap — or by one with a larger one — must not reintroduce a size this
+      // process has decided not to carry, and the newest entries are the ones
+      // worth keeping.
+      const keep = paths.slice(-TOMBSTONE_LOG_MAX);
+      for (const path of keep) {
         if (typeof path === 'string' && path.length > 0) {
           this._pendingDeletes.add(join(this._rootPath, ...path.split('/')));
         }

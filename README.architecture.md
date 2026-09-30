@@ -591,6 +591,51 @@ constraint the package already has (`pnpm overrides`, exact pins).
 **Tested by** `test/fs-ref-vs-content.spec.ts`, including the control: the
 canonical-order assertion is red without the sort.
 
+## What Grows, and What Bounds It
+
+Measured on 400 files created then deleted one at a time, rather than reasoned
+about:
+
+| structure | growth | bound |
+| --- | --- | --- |
+| the chain (`editHistory`/`edits`/`multiEdits`) | one entry per **push**, not per change — 400 deletions produced **7**, because the debounce coalesces them | the walk budget, `DEFAULT_MAX_WALK` |
+| `_localPathTimeIds` | one entry per changed path | pruned by the removals it records |
+| `_stateHistory` | one per state entered | `STATE_HISTORY_MAX` |
+| **the tombstone log** | **one per deletion, for ever** — ~11 bytes each, and the file is rewritten SYNCHRONOUSLY on every deletion | `TOMBSTONE_LOG_MAX` |
+
+The tombstone log was the only unbounded one, and its shape is the bad kind:
+the cost of deleting the next file grew with every file already deleted, so a
+folder with years of churn turns into a megabyte rewritten per delete. Capped
+at 10 000, evicted oldest-first, and **loudly** — evicting a tombstone can
+resurrect a file, which is what a tombstone exists to prevent. A sighting in
+the field means the log needs a real garbage-collection rule (one that knows
+when every peer has seen a deletion), not a bigger number. The cap applies on
+READ as well, so a file written by a build without it cannot reintroduce a size
+this process has declined to carry.
+
+### A hole and a budget are different truncations
+
+Found by the growth measurement, which was supposed to be about storage.
+
+`classify` walks ancestry, and it can stop for two reasons that look alike and
+are not:
+
+- **a hole** — an entry exists and this node cannot read it. The ref being
+  looked for may be inside the part it could not reach, so the only honest
+  answer is `incomplete`.
+- **the budget** — everything asked for WAS readable, and no relation was found
+  within `DEFAULT_MAX_WALK` entries.
+
+Conflating them meant any node more than 500 pushes into its own history
+answered `incomplete` for ever. The decision turns that into `blocked`, which
+never repairs — **a long-lived node would simply stop healing, silently**, and
+nothing in the suite would have noticed. A bounded walk now answers `fork`:
+both sides keep their work, reconciliation is additive. Less precise than the
+truth and never destructive.
+
+`collectRemovals` keeps the strict reading for both cases, because a re-add
+hiding below the bound would turn a skipped removal into a deleted live file.
+
 ## Deciding From Reachability
 
 `antiEntropyDecision` used to have a content hash and ONE generation of

@@ -418,10 +418,25 @@ describe('fs mesh', () => {
       },
     });
 
+    const before = process.memoryUsage().heapUsed;
     const result = await mesh.converged({ timeoutMs: 60_000 });
     expect(result.converged, JSON.stringify(result.snapshot).slice(0, 400)).toBe(
       true,
     );
     expect(result.snapshot['B'].length).toBe(400);
+
+    // WP5's stated budget, and it is stated rather than tuned: 400 files must
+    // converge inside 64 MB of heap growth across TWO agents, their stores and
+    // their chains. Generous on purpose — the point is to notice a change of
+    // ORDER, not to police megabytes, and a budget that fails on ordinary
+    // variation gets raised until it means nothing.
+    //
+    // What this is guarding, measured rather than assumed: the chain grows one
+    // entry per PUSH and not per change (400 deletions coalesce into ~7
+    // entries), so the structure that could have blown up here does not. The
+    // one that grows without bound is the tombstone log, and it is capped at
+    // `TOMBSTONE_LOG_MAX`.
+    const grewMb = (process.memoryUsage().heapUsed - before) / (1024 * 1024);
+    expect(grewMb, `heap grew ${grewMb.toFixed(1)} MB`).toBeLessThan(64);
   }, 120_000);
 });

@@ -14,7 +14,11 @@ import { mkdir, rm, unlink, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AGENT_STATE_FILE, FsAgent } from '../src/fs-agent.ts';
+import {
+  AGENT_STATE_FILE,
+  FsAgent,
+  TOMBSTONE_LOG_MAX,
+} from '../src/fs-agent.ts';
 
 // .............................................................................
 // The tombstone log: what this node deleted, remembered past the push.
@@ -241,4 +245,64 @@ describe('FsAgent — the tombstone log', () => {
     // Still running, still tracking in memory.
     expect(agent['_pendingDeletes'].has(join(dir, 'x.txt'))).toBe(true);
   }, 30_000);
+
+  // ...........................................................................
+  describe('the log is bounded', () => {
+    it('evicts the oldest deletions past the cap, loudly', async () => {
+      // The log is the one structure in this agent that grows without bound,
+      // and it is rewritten SYNCHRONOUSLY on every deletion — so the cost of
+      // deleting the next file grows with every file already deleted.
+      //
+      // Evicting a tombstone can RESURRECT a file, which is the whole point of
+      // keeping it, so the eviction is oldest-first and it says so. A sighting
+      // in the field means the log needs a real garbage-collection rule — one
+      // that knows when every peer has seen a deletion — not a bigger number.
+      const agent = new FsAgent(dir, new BsMem());
+      agents.push(agent);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const log = agent['_pendingDeletes'] as Set<string>;
+      for (let i = 0; i < TOMBSTONE_LOG_MAX + 3; i++) {
+        log.add(join(dir, `f${i}.txt`));
+      }
+      agent['_persistTombstones']();
+
+      expect(log.size).toBe(TOMBSTONE_LOG_MAX);
+      // Oldest gone, newest kept.
+      expect(log.has(join(dir, 'f0.txt'))).toBe(false);
+      expect(log.has(join(dir, 'f2.txt'))).toBe(false);
+      expect(
+        log.has(join(dir, `f${TOMBSTONE_LOG_MAX + 2}.txt`)),
+      ).toBe(true);
+      expect(
+        warn.mock.calls.some((c) =>
+          String(c[0]).includes('tombstone log full'),
+        ),
+      ).toBe(true);
+    }, 30_000);
+
+    it('caps a log it reads back, not only one it writes', async () => {
+      // A file written by a build without the cap, or with a larger one, must
+      // not reintroduce a size this process has decided not to carry — and the
+      // NEWEST entries are the ones worth keeping.
+      const tombstones = Array.from(
+        { length: TOMBSTONE_LOG_MAX + 5 },
+        (_, i) => `f${i}.txt`,
+      );
+      await writeFile(
+        join(dir, AGENT_STATE_FILE),
+        JSON.stringify({ currentRef: 'abc', tombstones }),
+      );
+
+      const agent = new FsAgent(dir, new BsMem());
+      agents.push(agent);
+      const log = agent['_pendingDeletes'] as Set<string>;
+
+      expect(log.size).toBe(TOMBSTONE_LOG_MAX);
+      expect(log.has(join(dir, 'f0.txt'))).toBe(false);
+      expect(
+        log.has(join(dir, `f${TOMBSTONE_LOG_MAX + 4}.txt`)),
+      ).toBe(true);
+    }, 30_000);
+  });
 });

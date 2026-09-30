@@ -63,6 +63,18 @@ import {
 /** The `EditAction.type` every fs chain entry carries. */
 export const FS_EDIT_ACTION = 'putFsTree';
 
+/**
+ * How far back a walk goes before it gives up.
+ *
+ * A walk this deep is a cold replay of a whole lineage rather than a
+ * catch-up, and left unbounded it pins a core on a long chain.
+ *
+ * Exhausting it is NOT the same as failing to read a row — see
+ * {@link FsEditChain.classify}. Conflating the two made any node more than this
+ * many pushes into its own history stop repairing, permanently and silently.
+ */
+export const DEFAULT_MAX_WALK = 500;
+
 /** What one chain entry says happened. */
 export interface FsEditData extends Json {
   /** The tree ref the folder ended up at. */
@@ -265,7 +277,24 @@ export class FsEditChain {
    * `behind` — theirs descends from ours, so we are the one missing work.
    * `ahead` — ours descends from theirs; they are missing ours.
    * `fork` — neither descends from the other. Both sides have work.
-   * `incomplete` — a walk was truncated, so NOTHING may be concluded.
+   * `incomplete` — an entry could not be RESOLVED, so nothing may be concluded.
+   *
+   * **A hole and the walk bound are not the same truncation**, and treating
+   * them alike was a latent permanent failure. A hole means an entry exists and
+   * this node cannot read it: the ref it was looking for may be inside the part
+   * it could not reach, so the honest answer is "I do not know". Exhausting the
+   * walk bound means the opposite — everything asked for WAS readable, and no
+   * relation was found within {@link DEFAULT_MAX_WALK} entries of history.
+   *
+   * Conflating them meant any node more than `DEFAULT_MAX_WALK` pushes into its
+   * own history answered `incomplete` forever, which the decision turns into
+   * `blocked`, which never repairs. A long-lived node would simply stop
+   * healing, silently. Measured on the growth run that was meant to be about
+   * storage.
+   *
+   * A bounded walk with no relation therefore answers `fork`: both sides keep
+   * their work and reconciliation is additive. Less precise than the truth and
+   * never destructive, which is the right direction to be wrong in.
    * @param ourHead - This node's head, or `undefined` when it has none.
    * @param theirHead - The head that arrived.
    * @returns How the two histories stand.
@@ -279,11 +308,11 @@ export class FsEditChain {
 
     // Is ours an ancestor of theirs? Then they moved forward from us.
     const fromTheirs = await this._ancestorsOf(theirHead);
-    if (!fromTheirs.complete) return 'incomplete';
+    if (fromTheirs.holed) return 'incomplete';
     if (fromTheirs.refs.has(ourHead)) return 'behind';
 
     const fromOurs = await this._ancestorsOf(ourHead);
-    if (!fromOurs.complete) return 'incomplete';
+    if (fromOurs.holed) return 'incomplete';
     if (fromOurs.refs.has(theirHead)) return 'ahead';
 
     return 'fork';
@@ -292,35 +321,40 @@ export class FsEditChain {
   /**
    * Every entry reachable from `head`, itself included.
    *
-   * `complete` is false when any entry could not be resolved — and the caller
-   * must then conclude NOTHING, because the unreachable part may contain the
-   * very ref it was looking for. An incomplete walk that answers "not an
-   * ancestor" is indistinguishable from a definite no, and acting on it is how
-   * a node decides it is ahead of a peer it is actually behind.
+   * `holed` — an entry could not be RESOLVED. The caller must conclude
+   * nothing: the unreachable part may contain the very ref it was looking for,
+   * and a walk that answers "not an ancestor" on that basis is how a node
+   * decides it is ahead of a peer it is actually behind.
+   *
+   * `bounded` — the walk ran out of budget with everything it asked for
+   * readable. A different statement, and a usable one: no relation within this
+   * many entries of history. See {@link classify}.
    * @param head - Where to start.
    * @param maxWalk - Give up past this many entries.
-   * @returns The refs reached, and whether the walk resolved completely.
+   * @returns The refs reached, whether anything was unreadable, and whether
+   *   the budget ran out.
    */
   private async _ancestorsOf(
     head: string,
-    maxWalk = 500,
-  ): Promise<{ refs: Set<string>; complete: boolean }> {
+    maxWalk = DEFAULT_MAX_WALK,
+  ): Promise<{ refs: Set<string>; holed: boolean; bounded: boolean }> {
     const refs = new Set<string>();
-    let complete = true;
+    let holed = false;
+    let bounded = false;
     let frontier = [head];
 
     while (frontier.length > 0) {
       const wanted = frontier.filter((ref) => !refs.has(ref) && !!refs.add(ref));
       if (wanted.length === 0) break;
       if (refs.size > maxWalk) {
-        complete = false;
+        bounded = true;
         break;
       }
       const next: string[] = [];
       for (const ref of wanted) {
         const entry = await this.entry(ref);
         if (!entry) {
-          complete = false;
+          holed = true;
           continue;
         }
         for (const previous of entry.previous) next.push(previous);
@@ -328,7 +362,7 @@ export class FsEditChain {
       frontier = next;
     }
 
-    return { refs, complete };
+    return { refs, holed, bounded };
   }
 
   /**
@@ -370,7 +404,7 @@ export class FsEditChain {
   async collectRemovals(
     head: string,
     stopAt: ReadonlySet<string>,
-    maxWalk = 500,
+    maxWalk = DEFAULT_MAX_WALK,
   ): Promise<{ removed: string[]; timeId?: string; complete: boolean }> {
     const walked: FsChainEntry[] = [];
     const seen = new Set<string>();
