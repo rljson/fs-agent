@@ -628,6 +628,63 @@ they regularly do not. Measured: with `currentRef` alone, three lab runs in
 four converged perfectly on 1 201 files and propagated an added file, and none
 of them could delete one.
 
+## A Delete Travels as a Fact (`collectRemovals` + `planRemovals`)
+
+A tree records what a folder holds, so a deletion reaches a peer only as an
+**absence** — and an absence is indistinguishable from a state that merely
+predates the file. fs infers the difference from ancestry
+(`senderSawMyState`), which works only while the ancestor can be resolved. A
+partitioned node's cannot, and that is the measured data loss.
+
+The chain carries the removal instead, as something the sender **states**.
+
+### Reading the head is not enough
+
+A removal is stated ONCE, in the entry that made it. A node partitioned at that
+moment states it in an entry nobody received — and its next entry, computed
+against its own last announcement, says nothing about the deletion. So a peer
+reading only the head learns nothing.
+
+`FsEditChain.collectRemovals(head, stopAt)` walks `previous` back to a state the
+receiver knows and replays the range **oldest-first**, so a re-add cancels an
+earlier removal. Order is the whole correctness: taking the union of `removed`
+would delete a live file.
+
+The stop entry is excluded entirely. A receiver that knows `T1` already holds
+the state in which those paths are gone, and including its `timeId` would let an
+old removal out-order the receiver's newer work.
+
+**`complete: false` is the contract that matters most.** An unresolved entry
+means its ancestry — and any re-add hiding in it — is unknown, so the answer is
+**discarded rather than applied in part**. Truncation comes from a hole or from
+the walk bound; mongo states the rule as *"a caller must not latch the head;
+ancestors beyond the missing row would otherwise be lost forever"*.
+
+### Bounded twice, because it deletes without asking the ancestry rule
+
+`planRemovals` decides what to act on:
+
+| bound | rule |
+| --- | --- |
+| recency | `timeId`, minted once by the author, so every node orders the same pair identically. A removal older than this node's own newest edit to that path is refused. |
+| volume | the mass-delete circuit breaker, blocked **wholesale** — a partial mass delete leaves the folder in a state neither side asked for. |
+
+The ratio is judged on what would ACTUALLY be deleted, so paths this node does
+not hold and paths refused as stale cannot trip the breaker on a message that
+removes almost nothing. A missing or malformed `timeId` is **not comparable**,
+never "older": judging silence as untrustworthy refused every deletion across
+twenty tests when it was last tried.
+
+### What this does NOT yet fix
+
+**The deleting node cannot re-announce its own deletion after adopting a peer's
+tree**, so T4 is still a coin flip. `antiEntropyDecision` re-announces only a
+state the node AUTHORED (`_lastPushedRef`), and a node that has applied a peer's
+tree no longer authors its current state — it can only `pull` or `merge`. The
+mechanism here works when a peer does hear the head (measured: *"applied 1 peer
+deletion: doomed.txt"*); what is missing is that the head reliably goes out at
+all. That is a decision-rule problem, not a transport one.
+
 ## Tombstone Log (`_pendingDeletes` + `.fsagent-state.json`)
 
 **What this node deleted, remembered past the push.**

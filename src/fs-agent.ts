@@ -33,7 +33,11 @@ import {
   FsConflictResolver,
 } from './fs-conflict-resolver.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
-import { FsEditChain } from './fs-edit-chain.ts';
+import {
+  FsEditChain,
+  planRemovals,
+  type FsChainEntry,
+} from './fs-edit-chain.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
 import { stateBeaconEvent } from '@rljson/db';
@@ -525,6 +529,29 @@ export class FsAgent {
    * rather than a read.
    */
   private _chainHead?: { head: string; treeRef: string };
+
+  /**
+   * `relativePath → timeId` of the newest edit THIS node made to each path.
+   *
+   * A peer's removal is refused when this node has newer work on that path
+   * (see `planRemovals`), and this is the claim it is judged against. Grown
+   * from the `changed` list of every entry this node appends, so it is exactly
+   * as complete as the chain is.
+   */
+  private readonly _localPathTimeIds = new Map<string, string>();
+
+  /**
+   * Removals carried by an announcement, waiting for its apply.
+   *
+   * The resolve happens when the ref arrives and the apply happens later, after
+   * a debounce, so the removal list has to be parked in between. Keyed by the
+   * tree ref it accompanies and consumed once, because an entry applied twice
+   * would delete on the authority of a message already acted on.
+   */
+  private readonly _incomingRemovals = new Map<
+    string,
+    { removed: string[]; timeId: string }
+  >();
 
   /**
    * `relativePath → content hash` of the tree this node last announced.
@@ -2909,7 +2936,22 @@ export class FsAgent {
    * @returns The tree ref it denotes, or `undefined` for an unresolvable head.
    */
   private async _announcedTreeRef(ref: string): Promise<string | undefined> {
-    if (!ref.startsWith(CHAIN_HEAD_PREFIX)) return ref;
+    return (await this._resolveAnnouncement(ref))?.treeRef;
+  }
+
+  /**
+   * The state an incoming announcement is about, with its chain entry.
+   *
+   * The entry is what carries the sender's REMOVALS, which is the whole point
+   * of announcing a head: a removal is a fact the sender states, where an
+   * absence from a tree is only something a receiver can try to infer.
+   * @param ref - What arrived on the wire.
+   * @returns The tree ref and, for a marked head, the entry it resolved to.
+   */
+  private async _resolveAnnouncement(
+    ref: string,
+  ): Promise<{ treeRef: string; entry?: FsChainEntry } | undefined> {
+    if (!ref.startsWith(CHAIN_HEAD_PREFIX)) return { treeRef: ref };
     const head = ref.slice(CHAIN_HEAD_PREFIX.length);
     // A real case, not an impossible one — and asserting otherwise with a
     // coverage ignore is what hid it for a whole red run. An agent whose chain
@@ -2925,13 +2967,138 @@ export class FsAgent {
         );
         return undefined;
       }
-      return entry.treeRef;
+      return { treeRef: entry.treeRef, entry };
     } catch (err) {
       /* v8 ignore next -- @preserve an unreadable chain must not deafen us */
       this._writeSyncError('chain/resolveHead', err);
       /* v8 ignore next -- @preserve */
       return undefined;
     }
+  }
+
+  /**
+   * Gathers the deletions between a peer's head and a state this node knows.
+   *
+   * NOT just the head's own `removed` list. A removal is stated once, in the
+   * entry that made it, and a node partitioned at that moment states it in an
+   * entry nobody received — its next entry says nothing about the deletion,
+   * because that is computed against its own last announcement. Reading the
+   * head alone therefore learns nothing, and the file survives everywhere
+   * except on the node that deleted it. Measured; see
+   * `FsEditChain.collectRemovals`.
+   *
+   * An incomplete walk is DISCARDED rather than applied in part. A missing
+   * ancestor may be the re-add that cancels a removal we did collect, so
+   * acting on the fragment can delete a live file — mongo's `complete: false`
+   * contract, and the reason it exists.
+   * @param entry - The entry the announcement resolved to.
+   */
+  private async _collectIncomingRemovals(entry: FsChainEntry): Promise<void> {
+    if (!this._chain) return;
+    // States this node recognises, so the walk knows where to stop. Both names
+    // for the current state count, and so does every state it has held —
+    // a peer's chain may descend from one this node has since left.
+    const known = new Set<string>(
+      [this._currentRef, this._lastAppliedRef, ...this._stateHistory].filter(
+        (r): r is string => r !== undefined,
+      ),
+    );
+    try {
+      const walk = await this._chain.collectRemovals(entry.head, known);
+      if (!walk.complete) {
+        console.warn(
+          `[FsAgent] ancestry of head=${entry.head.slice(0, 8)}… is ` +
+            `incomplete — not acting on its deletions; the sender will ` +
+            `re-announce.`,
+        );
+        return;
+      }
+      if (walk.removed.length === 0) return;
+      this._incomingRemovals.set(entry.treeRef, {
+        removed: walk.removed,
+        timeId: walk.timeId ?? entry.timeId,
+      });
+    } catch (err) {
+      /* v8 ignore next -- @preserve a failed walk must not stop the apply */
+      this._writeSyncError('chain/collectRemovals', err);
+    }
+  }
+
+  /**
+   * Applies the deletions an announcement carried, if any.
+   *
+   * Runs AFTER the restore, so the restore's own accounting is untouched and
+   * the deletion is explicit in the log rather than folded into a prune count.
+   * The incoming tree lacks these paths by construction, so the order is not
+   * load-bearing — the clarity is.
+   *
+   * Every path that is deleted is also TOMBSTONED, for the same reason a local
+   * deletion is: between applying a peer's delete and announcing the result,
+   * this node's own advertised state still contains the file, and a third node
+   * pushing in that window would put it back.
+   * @param treeRef - The state being applied, which the removals arrived with.
+   */
+  private async _applyIncomingRemovals(treeRef: string): Promise<void> {
+    const incoming = this._incomingRemovals.get(treeRef);
+    // Consumed once. An entry applied twice would delete on the authority of a
+    // message already acted on.
+    this._incomingRemovals.delete(treeRef);
+    if (!incoming) return;
+
+    const held = new Set(
+      this._getFileContentMap(this._scanner.tree ?? { rootHash: '', trees: new Map() }).keys(),
+    );
+    const plan = planRemovals({
+      removed: incoming.removed,
+      timeId: incoming.timeId,
+      localTimeIds: this._localPathTimeIds,
+      held,
+      minFiles: MASS_DELETE_MIN_FILES,
+      maxRatio: MASS_DELETE_MAX_RATIO,
+    });
+
+    if (plan.blocked) {
+      // Loud, because the alternative to noticing this is discovering it from
+      // a user whose folder emptied.
+      console.error(
+        `[FsAgent] MASS DELETE REFUSED on ${this._rootPath}: a peer's edit ` +
+          `would remove ${incoming.removed.length} of ${held.size} files. ` +
+          `Nothing was deleted.`,
+      );
+      this._writeSyncError(
+        'removals/massDeleteGuard',
+        new Error(
+          `refused ${incoming.removed.length}/${held.size} peer removals`,
+        ),
+      );
+      return;
+    }
+
+    if (plan.staler.length > 0) {
+      console.warn(
+        `[FsAgent] kept ${plan.staler.length} path` +
+          `${plan.staler.length === 1 ? '' : 's'} a peer deleted — this node ` +
+          `has newer work on ${plan.staler.slice(0, 3).join(', ')}`,
+      );
+    }
+    if (plan.apply.length === 0) return;
+
+    for (const path of plan.apply) {
+      const absolute = join(this._rootPath, ...path.split('/'));
+      try {
+        await rm(absolute, { force: true });
+        this._pendingDeletes.add(absolute);
+      } catch (err) {
+        /* v8 ignore next -- @preserve a file we cannot remove is retried */
+        this._writeSyncError(`removals/${path}`, err);
+      }
+    }
+    this._persistTombstones();
+    console.log(
+      `[FsAgent] applied ${plan.apply.length} peer deletion` +
+        `${plan.apply.length === 1 ? '' : 's'}: ` +
+        `${plan.apply.slice(0, 3).join(', ')}`,
+    );
   }
 
   /**
@@ -2957,6 +3124,14 @@ export class FsAgent {
         removed: delta.removed,
       });
       this._chainHead = { head: entry.head, treeRef };
+      for (const path of entry.changed) {
+        this._localPathTimeIds.set(path, entry.timeId);
+      }
+      // A path this node deletes has no live claim any more. Leaving one would
+      // make a peer's later removal of the same path look stale.
+      for (const path of entry.removed) {
+        this._localPathTimeIds.delete(path);
+      }
     } catch (err) {
       /* v8 ignore next -- @preserve best-effort; see the doc comment */
       this._writeSyncError('chain/append', err);
@@ -3504,6 +3679,24 @@ export class FsAgent {
             `syncFromDb → restore(${treeKey})`,
           );
 
+          // The sender's DELETIONS, applied as facts rather than inferred from
+          // an absence. This is the half `mayPrune` cannot do: a partitioned
+          // node's ancestor is unresolvable, so the ancestry rule withholds the
+          // prune and the deleted file survives — on every node, including the
+          // one that deleted it.
+          //
+          // Placed here rather than at the top of the apply. Both were tried
+          // and the difference between them was WITHIN NOISE — four runs each
+          // of a scenario that is a coin flip is not a measurement, and reading
+          // one as a result is the mistake this file keeps paying for. This
+          // position is chosen because it is simpler, not because it measured
+          // better: it cannot delete under a paused watcher on paths the
+          // branches above are still reasoning about.
+          //
+          // Bounded twice either way: `timeId` recency and the mass-delete
+          // circuit breaker. See `planRemovals`.
+          await this._applyIncomingRemovals(treeRef);
+
           // After restore: re-scan the filesystem so the scanner's internal
           // tree matches the just-restored state, then store and record the
           // ref.  When the watcher fires (because restore touched files on
@@ -3854,8 +4047,18 @@ export class FsAgent {
         schedule(treeRef);
         return Promise.resolve();
       }
-      return this._announcedTreeRef(treeRef).then((resolved) => {
-        if (resolved !== undefined) schedule(resolved);
+      return this._resolveAnnouncement(treeRef).then((resolved) => {
+        if (resolved === undefined) return;
+        // Parked for the apply, which happens after a debounce. The sender's
+        // removals are the authorisation the ancestry rule cannot give, so
+        // they have to survive the gap between hearing and acting.
+        if (resolved.entry) {
+          void this._collectIncomingRemovals(resolved.entry).then(() =>
+            schedule(resolved.treeRef),
+          );
+          return;
+        }
+        schedule(resolved.treeRef);
       });
     };
 

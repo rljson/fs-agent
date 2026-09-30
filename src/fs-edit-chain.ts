@@ -260,6 +260,101 @@ export class FsEditChain {
   }
 
   /**
+   * The NET removals between a peer's head and a state this node knows.
+   *
+   * **Why a walk is needed at all, and it cost a red run to see.** A removal is
+   * stated ONCE, in the entry that made it. A node that was partitioned when it
+   * deleted a file states the removal in an entry nobody received; its next
+   * entry, after it rejoins, computes its `changed`/`removed` against its own
+   * last announcement and therefore says nothing about that deletion. So a peer
+   * reading only the head learns nothing, and the file survives on every node
+   * except the one that deleted it — which is the measured failure.
+   *
+   * Walking `previous` back to a state the receiver recognises closes exactly
+   * that gap, and the ancestry is reachable by hash alone (proven in
+   * `test/fs-chain-crosses-the-wire.spec.ts`).
+   *
+   * **Replayed oldest-first, so a re-add cancels a removal.** A path deleted
+   * and then created again inside the walked range is not a removal at all,
+   * and taking the union of `removed` would delete it. Order is the whole
+   * correctness of this function.
+   *
+   * **`complete` is mongo's contract, and it matters more than the result.**
+   * When an entry cannot be resolved the walk is truncated, and the caller MUST
+   * NOT treat the answer as authoritative — ancestors beyond the missing row
+   * are unknown, and one of them may be the re-add that cancels a removal we
+   * did collect. `@rljson/mongo-agent` states it as: *"a caller must not latch
+   * the head; ancestors beyond the missing row would otherwise be lost
+   * forever"*.
+   * @param head - The peer's head.
+   * @param stopAt - Tree refs this node already knows. The walk stops at the
+   *   first entry producing one of them, exclusive.
+   * @param maxWalk - Give up past this many entries. A walk this deep is a
+   *   cold replay rather than a catch-up, and left unbounded it pins a core on
+   *   a long chain.
+   * @returns The net removals, the newest `timeId` seen, and whether the walk
+   *   resolved completely.
+   */
+  async collectRemovals(
+    head: string,
+    stopAt: ReadonlySet<string>,
+    maxWalk = 500,
+  ): Promise<{ removed: string[]; timeId?: string; complete: boolean }> {
+    const walked: FsChainEntry[] = [];
+    const seen = new Set<string>();
+    let complete = true;
+    let frontier = [head];
+
+    while (frontier.length > 0) {
+      const wanted = frontier.filter((ref) => !seen.has(ref) && !!seen.add(ref));
+      if (wanted.length === 0) break;
+      if (walked.length + wanted.length > maxWalk) {
+        complete = false;
+        break;
+      }
+      const next: string[] = [];
+      for (const ref of wanted) {
+        const entry = await this.entry(ref);
+        if (!entry) {
+          // Not resolvable through any peer: its `previous`, and everything
+          // beyond it, is unknown.
+          complete = false;
+          continue;
+        }
+        // Exclusive: a state we already know needs no replay, its own
+        // ancestry is already accounted for in how we got there, and its
+        // `timeId` is not news — including it in the maximum below would let a
+        // removal claim to be newer than it is and weaken the recency guard.
+        if (stopAt.has(entry.treeRef)) continue;
+        walked.push(entry);
+        for (const previous of entry.previous) next.push(previous);
+      }
+      frontier = next;
+    }
+
+    // Oldest first. `previous` points backwards, so the discovery order
+    // reversed is the apply order.
+    const order = [...walked].reverse();
+    const removed = new Set<string>();
+    for (const entry of order) {
+      for (const path of entry.removed) removed.add(path);
+      // A re-add cancels an earlier removal, and only the order says so.
+      for (const path of entry.changed) removed.delete(path);
+    }
+
+    // The newest id among everything walked, which is what a receiver orders
+    // the removal against.
+    let timeId: string | undefined;
+    for (const entry of walked) {
+      if (compareTimeId(entry.timeId, timeId) > 0 || timeId === undefined) {
+        timeId = entry.timeId;
+      }
+    }
+
+    return { removed: [...removed].sort(), timeId, complete };
+  }
+
+  /**
    * The newest entry nothing else descends from.
    *
    * **A single slot, and that is a known limit.** Every node keeps its own
