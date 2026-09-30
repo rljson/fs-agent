@@ -651,6 +651,35 @@ scan:
 `removed` is the point of carrying more than a ref. A tree records what a folder
 holds; only this records what it deliberately stopped holding.
 
+### What writes it
+
+`FsAgent` appends one entry per state it pushes — the initial push, every
+debounced push, and a merge revision. The chain is created on the first
+`syncToDb`, which is where a `Db` and a `treeKey` first exist together, and
+`init()` continues the lineage a previous process left behind rather than
+starting a new root.
+
+**Best-effort throughout.** Creating the chain, and every append, is recorded
+via `_writeSyncError` and swallowed — the same discipline as
+`_persistCurrentRef`. A folder must never stop syncing because its history
+could not be written. Nothing reads the chain yet, so a gap costs nothing; when
+something does, a gap is what `complete: false` is for.
+
+`changed` and `removed` come from comparing the pushed tree's content map with
+the one announced before it (`_announcedContent`). The FIRST announcement
+records neither: everything would count as changed, which on a real folder
+makes the opening entry list 1 200 paths, and the tree ref already says what
+the baseline is. Only the deltas after it are worth recording.
+
+**Nothing is announced differently.** The wire still carries the tree ref, so
+the chain is invisible to peers and safe in a mixed fleet. Announcing the head
+is its own change — and this repo's history says that class of change "has been
+reverted four times for being shipped on reasoning".
+
+A merge revision's chain entry is still LINEAR. It is the one state with two
+parents — the shape these rows are written by hand to allow — and naming both
+means mapping two tree refs to two chain heads, which nothing resolves yet.
+
 ### Three tables, no cake
 
 `<treeKey>Edits`, `<treeKey>MultiEdits`, `<treeKey>EditHistory` — and
