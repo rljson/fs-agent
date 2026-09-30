@@ -318,3 +318,139 @@ export class FsEditChain {
     return ref;
   }
 }
+
+// .............................................................................
+/**
+ * Orders two `timeId`s (`<millis>:<nanoid>`).
+ *
+ * Compares the millisecond part numerically and breaks ties on the random
+ * suffix, so the order is TOTAL and IDENTICAL on every node — which is the
+ * property that makes convergence a guarantee rather than a matter of who
+ * spoke last. It is not "later in wall-clock time": two ids minted in the same
+ * millisecond are separated by a random tail, and nothing may read the result
+ * as a timestamp comparison.
+ *
+ * A missing or malformed id orders as "not comparable" (`0`), so a caller
+ * cannot accidentally treat "unknown" as "older".
+ *
+ * Same semantics as `@rljson/mongo-agent`'s `compareTimeId`, restated here
+ * rather than depended on: fs must not take a dependency on mongo-agent, which
+ * already depends on fs-agent.
+ * @param a - The first timeId, or `undefined`.
+ * @param b - The second timeId, or `undefined`.
+ * @returns `-1` if `a` is older, `1` if newer, `0` when equal or not
+ *   comparable.
+ */
+export const compareTimeId = (
+  a: string | undefined,
+  b: string | undefined,
+): number => {
+  if (!a || !b) return 0;
+  if (a === b) return 0;
+  const [aMillis, aTail] = a.split(':');
+  const [bMillis, bTail] = b.split(':');
+  const aNum = Number(aMillis);
+  const bNum = Number(bMillis);
+  if (Number.isNaN(aNum) || Number.isNaN(bNum)) return 0;
+  if (aNum !== bNum) return aNum < bNum ? -1 : 1;
+  return (aTail ?? '') < (bTail ?? '') ? -1 : 1;
+};
+
+// .............................................................................
+/** What {@link planRemovals} is asked. */
+export interface RemovalQuestion {
+  /** Relative paths the peer says it deleted. */
+  removed: readonly string[];
+  /** The `timeId` of the edit carrying them. */
+  timeId: string;
+  /**
+   * `path → timeId` of the newest LOCAL edit that touched each path.
+   *
+   * A path absent from this map has no local claim, and a removal for it is
+   * applied — "unknown" must never read as "older".
+   */
+  localTimeIds: ReadonlyMap<string, string>;
+  /** Relative paths this node currently holds. */
+  held: ReadonlySet<string>;
+  /** Below this many removals, nothing is bounded. */
+  minFiles: number;
+  /**
+   * Above `minFiles`, the largest fraction of `held` one removal may take.
+   */
+  maxRatio: number;
+}
+
+/** What {@link planRemovals} decided about a peer's deletions. */
+export interface RemovalPlan {
+  /** Paths to delete here. */
+  apply: string[];
+  /**
+   * Paths refused because this node has NEWER work on them.
+   *
+   * A removal is a statement about a state. A node that has since re-created
+   * the path has moved past that state, and applying the removal would undo
+   * newer work on the authority of an older edit.
+   */
+  staler: string[];
+  /**
+   * Whether the whole set was refused for being too large.
+   *
+   * The mass-delete circuit breaker, applied here for the same reason
+   * `@rljson/mongo-agent` applies it to tombstone application: an explicit
+   * removal list bypasses the ancestry check by design, so it must not also
+   * bypass the bound on how much one message may destroy.
+   */
+  blocked: boolean;
+}
+
+/**
+ * Which of a peer's deletions to apply here.
+ *
+ * **Why an explicit list is needed at all.** A tree records what a folder
+ * holds, so a deletion reaches a peer only as an absence — and an absence is
+ * indistinguishable from a state that merely predates the file. fs infers the
+ * difference from ancestry (`senderSawMyState`), which works only while the
+ * ancestor can be resolved. A partitioned node's ancestor cannot, and that is
+ * the measured data loss: the deleted file comes back on the node that deleted
+ * it. A removal carried in the chain is a FACT rather than an inference, and it
+ * is the authorisation ancestry could not supply.
+ *
+ * **Which is exactly why it is bounded twice.** It deletes without asking the
+ * ancestry rule, so recency and volume are the only guards left:
+ *
+ * - **recency**, by `timeId`. Minted once by the node that made the edit, so
+ *   every node orders the same pair the same way. A removal older than this
+ *   node's own newest edit to that path is refused.
+ * - **volume**, by the mass-delete circuit breaker. Below
+ *   `minFiles` nothing is bounded — emptying a three-file folder is an
+ *   ordinary edit — and above it a removal of more than `maxRatio` of what
+ *   this node holds is refused wholesale.
+ * @param opts - The removal and this node's state; see
+ *   {@link RemovalQuestion}.
+ * @returns What to delete, what was refused as stale, and whether the whole
+ *   set was blocked.
+ */
+export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
+  const apply: string[] = [];
+  const staler: string[] = [];
+
+  for (const path of opts.removed) {
+    // Nothing to delete is not a refusal. It is the ordinary case: the peer
+    // and this node already agree the path is gone.
+    if (!opts.held.has(path)) continue;
+    const local = opts.localTimeIds.get(path);
+    if (local !== undefined && compareTimeId(opts.timeId, local) < 0) {
+      staler.push(path);
+      continue;
+    }
+    apply.push(path);
+  }
+
+  const blocked =
+    apply.length > opts.minFiles &&
+    apply.length / Math.max(opts.held.size, 1) > opts.maxRatio;
+
+  return blocked
+    ? { apply: [], staler, blocked: true }
+    : { apply, staler, blocked: false };
+};

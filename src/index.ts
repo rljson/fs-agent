@@ -29,9 +29,13 @@ export {
   createFsChainTables,
   FS_EDIT_ACTION,
   FsEditChain,
+  compareTimeId,
+  planRemovals,
   type FsAppendOptions,
   type FsChainEntry,
   type FsEditData,
+  type RemovalPlan,
+  type RemovalQuestion,
 } from './fs-edit-chain.ts';
 export {
   FsBlobAdapter,
