@@ -712,10 +712,57 @@ records neither: everything would count as changed, which on a real folder
 makes the opening entry list 1 200 paths, and the tree ref already says what
 the baseline is. Only the deltas after it are worth recording.
 
-**Nothing is announced differently.** The wire still carries the tree ref, so
-the chain is invisible to peers and safe in a mixed fleet. Announcing the head
-is its own change — and this repo's history says that class of change "has been
-reverted four times for being shipped on reasoning".
+### What goes on the wire
+
+**The chain HEAD, marked `~H~`** — not the tree ref.
+
+A receiver holding a tree ref cannot find the chain row for it by hash, only by
+query, so nothing could walk ancestry. Announcing the head makes every
+announcement resolvable to an entry, which is what the `previous` walk needs in
+order to exist at all. It also makes each announcement UNIQUE: an A → B → A
+deletion produces three entries with three heads, so a returning content state
+is news by construction rather than by clearing the connector's dedup for it.
+
+The marker matters. A tree ref is a content hash and never starts with `~`, so
+the two are unambiguous on one channel — the trick `@rljson/mongo-agent` uses
+for its own protocol refs. Without it a receiver would have to TRY resolving
+every ref it hears, and a miss goes to the network.
+
+| | |
+| --- | --- |
+| `r` on the payload | `~H~<editHistory ref>` |
+| `p` on the payload | **tree refs, unchanged** |
+
+The predecessors stay tree refs deliberately. A receiver's prune rule compares
+them against `[_currentRef, _lastAppliedRef]`, which are tree refs, so
+translating them here would break the one rule that separates a deletion from a
+straggler. The head is an additional identity for the announced state, not a
+replacement for the ancestry already on the payload. A receiver that resolves
+the head gets the chain's own `previous` for free, and that is the ancestry the
+walk will use.
+
+**Three rules this cost a red run each to learn:**
+
+1. **An unmarked ref is scheduled SYNCHRONOUSLY.** Making the receive callback
+   `async` deferred the schedule by a microtask even for a tree ref, and that
+   was enough to lose a late joiner's bootstrap — it never received a file that
+   already existed. The connector's bookkeeping runs around that call; an await
+   between hearing a ref and queuing it reorders the two. The same applies to
+   the anti-entropy's socket read, where three tests read the status straight
+   after a beacon.
+2. **The chain is created in `syncFromDb` too.** A node that only receives — a
+   late joiner starts `syncFromDb` alone, because scanning its empty folder
+   would push emptiness over everyone's data — still has to resolve the heads
+   its peers announce. Created on the send path only, it dropped every
+   announcement it heard. The chain is per-route state, not per-direction.
+3. **A head that cannot be resolved answers `undefined`**, and nothing is
+   concluded from it. Not even divergence: reporting a disagreement this node
+   cannot describe is how the §2.1b symptom arrives by a second route.
+
+**Mixed fleet: this must roll out in lockstep.** An older build receiving
+`~H~…` would try to fetch a tree by that hash and fail. The canonical child
+order above already imposes the same constraint, so the package as a whole
+needs the exact-pin discipline it already has.
 
 A merge revision's chain entry is still LINEAR. It is the one state with two
 parents — the shape these rows are written by hand to allow — and naming both

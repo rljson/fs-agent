@@ -889,9 +889,20 @@ filled in from what that push deleted. It is best-effort — a history that
 cannot be written never stops a folder syncing — and it needs no setup, because
 the agent creates its own tables on the first `syncToDb`.
 
-**Nothing consumes the chain yet.** It is written so a fleet accumulates real
-ancestry before anything depends on its shape. `FsAgent` behaviour is unchanged
-by its presence.
+**Announcements carry the head**, marked `~H~`, rather than the tree ref — so a
+receiver can resolve any announcement to a chain entry and walk its ancestry. A
+tree ref is a content hash and never starts with `~`, so both forms travel on
+one channel unambiguously, and a ref without the marker is used exactly as
+before.
+
+The predecessors on the payload stay tree refs. A receiver that resolves the
+head gets the chain's own `previous` in the entry.
+
+**Nothing decides anything from the chain yet.** It is written and announced so
+that a fleet accumulates real ancestry before behaviour depends on it.
+
+**Roll out in lockstep.** A node on an older build cannot resolve a `~H~` ref
+and will ignore the announcement.
 
 | | |
 | --- | --- |

@@ -14,8 +14,9 @@ import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
-import { FsAgent } from '../src/fs-agent.ts';
+import { CHAIN_HEAD_PREFIX, FsAgent } from '../src/fs-agent.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
+import { FsEditChain } from '../src/fs-edit-chain.ts';
 
 // Traced on four machines during a 1 200-file seed. A node fetched ref
 // _RMiGJ-1 at 13:19:43 and emitted that same ref AS ITS OWN six seconds later.
@@ -220,8 +221,25 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     expect(sent.length).toBe(new Set(sent).size);
     expect(sent.length).toBe(2);
 
-    // And the second push declares the ref the first one created.
-    expect(predecessors[1]?.[0]).toBe(sent[0]);
+    // And the second push declares the STATE the first one created.
+    //
+    // Two namespaces, deliberately. What goes on the wire is the chain HEAD
+    // (`~H~…`), because a receiver holding a tree ref cannot find the chain row
+    // for it by hash — only by query. What goes in `p` stays a TREE ref,
+    // because the receiver's prune rule compares it against
+    // `[_currentRef, _lastAppliedRef]`, and translating it there would break
+    // the one rule that separates a deletion from a straggler.
+    //
+    // So the assertion resolves the announcement rather than string-comparing
+    // it, which also exercises the head → tree ref mapping end to end.
+    const announced = sent[0];
+    expect(announced.startsWith(CHAIN_HEAD_PREFIX)).toBe(true);
+    const chain = new FsEditChain(db, 'fsTree');
+    await chain.init();
+    const entry = await chain.entry(
+      announced.slice(CHAIN_HEAD_PREFIX.length),
+    );
+    expect(predecessors[1]?.[0]).toBe(entry?.treeRef);
 
     stopTo();
     agent.scanner.stopWatch();

@@ -208,6 +208,23 @@ export const ATOMIC_TMP_PREFIX = '.fsagent-tmp-';
  */
 export const AGENT_STATE_FILE = '.fsagent-state.json';
 
+/**
+ * Marks an announced ref as a CHAIN HEAD rather than a tree ref.
+ *
+ * A tree ref is a content hash and never starts with `~`, so the two are
+ * unambiguous on one channel — the trick `@rljson/mongo-agent` uses for its
+ * own protocol refs (`~R~`, `~AEQ~`…), blessed by §6 of the plan.
+ *
+ * The marker is not decoration. Without it a receiver cannot tell a head from
+ * a tree ref, so it has to TRY resolving every ref it hears — and a miss goes
+ * to the network. Measured: the first version did exactly that, and awaiting
+ * that read before scheduling the apply dropped the hub's bootstrap on a late
+ * joiner, which then never received a file that already existed. A receive
+ * path that awaits a peer read before acting can lose a message to a slow
+ * peer, silently.
+ */
+export const CHAIN_HEAD_PREFIX = '~H~';
+
 // .............................................................................
 // FsAgent Class
 // .............................................................................
@@ -498,6 +515,16 @@ export class FsAgent {
    * yet; see `src/fs-edit-chain.ts`.
    */
   private _chain?: FsEditChain;
+
+  /**
+   * The chain entry that names the state this node last pushed.
+   *
+   * Announcements carry the HEAD rather than the tree ref (see
+   * {@link _announceAs}), and a re-announcement has to find the head for a
+   * state it did not just append. Cached as a pair so that costs a comparison
+   * rather than a read.
+   */
+  private _chainHead?: { head: string; treeRef: string };
 
   /**
    * `relativePath → content hash` of the tree this node last announced.
@@ -1038,7 +1065,7 @@ export class FsAgent {
     // a match. That decision outranks the connector's ref history, so the ref
     // is cleared from both dedup sets before it goes out. Bounce-backs are
     // still suppressed — they never reach this point.
-    connector.invalidateSent?.(ref);
+    connector.invalidateSent?.(this._announceAs(ref));
 
     // Ancestry travels with every push, not only when conflict resolution is
     // on.
@@ -1060,19 +1087,30 @@ export class FsAgent {
     // Sent on its own, as the identity and sequence metadata was before it, so
     // that the rule which consumes it can be enabled and measured separately.
     connector.setPredecessors(predecessorRefs ?? []);
+
+    // THE WIRE CARRIES THE HEAD, not the tree ref. See `_announceAs`.
+    //
+    // The predecessors are left as TREE refs deliberately. A receiver's prune
+    // rule compares them against `[_currentRef, _lastAppliedRef]`, which are
+    // tree refs, so translating them here would break the one rule that
+    // separates a deletion from a straggler. The head is an additional
+    // identity for the announced state, not a replacement for the ancestry
+    // already on the payload.
+    const announced = this._announceAs(ref);
+
     // Retry on a transient socket-layer failure (e.g. a dropped packet or a
     // reconnect blip) so a single hiccup doesn't lose an entire ref.
     await FsAgent._withRetry(
       async () => {
         if (connector.syncConfig?.requireAck) {
-          await connector.sendWithAck(ref);
+          await connector.sendWithAck(announced);
         } else {
-          connector.send(ref);
+          connector.send(announced);
         }
       },
       3,
       100,
-      `sendRef(${ref.slice(0, 12)}…)`,
+      `sendRef(${announced.slice(0, 12)}…)`,
     );
   }
 
@@ -1248,8 +1286,16 @@ export class FsAgent {
     // Everything writable is now written, and pruning has run. Only now report
     // the locked files — raising earlier would have abandoned the rest of the
     // restore, which is the behaviour this replaces.
+    // SORTED, so the message is the same every time it is produced.
+    //
+    // A restore writes files concurrently and now walks children in a
+    // canonical order that is a property of their hashes, not their names, so
+    // the order casualties are collected in is meaningless. An error message
+    // whose contents depend on which fetch finished first is one nobody can
+    // compare between two runs, and a test that pins it is flaky by
+    // construction.
     if (this._restoreLocked.length > 0) {
-      throw new PartialRestoreError([...this._restoreLocked]);
+      throw new PartialRestoreError([...this._restoreLocked].sort());
     }
 
     // Reported the same way and for the same reason: the folder does not match
@@ -1258,7 +1304,7 @@ export class FsAgent {
     // prune, so the tree's deletions are applied even though one of its files
     // could not be.
     if (this._restoreUnavailable.length > 0) {
-      throw new BlobUnavailableError([...this._restoreUnavailable]);
+      throw new BlobUnavailableError([...this._restoreUnavailable].sort());
     }
   }
 
@@ -2134,23 +2180,7 @@ export class FsAgent {
     // The remembered ref is what separates the two cases, and it must be: a
     // folder the USER emptied has a remembered state, so that deletion is a
     // fact about a folder this agent was tracking and still goes out.
-    // This folder's history. Created here because `syncToDb` is where a db and
-    // a treeKey first exist together, and idempotent, so a restart continues
-    // the lineage rather than starting a new root.
-    //
-    // fs-agent creates its OWN tables: the One Client creates the trees table,
-    // and an agent expecting tables its host never created would fail at
-    // runtime on any node whose host is one release behind. Best-effort, for
-    // the same reason the appends are — a chain that cannot be created must
-    // not stop a folder syncing.
-    try {
-      const chain = new FsEditChain(db, treeKey);
-      await chain.init();
-      this._chain = chain;
-    } catch (err) {
-      /* v8 ignore next -- @preserve best-effort; the sync runs without it */
-      this._writeSyncError('chain/init', err);
-    }
+    await this._ensureChain(db, treeKey);
 
     if (isSilentJoiner) {
       console.warn(
@@ -2802,6 +2832,109 @@ export class FsAgent {
   }
 
   /**
+   * Creates this folder's history if it does not exist yet.
+   *
+   * Called from BOTH `syncToDb` and `syncFromDb`, and the second one cost a
+   * red run to discover. A node that only RECEIVES — a late joiner, which
+   * starts `syncFromDb` alone because scanning its empty folder would push
+   * emptiness over everyone else's data — still has to resolve the heads its
+   * peers announce. With the chain created on the send path only, such a node
+   * dropped every announcement it heard and never received a file that already
+   * existed. The chain is per-route state, not per-direction.
+   *
+   * Idempotent in both senses: this method is a no-op once a chain exists, and
+   * `FsEditChain.init` creates its tables with `createOrExtendTable` and
+   * continues the lineage a previous process left behind.
+   *
+   * Best-effort. fs-agent creates its OWN tables — the One Client creates the
+   * trees table, and an agent expecting tables its host never created would
+   * fail at runtime on any node whose host is one release behind.
+   * @param db - The route's database.
+   * @param treeKey - The trees table key.
+   */
+  private async _ensureChain(db: Db, treeKey: string): Promise<void> {
+    if (this._chain) return;
+    try {
+      const chain = new FsEditChain(db, treeKey);
+      await chain.init();
+      this._chain = chain;
+    } catch (err) {
+      /* v8 ignore next -- @preserve best-effort; the sync runs without it */
+      this._writeSyncError('chain/init', err);
+    }
+  }
+
+  /**
+   * What to put on the wire for a state this node is announcing.
+   *
+   * **The head, not the tree ref.** A tree ref is a content hash, so a folder
+   * that returns to a state it held earlier re-derives that state's exact ref —
+   * and a receiver cannot then find the chain row for it by hash, only by
+   * query. Announcing the head makes every announcement resolvable to an entry,
+   * which is what the `previous` walk needs in order to exist at all (§13.5).
+   *
+   * It also makes each announcement UNIQUE. An A → B → A deletion produces
+   * three entries with three heads, so the returning state is news by
+   * construction rather than by clearing the connector's dedup for it.
+   * @param treeRef - The state being announced.
+   * @returns The head that names it, or `treeRef` when this node has no chain
+   *   entry for that state — a re-announcement of something older, or a build
+   *   whose chain could not be created.
+   */
+  private _announceAs(treeRef: string): string {
+    return this._chainHead?.treeRef === treeRef
+      ? `${CHAIN_HEAD_PREFIX}${this._chainHead.head}`
+      : treeRef;
+  }
+
+  /**
+   * The state an incoming announcement is about.
+   *
+   * The mirror of {@link _announceAs}, and it has to be applied at BOTH entry
+   * points — the apply path and the anti-entropy's own socket read. The
+   * anti-entropy compares what it hears with `_currentRef`, which is a tree
+   * ref; left unmapped, a head would never match it and every node would report
+   * a permanent divergence against a fleet it agreed with.
+   *
+   * An unmarked ref is a tree ref and is returned as-is, WITHOUT any read.
+   * That is the whole point of the marker: a receive path that awaits a peer
+   * read before acting can lose a message to a slow peer, and the first version
+   * of this did exactly that to a late joiner's bootstrap.
+   *
+   * A marked ref this node cannot resolve answers `undefined` — "a state I
+   * cannot read yet". Nothing is applied on it and nothing is concluded from
+   * it; the sender re-announces, and the ancestry work has a name for this
+   * case (`complete: false`).
+   * @param ref - What arrived on the wire.
+   * @returns The tree ref it denotes, or `undefined` for an unresolvable head.
+   */
+  private async _announcedTreeRef(ref: string): Promise<string | undefined> {
+    if (!ref.startsWith(CHAIN_HEAD_PREFIX)) return ref;
+    const head = ref.slice(CHAIN_HEAD_PREFIX.length);
+    // A real case, not an impossible one — and asserting otherwise with a
+    // coverage ignore is what hid it for a whole red run. An agent whose chain
+    // could not be created still hears its peers, and it must say "I cannot
+    // read this" rather than pretend the head is a tree ref.
+    if (!this._chain) return undefined;
+    try {
+      const entry = await this._chain.entry(head);
+      if (!entry) {
+        console.warn(
+          `[FsAgent] head=${head.slice(0, 8)}… is not resolvable here — ` +
+            `ignoring it; the sender will re-announce.`,
+        );
+        return undefined;
+      }
+      return entry.treeRef;
+    } catch (err) {
+      /* v8 ignore next -- @preserve an unreadable chain must not deafen us */
+      this._writeSyncError('chain/resolveHead', err);
+      /* v8 ignore next -- @preserve */
+      return undefined;
+    }
+  }
+
+  /**
    * Appends one entry to this folder's history. Best-effort.
    *
    * A chain that cannot be written must never stop a folder syncing, so every
@@ -2818,11 +2951,12 @@ export class FsAgent {
   ): Promise<void> {
     if (!this._chain) return;
     try {
-      await this._chain.append({
+      const entry = await this._chain.append({
         treeRef,
         changed: delta.changed,
         removed: delta.removed,
       });
+      this._chainHead = { head: entry.head, treeRef };
     } catch (err) {
       /* v8 ignore next -- @preserve best-effort; see the doc comment */
       this._writeSyncError('chain/append', err);
@@ -2960,6 +3094,10 @@ export class FsAgent {
     // A no-op on a first start, and cheap when it is not: a redelivered ref
     // whose state the folder already holds costs one content comparison.
     connector.resetReceived?.();
+
+    // Before any announcement can arrive: a node that only receives still has
+    // to resolve the heads its peers announce. See `_ensureChain`.
+    await this._ensureChain(db, treeKey);
 
     // Start watching filesystem (if not already watching)
     await this._ensureWatching();
@@ -3691,15 +3829,34 @@ export class FsAgent {
       if (!treeRef || typeof treeRef !== 'string') {
         return Promise.resolve();
       }
-      // A freshly-arrived ref resets the recovery budget to 0.
-      scheduleProcess(
-        treeRef,
-        this._timeouts.debounceMs,
-        0,
-        predecessorRefs,
-        info?.isNewestFromSender ?? true,
-      );
-      return Promise.resolve();
+
+      const schedule = (ref: string) =>
+        // A freshly-arrived ref resets the recovery budget to 0.
+        scheduleProcess(
+          ref,
+          this._timeouts.debounceMs,
+          0,
+          predecessorRefs,
+          info?.isNewestFromSender ?? true,
+        );
+
+      // A TREE REF IS SCHEDULED SYNCHRONOUSLY, exactly as it always was.
+      //
+      // Not an optimisation — a correctness requirement, and it cost a red run
+      // to learn. Making this whole callback `async` deferred the schedule by a
+      // microtask even for an unmarked ref, and that was enough to lose a late
+      // joiner's bootstrap: it never received a file that already existed. The
+      // connector's own bookkeeping runs around this call, and inserting an
+      // await between hearing a ref and queuing it reorders the two.
+      //
+      // Only a marked head needs a read, and only that path becomes async.
+      if (!treeRef.startsWith(CHAIN_HEAD_PREFIX)) {
+        schedule(treeRef);
+        return Promise.resolve();
+      }
+      return this._announcedTreeRef(treeRef).then((resolved) => {
+        if (resolved !== undefined) schedule(resolved);
+      });
     };
 
     // Register callback with Connector using the safe, deduplicated API.
@@ -3760,10 +3917,31 @@ export class FsAgent {
     this._antiEntropy = antiEntropy;
     const onHubAnnouncement = (payload: ConnectorPayload) => {
       if (typeof payload?.r !== 'string') return;
-      antiEntropy.observe({
-        ref: payload.r,
-        origin: payload.o,
-        predecessors: Array.isArray(payload.p) ? payload.p : [],
+      const announced = payload.r;
+      const observe = (ref: string) =>
+        antiEntropy.observe({
+          ref,
+          origin: payload.o,
+          predecessors: Array.isArray(payload.p) ? payload.p : [],
+        });
+
+      // Mapped here too, and forgetting it would be invisible and total: the
+      // anti-entropy compares what it hears with `_currentRef`, a TREE ref, so
+      // an unmapped head never matches and every node reports a permanent
+      // divergence against a fleet it agrees with. That is the §2.1b symptom
+      // arriving by a second route.
+      //
+      // An unmarked ref is observed SYNCHRONOUSLY, exactly as it always was.
+      // Deferring even by a microtask changes when the status is readable, and
+      // three tests that read it straight after a beacon say so.
+      if (!announced.startsWith(CHAIN_HEAD_PREFIX)) {
+        observe(announced);
+        return;
+      }
+      void this._announcedTreeRef(announced).then((ref) => {
+        // A head we cannot read is not evidence of anything. Concluding
+        // "diverged" from it would report a disagreement we cannot describe.
+        if (ref !== undefined) observe(ref);
       });
     };
     // Two sources of the same announcement. The bootstrap (and its optional
