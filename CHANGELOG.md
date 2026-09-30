@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.0.84]
+
+### A fork is not a lag — anti-entropy no longer discards local work
+
+**Measured on the lab, 2026-09-30, and this one loses data.** A folder copied
+onto NB-2744 produced `qFU9…` — 15 files, 55 868 bytes — from the fleet state
+`ca3ls…` (13 files, 29 873 bytes). The hub never adopted it and went on
+announcing `ca3ls…`. NB-2744 then decided **it** was the one behind and chose
+`pull`, which means adopt the hub's older state over its own new folder. It
+retried five times.
+
+`antiEntropyDecision` asked whether the hub's state was made from a state "we
+are in", where
+
+```ts
+const statesIAmIn = [currentRef, lastAppliedRef];
+```
+
+`lastAppliedRef` is a state this node ONCE adopted. The moment it builds on that
+state it has moved on, so a hub state descending from the same ancestor is a
+**sibling** of ours, not a successor — a fork, not a lag. Counting it anyway made
+a node holding new work conclude it was behind.
+
+**The fix:** `lastAppliedRef` counts only while we have authored nothing since.
+
+```ts
+const statesIAmIn = authored ? [currentRef] : [currentRef, lastAppliedRef];
+```
+
+The lab case now falls through to the deletion check and then to `merge` — both
+sides kept — or to `push` when the hub sits on the very state our work was made
+from. Never a silent discard.
+
+### What did not change
+
+Both deletion cases keep working, and they are the reason this code is delicate:
+a peer that deletes what we added returns the folder to a state we already hold,
+and pushing over that would put the deleted file back. Those match on
+`currentRef`, so they never needed `lastAppliedRef`.
+
+Not one existing decision test had `lastPushedRef` set — every one of them
+describes a node with no local work to lose, which is why none of them caught
+this. Four tests added, including the lab scenario verbatim and a control that
+a genuine forward is still pulled.
+
 ## [0.0.83]
 
 ### Changed

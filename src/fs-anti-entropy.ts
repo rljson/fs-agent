@@ -146,7 +146,25 @@ export function antiEntropyDecision(
   if (authored && hub.origin === origin) return 'push';
 
   // The hub's state was made FROM ours: we are the one behind.
-  const statesIAmIn = [currentRef, lastAppliedRef];
+  //
+  // **`lastAppliedRef` counts only while we have authored nothing since.**
+  // It is a state we ONCE adopted, and the moment we build on it we have moved
+  // on: a hub state descending from it is then a SIBLING of ours, not a
+  // successor. Counting it regardless made a node with new local work conclude
+  // it was behind and pull — silently discarding that work.
+  //
+  // Measured on the lab, 2026-09-30: a folder copied onto NB-2744 produced
+  // `qFU9…` (15 files, 55 868 bytes) from `ca3ls…`; the hub stayed on `ca3ls…`
+  // (13 files, 29 873 bytes), whose ancestry reached a state NB-2744 had
+  // applied yesterday. The node decided `pull` and retried it five times
+  // against its own new folder.
+  //
+  // A fork is not a lag. When we are the author, only a hub state built on
+  // what we hold NOW puts us behind; anything else falls through to the
+  // deletion check and then to `merge`, which keeps both sides.
+  const statesIAmIn = authored
+    ? [currentRef]
+    : [currentRef, lastAppliedRef];
   if (predecessors.some((r) => statesIAmIn.includes(r))) return 'pull';
 
   // The hub still holds the state our push was made from. Only after the
