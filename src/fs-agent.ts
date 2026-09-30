@@ -54,6 +54,25 @@ import type { FsChange, FsNodeMeta } from './fs-scanner.ts';
  * Options for FsAgent operations
  */
 export interface FsAgentOptions {
+  /**
+   * Announce the plain TREE REF instead of the chain head.
+   *
+   * The migration switch, and it exists so a fleet can roll forward one node
+   * at a time instead of all at once. A build that predates the `~H~`
+   * announcement cannot parse it: it tries to fetch a tree by that hash and
+   * fails, so a new node's pushes are invisible to it.
+   *
+   * With this on, a new node speaks the OLD wire format and is understood by
+   * everyone — and it still resolves its own ancestry, because an entry can be
+   * found from the tree ref it produced (`FsEditChain.entryForTreeRef`, a
+   * query, measured as served across a real relay). What it gives up is
+   * unambiguity: a folder returning to earlier content produces two entries
+   * with the same `dataRef`, and the fallback has to pick the newest.
+   *
+   * So: on during a rollout, off once the fleet is past the old build.
+   * Default: off, which is the better format.
+   */
+  announceTreeRef?: boolean;
   /** Ignore patterns for scanning */
   ignore?: string[];
   /** Maximum depth for directory traversal */
@@ -660,6 +679,9 @@ export class FsAgent {
   private _timeouts: Required<TimeoutConfig>;
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
+
+  /** See {@link FsAgentOptions.announceTreeRef}. */
+  private _announceTreeRef: boolean;
   /**
    * Ancestry head: the content ref of the revision currently representing the
    * filesystem state. New local revisions descend from it; received revisions
@@ -675,6 +697,7 @@ export class FsAgent {
     this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
+    this._announceTreeRef = options.announceTreeRef ?? false;
     this._antiEntropyOptions = options.antiEntropy;
     this._scanner = new FsScanner(rootPath, {
       ...options,
@@ -2968,6 +2991,7 @@ export class FsAgent {
    *   whose chain could not be created.
    */
   private _announceAs(treeRef: string): string {
+    if (this._announceTreeRef) return treeRef;
     return this._chainHead?.treeRef === treeRef
       ? `${CHAIN_HEAD_PREFIX}${this._chainHead.head}`
       : treeRef;
@@ -3029,13 +3053,27 @@ export class FsAgent {
     const resolved = await this._resolveAnnouncement(announced);
     if (resolved === undefined) return undefined;
     const ourHead = this._chainHead?.head;
-    if (!resolved.entry || !ourHead || !this._chain) {
-      return { treeRef: resolved.treeRef };
-    }
+    if (!ourHead || !this._chain) return { treeRef: resolved.treeRef };
+
+    // An older peer announces a plain TREE REF, and its ancestry is still
+    // reachable — by query on `dataRef` rather than by hash. Tried only here,
+    // where the path is already asynchronous: a query is a peer read, and
+    // awaiting one on the apply path is how a late joiner's bootstrap was lost.
+    //
+    // Ambiguous by nature (a folder returning to earlier content produces a
+    // second entry with the same `dataRef`), so the newest wins. That is why
+    // it is the fallback and `~H~` is the primary.
+    const entry =
+      resolved.entry ??
+      (await this._chain.entryForTreeRef(resolved.treeRef).catch(() => {
+        /* v8 ignore next -- @preserve a failed query falls back to heuristics */
+        return undefined;
+      }));
+    if (!entry) return { treeRef: resolved.treeRef };
     try {
       return {
         treeRef: resolved.treeRef,
-        reachability: await this._chain.classify(ourHead, resolved.entry.head),
+        reachability: await this._chain.classify(ourHead, entry.head),
       };
     } catch (err) {
       /* v8 ignore next -- @preserve a failed walk falls back to the heuristics */

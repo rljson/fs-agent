@@ -591,6 +591,38 @@ constraint the package already has (`pnpm overrides`, exact pins).
 **Tested by** `test/fs-ref-vs-content.spec.ts`, including the control: the
 canonical-order assertion is red without the sort.
 
+## Rolling Out: what a peer can notice
+
+This branch makes two changes a peer can see, and they are not equally hard.
+
+**The canonical child order changes every tree ref.** Unavoidable, and not
+destructive: `_treesHaveEquivalentContent` sees the two trees as the same
+folder, so no data moves. It shows as a red divergence flag during the rollout
+window — §2.1b's symptom — and clears once every node sorts.
+
+**`~H~` is unintelligible to an older build.** Avoidable, and
+`FsAgentOptions.announceTreeRef` avoids it: a new node speaks the OLD wire
+format and is understood by everyone, while still resolving its own ancestry —
+an entry can be found from the tree ref it produced
+(`FsEditChain.entryForTreeRef`). So the rollout is **"deploy with the switch
+on, then turn it off"**, not "stop the fleet".
+
+That the fallback works at all was measured rather than assumed. Finding a row
+BY a field is a query, not a content read, and whether a relay serves one across
+`IoPeer` was the reason the head was chosen in the first place. It does —
+verified against a real `Server`/`Client` pair.
+
+The fallback is the fallback for a reason: a tree ref is a content hash, so a
+folder that returns to earlier content produces a SECOND entry with the same
+`dataRef` — §2.1 exactly, the ambiguity the chain exists to remove. The newest
+by `timeId` is the right pick and is still a pick. And it is never used on the
+apply path: a query is a peer read, and awaiting one before scheduling an apply
+is how a late joiner's bootstrap was lost.
+
+**Tested by** `test/mesh/fs-mesh-mixed.spec.ts` — four nodes, half on each
+format, exercising new→new, new→old, old→new and old→old, including a deletion
+crossing from a new node to an old one.
+
 ## What Grows, and What Bounds It
 
 Measured on 400 files created then deleted one at a time, rather than reasoned

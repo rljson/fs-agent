@@ -233,6 +233,11 @@ export const buildFsMesh = async (opts: {
   treeKey?: string;
   antiEntropy?: AntiEntropyOptions;
   seed?: (folders: Record<string, string>) => Promise<void>;
+  /**
+   * Node names that speak the OLD wire format — a plain tree ref rather than
+   * a `~H~` chain head. A mixed-version fleet, by construction.
+   */
+  oldWireFormat?: readonly string[];
 }): Promise<FsMesh> => {
   const treeKey = opts.treeKey ?? 'sharedTree';
   const names = opts.names ?? ['A', 'B'];
@@ -309,6 +314,7 @@ export const buildFsMesh = async (opts: {
       resolveConflicts: true,
       antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
       timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
+      announceTreeRef: opts.oldWireFormat?.includes(name) ?? false,
     });
 
     stops.push(await agent.syncToDb(db, connector, treeKey));

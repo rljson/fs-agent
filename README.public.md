@@ -901,8 +901,15 @@ head gets the chain's own `previous` in the entry.
 **Nothing decides anything from the chain yet.** It is written and announced so
 that a fleet accumulates real ancestry before behaviour depends on it.
 
-**Roll out in lockstep.** A node on an older build cannot resolve a `~H~` ref
-and will ignore the announcement.
+**Rolling out.** A node on an older build cannot resolve a `~H~` ref and will
+ignore the announcement, so deploy with `announceTreeRef: true` — a new node
+then speaks the old wire format while still keeping and resolving its chain —
+and turn it off once the fleet is past the old build.
+
+One change cannot be switched off: the scan now emits a canonical child order,
+so every tree ref changes once. It is not destructive (the apply path sees the
+two trees as the same folder and moves no data), but the divergence flag reads
+red until every node sorts.
 
 | | |
 | --- | --- |

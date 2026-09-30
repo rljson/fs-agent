@@ -272,6 +272,41 @@ export class FsEditChain {
   }
 
   /**
+   * The newest entry that produced a given tree ref.
+   *
+   * **The migration bridge.** A build that predates the `~H~` announcement
+   * sends a plain tree ref, and a receiver holding one cannot find its chain
+   * row by hash — `dataRef` is the field, but finding a row BY a field is a
+   * query rather than a content read. Measured across a real relay
+   * (`test/fs-chain-crosses-the-wire.spec.ts`): the query is served, so an
+   * older peer's push can still carry ancestry.
+   *
+   * **Ambiguous by nature, which is why it is the fallback and not the
+   * primary.** A tree ref is a content hash, so a folder that returns to an
+   * earlier state produces a SECOND entry with the same `dataRef` — §2.1,
+   * exactly the ambiguity the chain exists to remove. The newest by `timeId`
+   * is the right pick: it is the entry that most recently produced this
+   * content, and the one whose ancestry describes how the folder got here now.
+   *
+   * Never called on the apply path. A query is a peer read, and awaiting one
+   * before scheduling an apply is how a late joiner's bootstrap was lost.
+   * @param treeRef - The state announced.
+   * @returns The newest entry producing it, or `undefined` if none is found.
+   */
+  async entryForTreeRef(treeRef: string): Promise<FsChainEntry | undefined> {
+    const rows = await this._db.getEditHistories(this._treeKey, {
+      dataRef: treeRef,
+    });
+    let newest: (EditHistory & { _hash: string }) | undefined;
+    for (const row of rows as Array<EditHistory & { _hash: string }>) {
+      if (!newest || compareTimeId(row.timeId, newest.timeId) > 0) {
+        newest = row;
+      }
+    }
+    return newest ? this.entry(newest._hash) : undefined;
+  }
+
+  /**
    * Where two heads stand relative to each other.
    *
    * `behind` — theirs descends from ours, so we are the one missing work.

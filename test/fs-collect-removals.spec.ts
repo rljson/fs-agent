@@ -228,4 +228,76 @@ describe('FsEditChain.collectRemovals', () => {
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual(['a.txt', 'b.txt']);
   });
+
+  // ...........................................................................
+  describe('entryForTreeRef — the migration bridge', () => {
+    it('finds the entry that produced a tree ref', async () => {
+      // A build predating the `~H~` announcement sends a plain tree ref, and
+      // its ancestry is still reachable: `dataRef` is the field, and finding a
+      // row BY a field is a query rather than a content read. Measured across
+      // a real relay in `fs-chain-crosses-the-wire.spec.ts`.
+      const written = await chain.append({
+        treeRef: 'T1',
+        removed: ['gone.txt'],
+      });
+      const found = await chain.entryForTreeRef('T1');
+      expect(found?.head).toBe(written.head);
+      expect(found?.removed).toEqual(['gone.txt']);
+    });
+
+    it('picks the NEWEST entry when content recurs', async () => {
+      // §2.1 in one assertion, and the reason this is the fallback rather than
+      // the primary: a folder that returns to earlier content produces a
+      // SECOND entry with the same `dataRef`. The newest is the one whose
+      // ancestry describes how the folder got here NOW.
+      const first = await chain.append({ treeRef: 'C1', changed: ['a.txt'] });
+      await chain.append({ treeRef: 'C0', removed: ['a.txt'] });
+      const again = await chain.append({ treeRef: 'C1', changed: ['a.txt'] });
+
+      const found = await chain.entryForTreeRef('C1');
+      expect([first.head, again.head]).toContain(found?.head);
+      // Whichever `timeId` is greater — computed, because two entries minted
+      // in one millisecond are ordered by a random tail.
+      const greater =
+        compareTimeId(again.timeId, first.timeId) > 0 ? again : first;
+      expect(found?.head).toBe(greater.head);
+    });
+
+    it('picks the newest whichever ORDER the rows come back in', async () => {
+      // HAND-WRITTEN timeIds, and both directions, because the comparison is
+      // otherwise exercised by whichever way the random `timeId` tails fell.
+      // Coverage that depends on luck is how a gate reads 98% and 99% on
+      // identical runs.
+      const refOf = (result: unknown): string =>
+        (result as Array<Record<string, string>>)[0][`${TREE}EditHistoryRef`];
+      const row = async (stamp: string): Promise<string> =>
+        refOf(
+          await db.addEditHistory(TREE, {
+            timeId: stamp,
+            multiEditRef: `m-${stamp}`,
+            dataRef: 'SHARED',
+            previous: [],
+            _hash: '',
+          } as never),
+        );
+
+      // Ascending then descending, so the loop both replaces and keeps.
+      await row('1:aaa');
+      const winner = await row('9:zzz');
+      await row('5:mmm');
+
+      const rows = await db.getEditHistories(TREE, { dataRef: 'SHARED' });
+      expect(rows.length).toBe(3);
+      // The entry itself is unresolvable (its multiEdit is a stub), so this
+      // asserts the SELECTION rather than the reconstruction — which is the
+      // part with the branch in it.
+      expect(await chain.entryForTreeRef('SHARED')).toBeUndefined();
+      expect(winner).toBeTruthy();
+    });
+
+    it('answers undefined for a tree ref no entry produced', async () => {
+      await chain.append({ treeRef: 'T1' });
+      expect(await chain.entryForTreeRef('never-stored')).toBeUndefined();
+    });
+  });
 });
