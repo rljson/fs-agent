@@ -24,6 +24,7 @@ export {
   type AntiEntropyView,
   type HubAnnouncement,
   type PruneAuthorityView,
+  type Reachability,
 } from './fs-anti-entropy.ts';
 export {
   createFsChainTables,

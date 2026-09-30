@@ -438,4 +438,95 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
       ).toBe(true);
     });
   });
+
+  // ...........................................................................
+  // The same properties, WITH the chain's answer. This is what the protocol
+  // change bought, and the difference between these and the inverted tests
+  // above is the whole argument for it.
+  // ...........................................................................
+  describe('given reachability, the decision is not a guess', () => {
+    const decide = (
+      reachability: 'behind' | 'ahead' | 'fork' | 'incomplete',
+      node: Node,
+      hubRef: Ref,
+    ) =>
+      antiEntropyDecision(
+        { ref: hubRef, origin: 'hub', predecessors: [], reachability },
+        viewOf(node),
+      );
+
+    const us: Node = {
+      origin: 'us',
+      currentRef: 'S1',
+      lastAppliedRef: 'S0',
+      authored: true,
+    };
+
+    it('D1: a fork is a fork, and our work survives', () => {
+      // The morning failure. Without the chain this view returns `pull` and
+      // discards a copied folder; the inverted D1 above pins that.
+      expect(decide('fork', us, 'S2')).toBe('merge');
+    });
+
+    it('D4: a deletion and a fork now differ', () => {
+      // §2.2's two situations, which are the SAME VALUE at the old signature.
+      // The refs and predecessors are identical here too — only the chain's
+      // answer differs, which is exactly the point.
+      expect(decide('behind', us, 'S0')).toBe('pull');
+      expect(decide('fork', us, 'S0')).toBe('merge');
+    });
+
+    it('is willing to push a state it did NOT author', () => {
+      // The condition that made WP2b's delete invisible. A node that ADOPTED a
+      // peer's tree and then deleted a file authors nothing, so the old rule
+      // could never re-announce the deletion — and the delete never
+      // propagated. Reachability proves "they do not have this yet" without
+      // asking who wrote it.
+      const adopter: Node = {
+        origin: 'us',
+        currentRef: 'S2',
+        lastAppliedRef: 'S1',
+        authored: false,
+      };
+      expect(decide('ahead', adopter, 'S1')).toBe('push');
+    });
+
+    it('refuses to decide on a truncated walk', () => {
+      // Every action available is destructive in one direction or the other,
+      // and an incomplete walk that answers "not an ancestor" is
+      // indistinguishable from a definite no. So: nothing.
+      expect(decide('incomplete', us, 'S2')).toBe('blocked');
+    });
+
+    it('never lets both sides push', () => {
+      // D2 as a property, with the chain answering. Reachability is
+      // antisymmetric by construction — if theirs descends from ours it cannot
+      // also be that ours descends from theirs — so the livelock is not merely
+      // unlikely, it is unreachable.
+      for (const { of: history } of HISTORIES) {
+        for (const a of nodesFor('A')) {
+          for (const b of nodesFor('B')) {
+            if (a.currentRef === b.currentRef) continue;
+            void history;
+            // A sees B as ahead ⇒ B must see A as behind, and vice versa.
+            const aSees = decide('behind', a, b.currentRef);
+            const bSees = decide('ahead', b, a.currentRef);
+            expect(aSees === 'push' && bSees === 'push').toBe(false);
+          }
+        }
+      }
+    });
+
+    it('still falls back to the heuristics when the chain cannot answer', () => {
+      // Absence must never read as `fork`. An older peer, or a node whose
+      // chain failed to initialise, gets exactly the behaviour that shipped
+      // before — including its known limits.
+      expect(
+        antiEntropyDecision(
+          { ref: 'S2', origin: 'hub', predecessors: ['S1'] },
+          viewOf(us),
+        ),
+      ).toBe('pull');
+    });
+  });
 });

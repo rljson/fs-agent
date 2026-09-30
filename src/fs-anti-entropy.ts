@@ -89,8 +89,29 @@ export const DEFAULT_ANTI_ENTROPY: Required<AntiEntropyOptions> = {
 /** What a repair does. See the header of this file. */
 export type AntiEntropyAction = 'pull' | 'push' | 'merge';
 
-/** What {@link antiEntropyDecision} concluded. */
-export type AntiEntropyDecision = 'in-sync' | 'unknown' | AntiEntropyAction;
+/**
+ * What {@link antiEntropyDecision} concluded.
+ *
+ * `blocked` means the ancestry could not be resolved far enough to decide.
+ * Nothing is applied, nothing is latched, and the divergence is retried — the
+ * one answer the old signature could not give, because it had nothing to be
+ * unsure about.
+ */
+export type AntiEntropyDecision =
+  | 'in-sync'
+  | 'unknown'
+  | 'blocked'
+  | AntiEntropyAction;
+
+/**
+ * Where this node's history stands against the hub's, when the chain can say.
+ *
+ * `behind` — the hub's head descends from ours; we are missing its work.
+ * `ahead` — ours descends from the hub's; IT is missing ours.
+ * `fork` — neither descends from the other. Both sides have work to keep.
+ * `incomplete` — a walk was truncated, so nothing may be concluded.
+ */
+export type Reachability = 'behind' | 'ahead' | 'fork' | 'incomplete';
 
 /** The part of an agent's state the decision reads. */
 export interface AntiEntropyView {
@@ -118,6 +139,22 @@ export interface HubAnnouncement {
   origin?: string;
   /** What that state declares it descends from. */
   predecessors?: readonly string[];
+  /**
+   * What the edit chain says about the two histories, when it can say.
+   *
+   * **This is the field the whole protocol change exists to provide.** Without
+   * it the decision has a ref and ONE generation of ancestry, and §2.2's two
+   * situations — "a peer deleted what we added" and "a peer forked from an
+   * ancestor we share" — arrive at this signature as the SAME VALUE. No rule
+   * can separate them, which is why narrowing one was tried twice and cost a
+   * discarded folder the first time and a livelock the second.
+   *
+   * Absent means the chain could not be consulted — an older peer, a node
+   * whose chain failed to initialise — and the decision falls back to the
+   * heuristics below, which are what shipped before. Absence must never read
+   * as `fork`.
+   */
+  reachability?: Reachability;
 }
 
 /**
@@ -136,6 +173,38 @@ export function antiEntropyDecision(
   // A folder that has not settled on a state yet has nothing to compare.
   if (!currentRef) return 'unknown';
   if (hub.ref === currentRef) return 'in-sync';
+
+  // THE CHAIN ANSWERS FIRST, when it can answer at all.
+  //
+  // Everything below this block is inference from a content hash and one
+  // generation of ancestry, and §2.2 is the proof that it cannot be made
+  // correct: the two situations that need opposite actions arrive here as the
+  // same value. Reachability is not a better heuristic, it is the missing
+  // fact — and where it is present, no heuristic may overrule it.
+  //
+  // `ahead` does NOT require `lastPushedRef` to match. That condition exists
+  // only because, without a chain, "a state I authored" was the closest
+  // available stand-in for "a state the other side does not have yet" — and it
+  // is a bad one: a node that ADOPTED a peer's tree and then deleted a file
+  // authors nothing, so it could never re-announce the deletion and the delete
+  // never propagated. Reachability proves the same thing properly, whoever
+  // authored it.
+  switch (hub.reachability) {
+    case 'behind':
+      return 'pull';
+    case 'ahead':
+      return 'push';
+    case 'fork':
+      return 'merge';
+    case 'incomplete':
+      // Not a fork, and not in-sync: an answer this node cannot give. Acting
+      // on a truncated walk is how a node decides it is ahead of a peer it is
+      // actually behind.
+      return 'blocked';
+    /* v8 ignore next -- @preserve `undefined` falls through to the heuristics */
+    default:
+      break;
+  }
 
   // Only a state this agent AUTHORED may be re-announced (see
   // `lastPushedRef`).
@@ -261,9 +330,15 @@ export interface AntiEntropyStatus {
   localRef: string | null;
   /** How many repairs were started over this agent's lifetime. */
   repairs: number;
-  /** The most recent repair. */
+  /**
+   * The most recent repair, or the most recent refusal to attempt one.
+   *
+   * `action: 'blocked'` means the ancestry could not be resolved far enough to
+   * decide; nothing was done and nothing was latched. It is not counted in
+   * {@link repairs}, because nothing was repaired.
+   */
   lastRepair: {
-    action: AntiEntropyAction;
+    action: AntiEntropyAction | 'blocked';
     at: number;
     hubRef: string;
     localRef: string;
@@ -412,7 +487,6 @@ export class FsAntiEntropy {
         `${Math.round((now - (this._divergedSince as number)) / 1000)}s — ` +
         `${decision} (attempt ${this._attempts})`,
     );
-    this._repairs++;
     this._lastRepair = {
       action: decision,
       at: now,
@@ -420,6 +494,19 @@ export class FsAntiEntropy {
       localRef: view.currentRef as string,
       attempt: this._attempts,
     };
+
+    // `blocked` is REPORTED and not repaired.
+    //
+    // The ancestry could not be resolved far enough to say who is behind, and
+    // every action available here is destructive in one direction or the
+    // other. So the divergence stays open, the backoff keeps growing, and the
+    // next announcement tries again — by which time the missing rows may have
+    // arrived. It is counted out of `repairs` because nothing was repaired,
+    // and it is visible in `lastRepair.action` because a node stuck this way
+    // must be diagnosable.
+    if (decision === 'blocked') return;
+
+    this._repairs++;
     this._deps.repair(decision, hubRef, [...hubPredecessors], this._attempts);
   }
 }

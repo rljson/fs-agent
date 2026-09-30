@@ -591,6 +591,57 @@ constraint the package already has (`pnpm overrides`, exact pins).
 **Tested by** `test/fs-ref-vs-content.spec.ts`, including the control: the
 canonical-order assertion is red without the sort.
 
+## Deciding From Reachability
+
+`antiEntropyDecision` used to have a content hash and ONE generation of
+ancestry, and §2.2 is the proof that cannot be made correct: "a peer deleted
+what we added" and "a peer forked from an ancestor we share" arrive at that
+signature as the **same value**. Narrowing the rule was tried twice — it cost a
+discarded folder the first time and a livelock the second.
+
+The chain answers instead, and where it answers no heuristic may overrule it:
+
+| `hub.reachability` | decision |
+| --- | --- |
+| `behind` — theirs descends from ours | `pull` |
+| `ahead` — ours descends from theirs | `push` |
+| `fork` — neither descends from the other | `merge` |
+| `incomplete` — a walk was truncated | **`blocked`** |
+| absent — no chain on either side | the old heuristics, unchanged |
+
+**`ahead` no longer requires `lastPushedRef` to match.** That condition existed
+only because "a state I authored" was the closest available stand-in for "a
+state the other side does not have yet" — and it is a bad one. A node that
+ADOPTED a peer's tree and then deleted a file authors nothing, so it could never
+re-announce the deletion, and the delete never propagated. Reachability proves
+the same thing properly, whoever wrote it.
+
+**`blocked` is reported and not repaired.** Every action available is
+destructive in one direction or the other, and an incomplete walk that answers
+"not an ancestor" is indistinguishable from a definite no. So the divergence
+stays open, the backoff grows, and the next announcement tries again. It appears
+in `lastRepair.action` because a node stuck this way must be diagnosable, and it
+is **not** counted in `repairs`, because nothing was repaired.
+
+Absence must never read as `fork`: an older peer, or a node whose chain failed
+to initialise, gets exactly the behaviour that shipped before, including its
+known limits.
+
+### The keystone: lineages have to be joined
+
+**Reachability added on its own made things WORSE**, and the measurement is the
+only reason that was caught. Every node appends to its OWN lineage and chains
+are never merged, so an entry naming only this node's previous head can never be
+reachable from a peer's — `classify` answered `fork` for every disagreement
+there has ever been, and cases that used to pull or push correctly all became
+merges.
+
+So an entry that applies a peer's state names **that peer's head as a second
+parent**. It is the shape `FsEditChain` writes its rows by hand to allow, and it
+is what makes one node's history reachable from another's. Consumed once:
+naming it on every later entry would claim to descend from it repeatedly and
+grow every walk for nothing.
+
 ## Two Decision Sites, Not One
 
 The question *"has the other side seen a state I am in?"* is asked in **two**

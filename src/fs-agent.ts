@@ -26,6 +26,7 @@ import {
   AntiEntropyStatus,
   FsAntiEntropy,
   senderSawMyState as sawMyState,
+  type Reachability,
 } from './fs-anti-entropy.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
@@ -552,6 +553,21 @@ export class FsAgent {
     string,
     { removed: string[]; timeId: string }
   >();
+
+  /**
+   * A peer head this node has applied, waiting to become a chain parent.
+   *
+   * **Without this, reachability cannot answer anything.** Every node appends
+   * to its OWN lineage and chains are never merged, so if an entry only ever
+   * names this node's previous head, A's head can never be an ancestor of B's
+   * — and `classify` returns `fork` for every disagreement there has ever
+   * been. Measured: adding reachability without this made T4 WORSE, because
+   * cases that used to pull or push correctly all became merges.
+   *
+   * Naming the adopted head as a second parent is what joins the lineages, and
+   * it is the shape `FsEditChain` writes its rows by hand to allow.
+   */
+  private _adoptedChainHead?: string;
 
   /**
    * `relativePath → content hash` of the tree this node last announced.
@@ -2915,31 +2931,6 @@ export class FsAgent {
   }
 
   /**
-   * The state an incoming announcement is about.
-   *
-   * The mirror of {@link _announceAs}, and it has to be applied at BOTH entry
-   * points — the apply path and the anti-entropy's own socket read. The
-   * anti-entropy compares what it hears with `_currentRef`, which is a tree
-   * ref; left unmapped, a head would never match it and every node would report
-   * a permanent divergence against a fleet it agreed with.
-   *
-   * An unmarked ref is a tree ref and is returned as-is, WITHOUT any read.
-   * That is the whole point of the marker: a receive path that awaits a peer
-   * read before acting can lose a message to a slow peer, and the first version
-   * of this did exactly that to a late joiner's bootstrap.
-   *
-   * A marked ref this node cannot resolve answers `undefined` — "a state I
-   * cannot read yet". Nothing is applied on it and nothing is concluded from
-   * it; the sender re-announces, and the ancestry work has a name for this
-   * case (`complete: false`).
-   * @param ref - What arrived on the wire.
-   * @returns The tree ref it denotes, or `undefined` for an unresolvable head.
-   */
-  private async _announcedTreeRef(ref: string): Promise<string | undefined> {
-    return (await this._resolveAnnouncement(ref))?.treeRef;
-  }
-
-  /**
    * The state an incoming announcement is about, with its chain entry.
    *
    * The entry is what carries the sender's REMOVALS, which is the whole point
@@ -2973,6 +2964,41 @@ export class FsAgent {
       this._writeSyncError('chain/resolveHead', err);
       /* v8 ignore next -- @preserve */
       return undefined;
+    }
+  }
+
+  /**
+   * What the chain says about an announced head, for the decision.
+   *
+   * Reachability is supplied ONLY when this node has a head of its own.
+   * Without one there is nothing to be reachable from, and answering
+   * `incomplete` would block a node that is simply new — a late joiner has no
+   * entries and must be free to pull. Absent, the decision falls back to the
+   * heuristics that shipped before, which is the right behaviour for a node
+   * with no history rather than a degraded one.
+   * @param announced - The ref as it arrived on the wire.
+   * @returns The tree ref and, when both sides have a head, how the two
+   *   histories stand; `undefined` for a head this node cannot resolve.
+   */
+  private async _reachabilityOf(
+    announced: string,
+  ): Promise<{ treeRef: string; reachability?: Reachability } | undefined> {
+    const resolved = await this._resolveAnnouncement(announced);
+    if (resolved === undefined) return undefined;
+    const ourHead = this._chainHead?.head;
+    if (!resolved.entry || !ourHead || !this._chain) {
+      return { treeRef: resolved.treeRef };
+    }
+    try {
+      return {
+        treeRef: resolved.treeRef,
+        reachability: await this._chain.classify(ourHead, resolved.entry.head),
+      };
+    } catch (err) {
+      /* v8 ignore next -- @preserve a failed walk falls back to the heuristics */
+      this._writeSyncError('chain/classify', err);
+      /* v8 ignore next -- @preserve */
+      return { treeRef: resolved.treeRef };
     }
   }
 
@@ -3117,11 +3143,21 @@ export class FsAgent {
     delta: FsTreeDelta,
   ): Promise<void> {
     if (!this._chain) return;
+    // A peer head adopted since the last entry becomes a second parent, which
+    // is what makes one node's history reachable from another's. Consumed
+    // once: naming it on every later entry would claim to descend from it
+    // repeatedly and grow the walk for nothing.
+    const adopted = this._adoptedChainHead;
+    this._adoptedChainHead = undefined;
+    const parents = [this._chainHead?.head, adopted].filter(
+      (r): r is string => r !== undefined,
+    );
     try {
       const entry = await this._chain.append({
         treeRef,
         changed: delta.changed,
         removed: delta.removed,
+        previous: parents,
       });
       this._chainHead = { head: entry.head, treeRef };
       for (const path of entry.changed) {
@@ -3356,6 +3392,27 @@ export class FsAgent {
         this._remoteApplyInFlight = true;
 
         try {
+          // THE SENDER'S DELETIONS, before any branch can return without them.
+          //
+          // A deletion carried in the chain is a FACT the sender states, and
+          // acting on it is not conditional on adopting the sender's tree.
+          // Several paths below return early and correctly — the content is
+          // already equivalent, the sender is behind us, the ancestry forbids a
+          // prune, the fork is resolved by an inline merge — and a removal
+          // parked inside the restore branch is reached on NONE of them.
+          //
+          // The merge path is the one that matters, and it only became the
+          // common case once reachability started classifying forks correctly:
+          // `_resolveConflictInline` returns before the restore, so every
+          // deletion that arrived with a fork was silently dropped.
+          //
+          // Safe before the fetch because it needs no tree, and safe under the
+          // paused watcher because the resume rescans what it missed, so the
+          // deletion is announced like any local one. Bounded twice regardless
+          // of the path: `timeId` recency and the mass-delete circuit breaker.
+          // See `planRemovals`.
+          await this._applyIncomingRemovals(treeRef);
+
           // Fetch incoming tree from DB (without restoring yet)
           const incomingTree = await FsAgent._withTimeout(
             this._fetchTreeFromDb(db, treeKey, treeRef),
@@ -3678,24 +3735,6 @@ export class FsAgent {
             this._timeouts.restore,
             `syncFromDb → restore(${treeKey})`,
           );
-
-          // The sender's DELETIONS, applied as facts rather than inferred from
-          // an absence. This is the half `mayPrune` cannot do: a partitioned
-          // node's ancestor is unresolvable, so the ancestry rule withholds the
-          // prune and the deleted file survives — on every node, including the
-          // one that deleted it.
-          //
-          // Placed here rather than at the top of the apply. Both were tried
-          // and the difference between them was WITHIN NOISE — four runs each
-          // of a scenario that is a coin flip is not a measurement, and reading
-          // one as a result is the mistake this file keeps paying for. This
-          // position is chosen because it is simpler, not because it measured
-          // better: it cannot delete under a paused watcher on paths the
-          // branches above are still reasoning about.
-          //
-          // Bounded twice either way: `timeId` recency and the mass-delete
-          // circuit breaker. See `planRemovals`.
-          await this._applyIncomingRemovals(treeRef);
 
           // After restore: re-scan the filesystem so the scanner's internal
           // tree matches the just-restored state, then store and record the
@@ -4053,6 +4092,9 @@ export class FsAgent {
         // removals are the authorisation the ancestry rule cannot give, so
         // they have to survive the gap between hearing and acting.
         if (resolved.entry) {
+          // The peer's head becomes a parent of whatever this node records
+          // next, so the two lineages actually join. See `_adoptedChainHead`.
+          this._adoptedChainHead = resolved.entry.head;
           void this._collectIncomingRemovals(resolved.entry).then(() =>
             schedule(resolved.treeRef),
           );
@@ -4141,10 +4183,16 @@ export class FsAgent {
         observe(announced);
         return;
       }
-      void this._announcedTreeRef(announced).then((ref) => {
+      void this._reachabilityOf(announced).then((verdict) => {
         // A head we cannot read is not evidence of anything. Concluding
         // "diverged" from it would report a disagreement we cannot describe.
-        if (ref !== undefined) observe(ref);
+        if (verdict === undefined) return;
+        antiEntropy.observe({
+          ref: verdict.treeRef,
+          origin: payload.o,
+          predecessors: Array.isArray(payload.p) ? payload.p : [],
+          reachability: verdict.reachability,
+        });
       });
     };
     // Two sources of the same announcement. The bootstrap (and its optional

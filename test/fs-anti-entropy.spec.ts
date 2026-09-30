@@ -405,6 +405,51 @@ describe('FsAntiEntropy', () => {
     expect(ae.status.hubRef).toBe('X');
   });
 
+  it('reports a blocked divergence without repairing it', () => {
+    // The ancestry could not be resolved far enough to say who is behind, and
+    // every action available is destructive in one direction or the other. So
+    // the divergence stays open, nothing is applied, nothing is latched, and
+    // the next announcement tries again — by which time the missing rows may
+    // have arrived.
+    //
+    // Visible in `lastRepair.action`, because a node stuck this way has to be
+    // diagnosable. NOT counted in `repairs`, because nothing was repaired —
+    // a repair count that grew while nothing happened is how "it is trying"
+    // gets read off a node that is doing nothing at all.
+    const repairs: string[] = [];
+    let now = 0;
+    const ae = new FsAntiEntropy(
+      { graceMs: 100 },
+      {
+        view: () => ({
+          origin: 'me',
+          currentRef: 'S1',
+          lastAppliedRef: undefined,
+          lastPushedRef: undefined,
+        }),
+        busy: () => false,
+        repair: (action) => repairs.push(action),
+        now: () => now,
+        log: () => {},
+      },
+    );
+
+    const hub = {
+      ref: 'S2',
+      origin: 'hub',
+      predecessors: ['S0'],
+      reachability: 'incomplete' as const,
+    };
+    ae.observe(hub);
+    now += 200;
+    ae.observe(hub);
+
+    expect(repairs).toEqual([]);
+    expect(ae.status.repairs).toBe(0);
+    expect(ae.status.lastRepair?.action).toBe('blocked');
+    expect(ae.status.diverged).toBe(true);
+  });
+
   it('hands the repair a copy of the ancestry', () => {
     const { ae, repairs, advance } = setup();
     const hub = { ref: 'S2', predecessors: ['S1'] };

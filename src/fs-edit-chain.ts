@@ -260,6 +260,78 @@ export class FsEditChain {
   }
 
   /**
+   * Where two heads stand relative to each other.
+   *
+   * `behind` — theirs descends from ours, so we are the one missing work.
+   * `ahead` — ours descends from theirs; they are missing ours.
+   * `fork` — neither descends from the other. Both sides have work.
+   * `incomplete` — a walk was truncated, so NOTHING may be concluded.
+   * @param ourHead - This node's head, or `undefined` when it has none.
+   * @param theirHead - The head that arrived.
+   * @returns How the two histories stand.
+   */
+  async classify(
+    ourHead: string | undefined,
+    theirHead: string,
+  ): Promise<'behind' | 'ahead' | 'fork' | 'incomplete'> {
+    if (ourHead === undefined) return 'incomplete';
+    if (ourHead === theirHead) return 'ahead';
+
+    // Is ours an ancestor of theirs? Then they moved forward from us.
+    const fromTheirs = await this._ancestorsOf(theirHead);
+    if (!fromTheirs.complete) return 'incomplete';
+    if (fromTheirs.refs.has(ourHead)) return 'behind';
+
+    const fromOurs = await this._ancestorsOf(ourHead);
+    if (!fromOurs.complete) return 'incomplete';
+    if (fromOurs.refs.has(theirHead)) return 'ahead';
+
+    return 'fork';
+  }
+
+  /**
+   * Every entry reachable from `head`, itself included.
+   *
+   * `complete` is false when any entry could not be resolved — and the caller
+   * must then conclude NOTHING, because the unreachable part may contain the
+   * very ref it was looking for. An incomplete walk that answers "not an
+   * ancestor" is indistinguishable from a definite no, and acting on it is how
+   * a node decides it is ahead of a peer it is actually behind.
+   * @param head - Where to start.
+   * @param maxWalk - Give up past this many entries.
+   * @returns The refs reached, and whether the walk resolved completely.
+   */
+  private async _ancestorsOf(
+    head: string,
+    maxWalk = 500,
+  ): Promise<{ refs: Set<string>; complete: boolean }> {
+    const refs = new Set<string>();
+    let complete = true;
+    let frontier = [head];
+
+    while (frontier.length > 0) {
+      const wanted = frontier.filter((ref) => !refs.has(ref) && !!refs.add(ref));
+      if (wanted.length === 0) break;
+      if (refs.size > maxWalk) {
+        complete = false;
+        break;
+      }
+      const next: string[] = [];
+      for (const ref of wanted) {
+        const entry = await this.entry(ref);
+        if (!entry) {
+          complete = false;
+          continue;
+        }
+        for (const previous of entry.previous) next.push(previous);
+      }
+      frontier = next;
+    }
+
+    return { refs, complete };
+  }
+
+  /**
    * The NET removals between a peer's head and a state this node knows.
    *
    * **Why a walk is needed at all, and it cost a red run to see.** A removal is
