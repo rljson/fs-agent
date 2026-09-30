@@ -514,11 +514,29 @@ export class FsScanner {
       relativePath,
     };
 
+    // SORTED, and that is a correctness property rather than tidiness.
+    //
+    // `readdir` above is not ordered, and the order it happens to return is a
+    // property of the filesystem, not of the folder. The tree ref hashes this
+    // array; `_getFileContentMap` does not. So two machines holding
+    // byte-identical content could derive DIFFERENT refs for it — and the
+    // divergence signal, which every repair decision is built on, would say
+    // they disagree when they do not.
+    //
+    // Measured on the lab: after a forced 40 s partition both machines held 38
+    // identical files with identical hashes, and one reported `diverged: true`
+    // for over eight minutes across six merge repairs, logging "equivalent
+    // content, skipping restore" every time. The apply path correctly saw
+    // nothing to transfer; the anti-entropy correctly saw two refs; neither was
+    // wrong. See `PLAN-fs-edit-chain.md` §2.1b and `test/fs-ref-vs-content.spec.ts`.
+    //
+    // Sorting makes the ref a function of CONTENT alone, which is what a
+    // content hash was always supposed to be.
     const dirTree: Tree = {
       id: dirName,
       isParent: childRefs.length > 0,
       meta: dirMeta,
-      children: childRefs.length > 0 ? childRefs : null,
+      children: childRefs.length > 0 ? [...childRefs].sort() : null,
     };
 
     return dirTree;

@@ -217,7 +217,7 @@ describe('level 2 — surfaces', () => {
   }, 30_000);
 
   // ...........................................................................
-  // S5 — the agent WRITES the chain as it pushes.
+  // S6 — the agent WRITES the chain as it pushes.
   //
   // WP1a built `FsEditChain` and nothing called it. This is the assertion that
   // the agent actually keeps a history of its own folder: after a push, there
@@ -231,7 +231,7 @@ describe('level 2 — surfaces', () => {
   //
   // → WP1b.
   // ...........................................................................
-  it('S5: a push appends a chain entry naming what it removed', async () => {
+  it('S6: a push appends a chain entry naming what it removed', async () => {
     const io = new IoMem();
     await io.init();
     await io.isReady();

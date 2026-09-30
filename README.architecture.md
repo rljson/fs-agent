@@ -550,6 +550,47 @@ clients, a real server with heartbeat, one ref message dropped on purpose per
 case — including both halves of the collision above — plus a control run with
 the repair off that must stay divergent.
 
+## One Folder, One Ref — the canonical child order
+
+A tree ref is supposed to be a function of the folder's content. It was not.
+
+`readdir` (`fs-scanner.ts`) returns directory entries in whatever order the
+filesystem chooses, and the ref hashes the resulting `children` array.
+`_getFileContentMap` — the apply path's definition of "the same folder" —
+ignores order entirely. So **two machines holding byte-identical content could
+derive different refs for it**, and the two predicates disagreed:
+
+| predicate | compares | asked by |
+| --- | --- | --- |
+| the tree ref | the whole tree row hash | anti-entropy: *am I diverged?* |
+| `_treesHaveEquivalentContent` | path → blobId, plus directories | the apply path: *is there work to do?* |
+
+When they disagree the system deadlocks against itself by design: the apply
+path correctly concludes there is nothing to transfer, the anti-entropy
+correctly concludes the refs differ, and neither is wrong.
+
+**Measured on the lab (fs-agent 0.0.81, two machines).** After a forced 40 s
+partition both sides held 38 identical files with identical hashes, and one
+reported `diverged: true` for over **eight minutes** across six merge repairs,
+logging *"equivalent content, skipping restore"* every time. It costs nothing in
+data and it makes the divergence signal permanently untrustworthy — which is
+the signal every repair decision is built on, and a permanent red "weicht ab"
+in the UI.
+
+The scan now emits children in a **canonical (sorted) order**, so the ref is a
+function of content alone. Asserted on the scanner rather than on an arbitrary
+tree, because that is where the guarantee has to live: any two scans of
+equivalent content agree by construction, whatever order their filesystems hand
+back.
+
+**This changes every tree ref once.** Two machines only agree if both sort, so
+it must roll out in lockstep — a node on an older build derives the old ref for
+the same folder and looks permanently diverged to a new one. That is the same
+constraint the package already has (`pnpm overrides`, exact pins).
+
+**Tested by** `test/fs-ref-vs-content.spec.ts`, including the control: the
+canonical-order assertion is red without the sort.
+
 ## Two Decision Sites, Not One
 
 The question *"has the other side seen a state I am in?"* is asked in **two**
