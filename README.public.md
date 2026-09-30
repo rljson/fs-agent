@@ -808,6 +808,31 @@ itself. Without a beacon or heartbeat it never fires. `agent.antiEntropyStatus`
 reports whether this node and the hub agree, since when they have not, and
 the last repair — a lasting divergence is the one trace a lost message leaves.
 
+## `senderSawMyState` — may a peer delete my files?
+
+Exported because it is the second of two places the sync asks *"has the other
+side seen a state I am in?"* — `antiEntropyDecision` chooses a repair, this
+authorises deletions.
+
+```typescript
+import { senderSawMyState } from '@rljson/fs-agent';
+
+senderSawMyState({
+  currentRef,            // the state my folder is in
+  lastAppliedRef,        // the last incoming state I applied
+  senderPredecessors,    // what the incoming push says it descends from
+  ancestryIsCarried,     // syncConfig.causalOrdering
+});
+```
+
+`true` means the sender has demonstrably seen a state this node is in, so
+anything absent from its tree is absent because it removed it. `false` means the
+push may add but must not prune.
+
+Both escape hatches return `true`: a transport that carries no ancestry, and a
+push that declares none — the latter is handled by a separate rule, because a
+fresh client's first push has no predecessors.
+
 ## Deletions are remembered
 
 A deleted file is simply absent from the next tree, so nothing in the content

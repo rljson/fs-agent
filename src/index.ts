@@ -15,6 +15,7 @@ export {
   antiEntropyDecision,
   DEFAULT_ANTI_ENTROPY,
   FsAntiEntropy,
+  senderSawMyState,
   type AntiEntropyAction,
   type AntiEntropyDecision,
   type AntiEntropyDeps,
@@ -22,6 +23,7 @@ export {
   type AntiEntropyStatus,
   type AntiEntropyView,
   type HubAnnouncement,
+  type PruneAuthorityView,
 } from './fs-anti-entropy.ts';
 export {
   createFsChainTables,

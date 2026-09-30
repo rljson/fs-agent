@@ -550,6 +550,43 @@ clients, a real server with heartbeat, one ref message dropped on purpose per
 case — including both halves of the collision above — plus a control run with
 the repair off that must stay divergent.
 
+## Two Decision Sites, Not One
+
+The question *"has the other side seen a state I am in?"* is asked in **two**
+places, and they are not duplicates:
+
+| site | question | authorises |
+| --- | --- | --- |
+| `antiEntropyDecision` | on divergence, do I push / pull / merge? | a repair |
+| `senderSawMyState` | may this incoming tree **prune my files**? | deletions |
+
+Both read `[currentRef, lastAppliedRef]` against the other side's declared
+predecessors, and both therefore inherit the same ambiguity: one generation of
+ancestry cannot separate "a peer deleted what we added" from "a peer forked
+from an ancestor we share". **A chain consulted for repairs but not for pruning
+leaves the deletion path guessing exactly as it does today.**
+
+They are genuinely distinct, which is why narrowing the first in 0.0.84
+correctly left the second alone — and why the second is now a pure exported
+function rather than an expression buried in `syncFromDb`. It can be enumerated
+(`test/fs-anti-entropy-level1.spec.ts`, D5) and it has somewhere for the chain
+to be consulted.
+
+`senderSawMyState` has two escape hatches, both load-bearing and both measured:
+
+- **a transport that carries no ancestry** (`causalOrdering` off) always
+  permits the prune — judging silence as "has not seen my state" refused every
+  deletion across twenty tests when it was first tried;
+- **a push declaring no ancestry** is left to the rule above it, because a
+  genuinely fresh client's first push carries no predecessors.
+
+And `lastAppliedRef` counts, not only `currentRef`: after an apply a node
+records `currentRef` from its OWN re-scan, which need not equal the ref the
+tree arrived under — mtimes do not always survive a restore, and on Windows
+they regularly do not. Measured: with `currentRef` alone, three lab runs in
+four converged perfectly on 1 201 files and propagated an added file, and none
+of them could delete one.
+
 ## Tombstone Log (`_pendingDeletes` + `.fsagent-state.json`)
 
 **What this node deleted, remembered past the push.**

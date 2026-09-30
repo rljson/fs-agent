@@ -25,6 +25,7 @@ import {
   AntiEntropyOptions,
   AntiEntropyStatus,
   FsAntiEntropy,
+  senderSawMyState as sawMyState,
 } from './fs-anti-entropy.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
@@ -3155,10 +3156,16 @@ export class FsAgent {
           const statesIAmIn = [this._currentRef, this._lastAppliedRef].filter(
             (r): r is string => r !== undefined,
           );
-          const senderSawMyState =
-            !ancestryIsCarried ||
-            !declaresAncestry ||
-            statesIAmIn.some((r) => predecessorRefs!.includes(r));
+          // Extracted to `fs-anti-entropy.ts` unchanged, so the rule can be
+          // enumerated (§7.3.1's D5) and so that making it chain-aware has
+          // somewhere to happen. This is the SECOND decision site, and the
+          // plan originally named only the first.
+          const senderSawMyState = sawMyState({
+            currentRef: this._currentRef,
+            lastAppliedRef: this._lastAppliedRef,
+            senderPredecessors: predecessorRefs ?? [],
+            ancestryIsCarried,
+          });
 
           // Second reason to withhold pruning, and the one that needs no
           // ancestry at all: the sender has already said something later than
