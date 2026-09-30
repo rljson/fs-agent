@@ -550,6 +550,45 @@ clients, a real server with heartbeat, one ref message dropped on purpose per
 case — including both halves of the collision above — plus a control run with
 the repair off that must stay divergent.
 
+## Tombstone Log (`_pendingDeletes` + `.fsagent-state.json`)
+
+**What this node deleted, remembered past the push.**
+
+A deleted file is simply absent from the next tree, so nothing in the content
+says the absence was deliberate. `_restoreTree` has always consulted
+`_pendingDeletes` — "never re-create a file deleted here and not yet announced"
+— and that set used to be cleared by `_rememberAnnounced`, one announcement
+after the delete. One push too early: "once peers have been told, a file's
+absence is theirs to know about" holds only for a peer that HEARD. A
+partitioned node's deletion reached nobody, and on rejoin the fleet's tree still
+contains the file.
+
+The set is now persisted in `.fsagent-state.json` beside `currentRef` and
+reloaded on start.
+
+| trigger | effect |
+| --- | --- |
+| local `deleted`, path in `_announcedFiles` | record a tombstone, persist |
+| local `added` / `modified` for a tombstoned path | forget it, persist |
+| restore about to write a tombstoned path | skip the write |
+
+**Only an announced FILE may be tombstoned**, because the watcher's path is not
+trustworthy on its own: deleting one nested file on macOS emits two deletions,
+the first naming the root folder itself, and directories arrive as `modified`.
+`_announcedFiles` is the set the prune rule already uses for "a file peers could
+know about", and it excludes the root, directories, and files deleted before
+anyone was told — the last of which need no tombstone, because no peer can push
+them back.
+
+**This is half a mechanism.** Measured: it stops a node resurrecting its own
+deletion, reliably. It does not make the deletion win on a peer that never heard
+it, so the residual failure is a permanent divergence rather than a data loss.
+The other half needs the edit chain below. See `doc/known-limits.md`.
+
+**Not yet bounded.** Deleting a large folder writes one tombstone per file and
+keeps them. `@rljson/mongo-agent` routes tombstone application through the same
+mass-delete circuit breaker that bounds a prune; fs does not yet.
+
 ## Edit Chain (`src/fs-edit-chain.ts`)
 
 **Written, and read by nobody. That is deliberate.**

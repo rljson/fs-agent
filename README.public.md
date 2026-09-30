@@ -808,6 +808,25 @@ itself. Without a beacon or heartbeat it never fires. `agent.antiEntropyStatus`
 reports whether this node and the hub agree, since when they have not, and
 the last repair — a lasting divergence is the one trace a lost message leaves.
 
+## Deletions are remembered
+
+A deleted file is simply absent from the next tree, so nothing in the content
+says the absence was deliberate. `FsAgent` keeps a **tombstone log** — the paths
+deleted on this machine — in `.fsagent-state.json` beside the folder's ref, and
+reloads it on start. A restore never re-creates a path in it, so a peer that has
+not yet heard about a deletion cannot undo it.
+
+A tombstone is dropped the moment the path is created again locally, so a file
+can always be re-added.
+
+Nothing to configure. Two things worth knowing:
+
+- **It stops a node undoing its OWN deletion. It does not yet make the deletion
+  win on a peer that never heard it** — that peer keeps the file until the two
+  reconcile some other way. See `doc/known-limits.md`.
+- **The log is not bounded.** Deleting a very large folder records one entry per
+  file.
+
 ## Edit Chain — a provable history
 
 `FsEditChain` records what a folder state was made from. A tree ref is a content

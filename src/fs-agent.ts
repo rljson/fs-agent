@@ -19,7 +19,7 @@ import {
   utimes,
   writeFile,
 } from 'fs/promises';
-import { dirname, join } from 'path';
+import { dirname, join, relative, sep } from 'path';
 
 import {
   AntiEntropyOptions,
@@ -481,6 +481,14 @@ export class FsAgent {
   private readonly _pendingDeletes = new Set<string>();
 
   /**
+   * The ref last written to {@link AGENT_STATE_FILE}.
+   *
+   * Held because the state file now carries two things, and a tombstone write
+   * must not blank the ref that was already recorded.
+   */
+  private _currentRefPersisted: string | undefined;
+
+  /**
    * The states this node has held, oldest first.
    *
    * A push declaring one of these — but not the current one — comes from a
@@ -558,6 +566,10 @@ export class FsAgent {
       bs: this._bs,
     });
     this._adapter = new FsBlobAdapter(this._bs);
+    // Before anything can apply a peer's tree: a restart that forgot what it
+    // had deleted is how a deletion is undone by the first peer that never
+    // heard about it.
+    this._loadPersistedTombstones();
 
     // Automatically start syncing if db and treeKey are provided
     /* v8 ignore next -- @preserve */
@@ -648,14 +660,66 @@ export class FsAgent {
     // Every state this node enters, in the order it entered them. Recorded
     // here because this is the one place they all pass through.
     this._rememberState(ref);
+    this._currentRefPersisted = ref;
+    this._writeAgentState();
+  }
+
+  /**
+   * Writes the tombstone log, keeping whatever ref is already recorded.
+   *
+   * Separate from {@link _persistCurrentRef} because a deletion is recorded the
+   * moment the watcher reports it — before the push that moves the ref — and
+   * losing it in that window is the whole defect.
+   */
+  private _persistTombstones(): void {
+    this._writeAgentState();
+  }
+
+  /**
+   * Writes `.fsagent-state.json`: the ref this folder is at, and the paths
+   * deleted here.
+   *
+   * One file for both, written whole, because a partial write of either is
+   * indistinguishable from a first run — and both answer `undefined` /
+   * "nothing tombstoned", which is the safe direction for each.
+   */
+  private _writeAgentState(): void {
     try {
       writeFileSync(
         join(this._rootPath, AGENT_STATE_FILE),
-        JSON.stringify({ currentRef: ref }),
+        JSON.stringify({
+          currentRef: this._currentRefPersisted,
+          tombstones: [...this._pendingDeletes].map((abs) =>
+            relative(this._rootPath, abs).split(sep).join('/'),
+          ),
+        }),
         'utf-8',
       );
     } catch {
       /* v8 ignore next -- @preserve best-effort; see the doc comment */
+    }
+  }
+
+  /**
+   * Loads the tombstone log a previous run left behind.
+   *
+   * A restart that forgot what it had deleted is how a deletion is undone by
+   * the first peer that never heard about it.
+   */
+  private _loadPersistedTombstones(): void {
+    try {
+      const file = join(this._rootPath, AGENT_STATE_FILE);
+      if (!existsSync(file)) return;
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'));
+      const paths = (parsed as { tombstones?: unknown })?.tombstones;
+      if (!Array.isArray(paths)) return;
+      for (const path of paths) {
+        if (typeof path === 'string' && path.length > 0) {
+          this._pendingDeletes.add(join(this._rootPath, ...path.split('/')));
+        }
+      }
+    } catch {
+      /* v8 ignore next -- @preserve best-effort; a lost log is a lost guard */
     }
   }
 
@@ -2084,7 +2148,42 @@ export class FsAgent {
       // the push that will announce it, which is the window an incoming apply
       // can undo it in.
       if (change?.type === 'deleted' && change.path !== '.') {
-        this._pendingDeletes.add(join(this._rootPath, change.path));
+        // Only a path this node ANNOUNCED as a file.
+        //
+        // The watcher's path is not trustworthy on its own. Deleting one
+        // nested file on macOS emits TWO deletions — the file, and the ROOT
+        // FOLDER'S OWN NAME:
+        //
+        //   ["deleted:test-temp-diag", "deleted:nested/deep.txt"]
+        //
+        // It also reports directories as `modified`. That was harmless while
+        // this set was cleared on every announcement; a log that outlives the
+        // push turns it into a permanent tombstone for a file that never
+        // existed, and on a folder deletion into one per file — refused
+        // forever if anyone ever restores them.
+        //
+        // `_announcedFiles` is the set the prune rule already uses for "a file
+        // peers could know about", and it answers both problems at once: a
+        // directory was never in it, nor was the root, nor was a file deleted
+        // before it was ever announced — and that last one needs no tombstone,
+        // because no peer can push it back.
+        const deleted = join(this._rootPath, change.path);
+        if (this._announcedFiles.has(deleted)) {
+          this._pendingDeletes.add(deleted);
+          this._persistTombstones();
+        }
+      }
+      // A local re-creation supersedes the tombstone. Without this, a path
+      // deleted once could never be written again on this node: the guard in
+      // `_restoreTree` would refuse every later copy of it, forever.
+      //
+      // Safe against the agent's own writes: a restore pauses the watcher, so
+      // only a real local change reaches here.
+      if (
+        (change?.type === 'added' || change?.type === 'modified') &&
+        this._pendingDeletes.delete(join(this._rootPath, change.path))
+      ) {
+        this._persistTombstones();
       }
       // A rescan-driven push during a remote apply re-asserts stale state.
       // Real watcher events are unambiguous local changes and still go out.
@@ -2616,9 +2715,16 @@ export class FsAgent {
     for (const path of this._getFileContentMap(tree).keys()) {
       this._announcedFiles.add(join(this._rootPath, path));
     }
-    // Announced state and pending deletions are the same clock: once peers have
-    // been told, a file's absence is theirs to know about.
-    this._pendingDeletes.clear();
+    // EXPERIMENT (WP2): the clear is gone.
+    //
+    // "Once peers have been told, a file's absence is theirs to know about" is
+    // true only of a peer that HEARD. A partitioned node's deletion reached
+    // nobody, and on rejoin the fleet's tree still contains the file — so the
+    // apply puts it back on the node that deleted it, the local scan finds it
+    // present, and the deletion is never announced at all. Measured as T4.
+    //
+    // A tombstone therefore has to outlive the announcement that it was
+    // supposed to be superseded by.
   }
 
   private _adoptAppliedRef(connector: Connector, treeRef: string): void {

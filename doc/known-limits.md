@@ -80,18 +80,58 @@ that a deletion happened **at a node whose ancestry the reader cannot fetch**.
 That is what a persistent tombstone supplies, and why it is the fix rather than
 better merge logic.
 
-### What it would take
+### Half of it is fixed; the half that remains is propagation
 
-The guard already exists: `_pendingDeletes` (`src/fs-agent.ts`), consumed in
-`_restoreTree` as "never re-create a file deleted here and not yet announced".
-Its lifetime is one announcement — `_rememberAnnounced` clears it — which is
-exactly one push too early. Making it persistent, per folder, is WP1 of
-`PLAN-fs-edit-chain.md`.
+`_pendingDeletes` is now a **persistent tombstone log**, written to
+`.fsagent-state.json` and reloaded on start. Its lifetime used to be one
+announcement — `_rememberAnnounced` cleared it — which is exactly one push too
+early: "once peers have been told, a file's absence is theirs to know about" is
+true only of a peer that HEARD.
+
+**Measured over four runs of T4 with the log persistent:** the node that
+deleted the file now keeps its deletion, every time. Its peers do not.
+
+```
+A: [keeper.txt, meanwhile.txt]              ← the delete held
+B: [doomed.txt, keeper.txt, meanwhile.txt]  ← never heard it
+C: [doomed.txt, keeper.txt, meanwhile.txt]  ← never heard it
+```
+
+So the remaining failure is a **permanent divergence, not a data loss** — which
+is strictly better, and still not good enough. Making a delete WIN on a peer
+that never heard it needs something that carries the deletion as a fact rather
+than as an absence, which is `src/fs-edit-chain.ts` and the work packages after
+it.
+
+### What a tombstone may be recorded for
+
+Only a path `_announcedFiles` holds — a file this node told its peers about.
+The watcher's own path is not trustworthy enough. Deleting one nested file on
+macOS emits TWO deletions, and the first names the **root folder itself**:
+
+```
+["deleted:test-temp-diag", "deleted:nested/deep.txt"]
+```
+
+It also reports directories as `modified`. All of that was harmless while the
+set was cleared on every announcement. A log that outlives the push turns it
+into a permanent tombstone for a file that never existed — and, on a folder
+deletion, into one per file, each refused for good if anyone restores them.
+
+### Still open
+
+**Nothing bounds the log.** Deleting a large folder writes one tombstone per
+file and keeps them. The mass-delete circuit breaker (`MASS_DELETE_MIN_FILES`,
+`MASS_DELETE_MAX_RATIO`) bounds what a restore may prune and does not yet bound
+what a delete may remember; `@rljson/mongo-agent` routes its tombstone
+application through the same breaker for exactly this reason.
 
 ### What to watch for
 
 A file the user deleted reappearing on the user's own machine, and no `DELETED`
-count in that node's restore log line.
+count in that node's restore log line. With the log in place, the same defect
+now shows as one node disagreeing with the rest for good, rather than as the
+file coming back.
 
 ## Two people saving the same file at the same time
 
