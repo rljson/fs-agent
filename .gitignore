@@ -38,3 +38,6 @@ Thumbs.db
 
 # Temporary test files
 /test-tmp/
+# Specs that name their own temp root leak it when a teardown loses a race;
+# an untracked folder here is what makes `git add -A` dangerous in this repo.
+/test-temp-*/

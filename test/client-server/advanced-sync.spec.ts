@@ -15,6 +15,7 @@ import { createTreesTableCfg, Route } from '@rljson/rljson';
 import { Client, Server } from '@rljson/server';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { removeTree } from '../setup/remove-tree';
 
 // =============================================================================
 // Types
@@ -195,12 +196,12 @@ describe('Advanced Sync Tests', () => {
   const baseDir = join(process.cwd(), 'test-tmp', 'advanced-sync');
 
   beforeEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    await removeTree(baseDir);
     await mkdir(baseDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+    await removeTree(baseDir);
   });
 
   // ===========================================================================

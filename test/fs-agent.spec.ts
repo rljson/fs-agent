@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent';
 import { FsDbAdapter } from '../src/fs-db-adapter';
+import { removeTree } from './setup/remove-tree';
 
 /**
  * Creates a mock Connector for tests that don't need real socket communication.
@@ -50,14 +51,14 @@ describe('FsAgent', () => {
   const sourceDir = join(process.cwd(), 'test-temp-fs-agent-source');
 
   beforeEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
-    await rm(sourceDir, { recursive: true, force: true });
+    await removeTree(testDir);
+    await removeTree(sourceDir);
     await mkdir(testDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
-    await rm(sourceDir, { recursive: true, force: true });
+    await removeTree(testDir);
+    await removeTree(sourceDir);
   });
 
   describe('constructor', () => {
@@ -226,7 +227,7 @@ describe('FsAgent', () => {
       const tree = await agent.extract();
 
       // Clear directory
-      await rm(testDir, { recursive: true, force: true });
+      await removeTree(testDir);
       await mkdir(testDir, { recursive: true });
 
       // Restore
@@ -278,7 +279,7 @@ describe('FsAgent', () => {
       const tree = await agent.extract();
 
       // Clear and restore
-      await rm(testDir, { recursive: true, force: true });
+      await removeTree(testDir);
       await mkdir(testDir, { recursive: true });
 
       await agent.restore(tree);
@@ -451,7 +452,7 @@ describe('FsAgent', () => {
       const tree = await agent.extract();
 
       // Clear directory
-      await rm(testDir, { recursive: true, force: true });
+      await removeTree(testDir);
       await mkdir(testDir, { recursive: true });
 
       // Restore
@@ -471,7 +472,7 @@ describe('FsAgent', () => {
       const agent = new FsAgent(testDir);
       const tree = await agent.extract();
 
-      await rm(testDir, { recursive: true, force: true });
+      await removeTree(testDir);
       await mkdir(testDir, { recursive: true });
 
       await agent.restore(tree);
@@ -2678,7 +2679,7 @@ describe('FsAgent.fromClient — disconnect must not silence the node', () => {
       expect(paused[0]).toBe(DISCONNECT_PAUSE_MAX_MS);
       agent.scanner.stopWatch();
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await removeTree(dir);
     }
   });
 });
