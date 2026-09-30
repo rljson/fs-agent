@@ -54,6 +54,45 @@ ancestry to ask the question, and that is a protocol change.
 A folder rewriting itself every few seconds, and `antiEntropy.lastRepair.action`
 reading `push` on **both** sides of a disagreement. One side must always yield.
 
+## A deletion is undone when the common ancestor cannot be read
+
+**Measured 2026-09-30, off-lab, in seven seconds** — `test/mesh/fs-mesh.spec.ts`
+T4, committed skipped because it is red.
+
+A node deletes a file while it is partitioned. On rejoin the file comes back on
+**every** node, including the one that deleted it: the apply restores it, the
+local scan then finds it present, and the deletion is never announced at all.
+
+### Why, and it is narrower than it looks
+
+A three-way merge does **not** need a record of the deletion. Given the common
+ancestor S, our tree and theirs, "absent from theirs and present in S" *is* a
+deletion, provably — and `fs-conflict-resolver.ts` gets that right. The same
+scenario with the ancestor readable passes (T2).
+
+What fails is the case where the ancestor **cannot be resolved**. A partitioned
+node cannot read the revision rows its peers produced while it was away, so the
+merge degrades to two trees — one with the file, one without — and nothing
+distinguishes a deliberate absence from a state that merely predates the file.
+
+So the missing information is not "that a deletion happened" in general. It is
+that a deletion happened **at a node whose ancestry the reader cannot fetch**.
+That is what a persistent tombstone supplies, and why it is the fix rather than
+better merge logic.
+
+### What it would take
+
+The guard already exists: `_pendingDeletes` (`src/fs-agent.ts`), consumed in
+`_restoreTree` as "never re-create a file deleted here and not yet announced".
+Its lifetime is one announcement — `_rememberAnnounced` clears it — which is
+exactly one push too early. Making it persistent, per folder, is WP1 of
+`PLAN-fs-edit-chain.md`.
+
+### What to watch for
+
+A file the user deleted reappearing on the user's own machine, and no `DELETED`
+count in that node's restore log line.
+
 ## Two people saving the same file at the same time
 
 **The later write does not reliably win.** When two workstations change the
