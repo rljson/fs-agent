@@ -15,10 +15,15 @@
 //   T1  green here, LOST DATA IN THE FIELD  — see its comment
 //   T2  green here, LOST DATA IN THE FIELD  — see its comment
 //   T3  green
-//   T4  RED — reproduces the field failure in seven seconds. WP1's target.
+//   T4  RED — reproduces the field failure in seven seconds. WP2b's target.
 //   T5  green
-//   T6  cannot be written yet — there is no chain to hold a hole. WP3.
+//   T6  cannot be written yet — nothing announces a chain head. WP3.
 //   T7  green at 400 files; the scale wall is WP5's, not this file's.
+//
+// T4 and T6 are committed INVERTED (`it.fails`), not skipped: failing is the
+// expected result and does not break the build, while PASSING breaks it with
+// "this works now — remove the inversion and let it gate". A skipped test is
+// silent in both directions and relies on somebody remembering to return.
 //
 // The plan this came from predicted T1, T2 and T4 would all be red. Only T4
 // is. **A green T1 or T2 here is not evidence the defect is gone** — both were
@@ -251,10 +256,33 @@ describe('fs mesh', () => {
   // ...........................................................................
   // T4 — the DELETING node is the one that was away.
   //
-  // **RED. Skipped so the suite stays green, and skipped is a promise to come
-  // back: WP1 (tombstones) un-skips it.** This is the one scenario of the
-  // seven that reproduces a field data loss off-lab, and it does so in seven
-  // seconds.
+  // **NOT DETERMINISTIC, and therefore skipped rather than inverted.**
+  //
+  // The plan (§7.2) prefers `it.fails` to `it.skip`, and it is right wherever
+  // the red is deterministic — an inverted test reports its own completion
+  // instead of relying on somebody remembering to come back. It does not work
+  // here, and the reason is worth more than the test:
+  //
+  // **With WP2a in place this scenario is a coin flip.** Measured across ~20
+  // runs in four configurations — 30 s and 60 s budgets, 1.5 s and 10 s
+  // stability windows, a 2 s partition with one file per side and an 8 s
+  // partition with four — it converges correctly in roughly 40% of runs. No
+  // configuration made it settle either way. Raising the budget from 30 s to
+  // 60 s made it fail MORE, which is backwards for a timeout: the fleet passes
+  // THROUGH the correct state and drifts back off it.
+  //
+  // §13.1b's finding was applied and did not close it. The partition now
+  // outlives the anti-entropy's grace period with several changes per side, so
+  // the repair path is in charge rather than the merge — the correct setup,
+  // and the outcome is still decided by message ordering after the heal.
+  //
+  // So `it.fails` would break the build two runs in five. The deterministic
+  // inverted tests for this defect live at level 2, where there is no race to
+  // lose: nothing anywhere records that a deletion happened in a form a peer
+  // can read (S1, S4). That is the right level for a red that must stay red.
+  //
+  // This is the one scenario of the seven that reproduces a field data loss
+  // off-lab, and it does so in seconds.
   //
   // Measured 2026-09-30 against 0.0.85: `doomed.txt` comes back on EVERY node
   // INCLUDING A — the node that deleted it. That is mongo's "deleted customer
@@ -269,10 +297,10 @@ describe('fs mesh', () => {
   // deliberate. A's own local scan then finds the file present again and
   // never announces the deletion at all, so it is undone on its author.
   //
-  // Fixing it needs WP1: the no-resurrection guard has to survive longer than
-  // one announcement. `_pendingDeletes` (`src/fs-agent.ts`) is already that
-  // guard, consumed in `_restoreTree` — and `_rememberAnnounced` clears it
-  // after a single push, which is exactly one push too early.
+  // WP2a did half of it: `_pendingDeletes` is now persistent, so A holds its
+  // own deletion on every run. B and C never heard it and keep the file, which
+  // is what still fails here. Making the delete WIN on a peer that never heard
+  // it is WP2b, and it needs the chain to carry the deletion as a fact.
   //
   // Three nodes, not two: on the four-machine lab exactly one of three peers
   // applied a deletion and the other two kept the file, because a mesh reaches
@@ -285,38 +313,80 @@ describe('fs mesh', () => {
     await mesh.node('A').write('keeper.txt', 'keeper');
     expect((await mesh.converged()).converged).toBe(true);
 
+    // THE PARTITION MUST OUTLIVE THE MERGE'S REACH.
+    //
+    // §13.1b, measured on two real machines: a short partition on a small
+    // folder is a test of the MERGE, which already works — Herman's fork
+    // converged because his ancestor was resolvable. The field's did not,
+    // because the divergence outlived the grace period and a `pull` repair
+    // bypassed the merge entirely. **The trigger is scale and timing, not
+    // topology.**
+    //
+    // A two-second partition with one file per side was exactly that short
+    // test: it passed roughly one run in five, whenever reconciliation
+    // happened to reach the merge. Holding the partition past the
+    // anti-entropy's grace period, with several changes on each side, puts the
+    // repair path in charge instead — which is the path the defect lives on.
     mesh.node('A').cut();
     await mesh.node('A').del('doomed.txt');
     // THE PRECONDITION: the fleet moves on too, so A cannot simply
     // fast-forward everyone onto its deletion when it returns.
     await mesh.node('B').write('meanwhile.txt', 'meanwhile');
-    await sleep(2_000);
+    await mesh.node('B').write('more/one.txt', '1');
+    await mesh.node('B').write('more/two.txt', '2');
+    // Well past `MESH_ANTI_ENTROPY.graceMs` (500 ms) and several backoffs, so
+    // the repair has demonstrably run rather than possibly run.
+    await sleep(8_000);
     expect(await mesh.node('A').files()).toEqual(['keeper.txt']);
 
     mesh.node('A').heal();
-    const result = await mesh.converged({ timeoutMs: 30_000 });
+
+    // SIXTY seconds, not thirty, and the difference is the whole of §7.7.
+    //
+    // At 30 s this scenario passed roughly half the time — and a longer budget
+    // made it fail MORE, which is backwards for a timeout. The fleet passes
+    // THROUGH the correct state and drifts back off it: B and C re-assert
+    // `doomed.txt` on a later round. A short budget was sampling an unstable
+    // intermediate and reporting it as convergence.
+    //
+    // The agreement must HOLD FOR TEN SECONDS, not merely occur —
+    // `fork-does-not-flap`'s window (§7.6.3), and the distinction §7.7 draws:
+    // stability over a window is a DIFFERENT assertion from agreement at an
+    // instant, and only the second was ever being made. It narrowed the pass
+    // rate without closing it; see the note above the test.
+    const result = await mesh.converged({
+      timeoutMs: 60_000,
+      stableMs: 10_000,
+    });
 
     expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
-    const expected = ['keeper.txt', 'meanwhile.txt'];
+    const expected = [
+      'keeper.txt',
+      'meanwhile.txt',
+      'more/one.txt',
+      'more/two.txt',
+    ];
     expect(result.snapshot['A']).toEqual(expected);
     expect(result.snapshot['B']).toEqual(expected);
     expect(result.snapshot['C']).toEqual(expected);
-  }, 90_000);
+  }, 120_000);
 
   // ...........................................................................
   // T6 — an ancestor row cannot be resolved.
   //
-  // **RED TODAY, and it cannot even be written yet.** There is no chain to put
-  // a hole in: `lastAppliedRef` is a single slot that latches
-  // unconditionally, so there is no `complete: false` to assert on. Mongo
-  // records having had exactly this bug — "lost updates root-caused to a
-  // single `_lastApplied` slot vs. per-node lineages".
+  // **RED, inverted.** There is nothing to walk yet: `src/fs-edit-chain.ts`
+  // exists but nothing announces a head, so no node can receive a chain with a
+  // hole in it. `lastAppliedRef` remains a single slot that latches
+  // unconditionally — mongo records having had exactly this bug, "lost updates
+  // root-caused to a single `_lastApplied` slot vs. per-node lineages".
   //
-  // Written in WP3, when `collectPuts`'s contract (`complete`, `sealed`)
-  // exists to be asserted against.
+  // The body throws on purpose, so the inversion holds it red until WP3 gives
+  // `collectPuts`'s contract (`complete`, `sealed`) something to assert
+  // against. The day someone implements it, this test turns the suite red and
+  // says so.
   // ...........................................................................
-  it.skip('T6: an unresolvable ancestor is retried, never latched', async () => {
-    throw new Error('WP3: no chain exists to hold a hole yet');
+  it.fails('T6: an unresolvable ancestor is retried, never latched', async () => {
+    throw new Error('WP3: nothing announces a chain head yet');
   });
 
   // ...........................................................................
