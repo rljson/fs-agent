@@ -147,24 +147,28 @@ export function antiEntropyDecision(
 
   // The hub's state was made FROM ours: we are the one behind.
   //
-  // **`lastAppliedRef` counts only while we have authored nothing since.**
-  // It is a state we ONCE adopted, and the moment we build on it we have moved
-  // on: a hub state descending from it is then a SIBLING of ours, not a
-  // successor. Counting it regardless made a node with new local work conclude
-  // it was behind and pull — silently discarding that work.
+  // **`lastAppliedRef` is counted here on purpose, and narrowing it broke the
+  // fleet.** On 2026-09-30 this read `authored ? [currentRef] : [...]`, on the
+  // reasoning that a state we once adopted is behind us once we build on it —
+  // a fork, not a lag. That reasoning is still sound, and the change still
+  // fixed the case it was written for (a copied folder propagated instead of
+  // being discarded, measured).
   //
-  // Measured on the lab, 2026-09-30: a folder copied onto NB-2744 produced
-  // `qFU9…` (15 files, 55 868 bytes) from `ca3ls…`; the hub stayed on `ca3ls…`
-  // (13 files, 29 873 bytes), whose ancestry reached a state NB-2744 had
-  // applied yesterday. The node decided `pull` and retried it five times
-  // against its own new folder.
+  // It also removed one side's willingness to YIELD, and a disagreement with
+  // nobody yielding is a livelock. Measured the same afternoon, on NB-2744's
+  // own revision log: the folder flipped between the 13-file and the 17-file
+  // state roughly twenty times in ninety seconds — a delete applied, the files
+  // back within 225 ms, over and over, both nodes reporting `last: push` —
+  // before settling on the state the user had deleted.
   //
-  // A fork is not a lag. When we are the author, only a hub state built on
-  // what we hold NOW puts us behind; anything else falls through to the
-  // deletion check and then to `merge`, which keeps both sides.
-  const statesIAmIn = authored
-    ? [currentRef]
-    : [currentRef, lastAppliedRef];
+  // So the narrowing is reverted, and the fork case is a KNOWN DEFECT again
+  // (see `doc/known-limits.md`). It cannot be fixed by reading this decision
+  // more cleverly: "the hub deleted what we added" and "the hub forked from an
+  // ancestor we share" arrive here looking identical, and telling them apart
+  // needs the predecessor CHAIN, which nothing currently carries far enough to
+  // ask. That is the next piece of work, and it is a protocol change rather
+  // than a rule change.
+  const statesIAmIn = [currentRef, lastAppliedRef];
   if (predecessors.some((r) => statesIAmIn.includes(r))) return 'pull';
 
   // The hub still holds the state our push was made from. Only after the

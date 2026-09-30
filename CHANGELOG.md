@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.0.85]
+
+### Reverts the 0.0.84 fork fix — it caused a livelock
+
+0.0.84 stopped counting `lastAppliedRef` as "where I am" once a node had
+authored something since. The reasoning holds and the fix worked for the case it
+was written for: a folder copied onto NB-2744 propagated instead of being
+discarded, measured on the lab.
+
+**It also removed the only thing making one side yield.** Both nodes then chose
+`push`, and a disagreement with nobody yielding is a livelock. From NB-2744's own
+revision log the same afternoon: the folder flipped between the 13-file and the
+17-file state **roughly twenty times in ninety seconds** — a delete applied, the
+files back within 225 ms, over and over — before settling on the state the user
+had deleted.
+
+A folder rewriting itself twenty times a minute is worse than either single
+failure, so this goes back to the behaviour that shipped for months: additions
+can be discarded on a fork, deletions propagate, one side always yields.
+
+### The defect is recorded, not forgotten
+
+`doc/known-limits.md` gains the fork case in full, and the decision test now pins
+the WRONG answer with both halves of the trap written down — the fix and what it
+cost — so the next person does not rediscover either.
+
+**Why it cannot be fixed by reading this decision more cleverly:** "a peer
+deleted what we added" and "a peer forked from an ancestor we share" arrive
+identical — the hub holds a state we once held, made from a state we recognise.
+Separating them needs the predecessor CHAIN, not one generation of it, and
+nothing in the node API, `/state` or the revisions endpoint exposes ancestry at
+all. Today's diagnosis was inferred from symptoms for exactly that reason. The
+next step is carrying and exposing that ancestry, which is a protocol change.
+
 ## [0.0.84]
 
 ### A fork is not a lag — anti-entropy no longer discards local work

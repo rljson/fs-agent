@@ -89,14 +89,30 @@ describe('antiEntropyDecision', () => {
     });
   });
 
-  // The measured data-loss case. 2026-09-30, on the lab: a folder copied onto
-  // NB-2744 produced `qFU9…` (15 files, 55 868 bytes) from the fleet state
-  // `ca3ls…` (13 files, 29 873 bytes). The hub never adopted it and went on
-  // announcing `ca3ls…`, whose ancestry reaches a state NB-2744 had applied the
-  // day before. The node concluded it was behind and chose `pull` — against its
-  // own new folder — and retried five times before anybody noticed.
+  // A fork: local work the hub has not seen, and a hub state descending from
+  // an ancestor both sides share. The first case below is a KNOWN DEFECT and
+  // says so; the rest are the behaviour that must not move while it is fixed.
   describe('a fork, with local work that has not reached the hub', () => {
-    it('does NOT pull a hub state that only descends from what we once applied', () => {
+    // **KNOWN DEFECT, pinned deliberately.** This asserts the WRONG answer,
+    // because the right one cannot be reached from here.
+    //
+    // A node holding work the hub has not seen decides it is behind and pulls,
+    // discarding that work. Measured 2026-09-30: a folder copied onto NB-2744
+    // was repeatedly pulled away against its own contents.
+    //
+    // It was fixed by not counting `lastAppliedRef` when we authored our
+    // current state — and that fix caused a livelock, because it also removed
+    // one side's willingness to yield. Both nodes then pushed, and the folder
+    // flipped between two states twenty times in ninety seconds before landing
+    // on the one the user had deleted. Reverted the same afternoon.
+    //
+    // The two situations arrive here indistinguishable: "the hub deleted what
+    // we added" and "the hub forked from an ancestor we share" have the same
+    // shape in `ref` + `predecessors`. Telling them apart needs the predecessor
+    // CHAIN rather than one generation of it, and nothing carries that today.
+    // Until it does, this test documents what the code actually does, so the
+    // next person changing it knows both halves of the trap.
+    it('pulls a hub state that only descends from what we once applied — losing local work', () => {
       expect(
         antiEntropyDecision(
           { ref: 'ca3ls', origin: 'hub', predecessors: ['S'] },
@@ -106,8 +122,7 @@ describe('antiEntropyDecision', () => {
             lastAppliedRef: 'S', // and moved on from S
           }),
         ),
-        'a node discarded its own new work because the hub descended from an ancestor',
-      ).not.toBe('pull');
+      ).toBe('pull');
     });
 
     it('pushes when the hub sits on the very state our work was made from', () => {
