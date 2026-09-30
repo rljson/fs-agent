@@ -89,6 +89,65 @@ describe('antiEntropyDecision', () => {
     });
   });
 
+  // The measured data-loss case. 2026-09-30, on the lab: a folder copied onto
+  // NB-2744 produced `qFU9…` (15 files, 55 868 bytes) from the fleet state
+  // `ca3ls…` (13 files, 29 873 bytes). The hub never adopted it and went on
+  // announcing `ca3ls…`, whose ancestry reaches a state NB-2744 had applied the
+  // day before. The node concluded it was behind and chose `pull` — against its
+  // own new folder — and retried five times before anybody noticed.
+  describe('a fork, with local work that has not reached the hub', () => {
+    it('does NOT pull a hub state that only descends from what we once applied', () => {
+      expect(
+        antiEntropyDecision(
+          { ref: 'ca3ls', origin: 'hub', predecessors: ['S'] },
+          view({
+            currentRef: 'qFU9',
+            lastPushedRef: 'qFU9', // we authored it
+            lastAppliedRef: 'S', // and moved on from S
+          }),
+        ),
+        'a node discarded its own new work because the hub descended from an ancestor',
+      ).not.toBe('pull');
+    });
+
+    it('pushes when the hub sits on the very state our work was made from', () => {
+      // The ordinary "our push was missed" case, which must keep working.
+      expect(
+        antiEntropyDecision(
+          { ref: 'ca3ls', origin: 'hub', predecessors: ['S'] },
+          view({
+            currentRef: 'qFU9',
+            lastPushedRef: 'qFU9',
+            lastAppliedRef: 'ca3ls',
+          }),
+        ),
+      ).toBe('push');
+    });
+
+    it('still pulls when the hub state was made from what we hold NOW', () => {
+      // Being genuinely behind is unchanged: a forward built on our current
+      // state is a forward, authored work or not.
+      expect(
+        antiEntropyDecision(
+          { ref: 'S2', origin: 'hub', predecessors: ['qFU9'] },
+          view({ currentRef: 'qFU9', lastPushedRef: 'qFU9', lastAppliedRef: 'S' }),
+        ),
+      ).toBe('pull');
+    });
+
+    it('keeps counting what we applied while we have authored nothing', () => {
+      // The guard is scoped to authorship on purpose: a node that only ever
+      // applied has no work of its own to lose, and pulling a forward built on
+      // the state it adopted is still right.
+      expect(
+        antiEntropyDecision(
+          { ref: 'S2', predecessors: ['A1'] },
+          view({ lastAppliedRef: 'A1' }),
+        ),
+      ).toBe('pull');
+    });
+  });
+
   it('pushes when the hub still holds what we applied before our push', () => {
     expect(
       antiEntropyDecision(
