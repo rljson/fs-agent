@@ -550,6 +550,77 @@ clients, a real server with heartbeat, one ref message dropped on purpose per
 case — including both halves of the collision above — plus a control run with
 the repair off that must stay divergent.
 
+## Edit Chain (`src/fs-edit-chain.ts`)
+
+**Written, and read by nobody. That is deliberate.**
+
+A tree ref is a content hash of the whole folder, so a folder that returns to a
+state it held earlier re-derives that state's exact ref. "We returned to an old
+state" and "we never left it" are the same string — which is why two data-loss
+failures in opposite directions were measured on one day
+(`doc/known-limits.md`), and why neither is fixable by reading
+`antiEntropyDecision` more cleverly.
+
+The chain gives every change its own identity. One entry per folder-changing
+scan:
+
+| field | |
+| --- | --- |
+| `dataRef` | the tree ref the folder ended up at |
+| `previous` | the entries it was made from — **two** for a merge |
+| `timeId` | `<millis>:<nanoid>`, minted once, a fleet-wide order |
+| `changed` | relative paths added or modified |
+| `removed` | relative paths removed — **what a tree cannot express** |
+
+`removed` is the point of carrying more than a ref. A tree records what a folder
+holds; only this records what it deliberately stopped holding.
+
+### Three tables, no cake
+
+`<treeKey>Edits`, `<treeKey>MultiEdits`, `<treeKey>EditHistory` — and
+`createEditHistoryTableCfg(treeKey)` already declares `dataRef` as a reference
+to `treeKey`, which for fs IS the trees table. The fit is exact.
+
+**fs-agent creates them itself**, idempotently, via `createFsChainTables`.
+`@rljson/db`'s `createTable` is `createOrExtendTable`, so an init may run on
+every start. The One Client creates the trees table (`sl-server.ts`,
+`sl-client.ts`); an agent expecting tables its host had never created would fail
+at runtime on any node whose host is one release behind, which is exactly the
+mixed-version case a rollout guarantees. Creating our own removes the coupling
+rather than versioning it — the reason `@rljson/mongo-agent` could evolve its
+schema without release-locking its host.
+
+### Why the rows are written by hand
+
+`MultiEditManager` is the ordinary way to append an edit and is not usable here:
+
+- it refuses more than one `previous` (*"has multiple previous refs. Not
+  supported"*), and an fs **merge revision has two parents** by design
+  (`StoreFsTreeOptions.previous`) — so the chain could not express the one
+  revision shape that matters most; and
+- it is inseparable from the cake model: `edit()` needs a `cakeRef` and a
+  `MultiEditProcessor` that applies edits onto a cake. fs has no components.
+  Its content is the tree, already in the trees table. Only the history was
+  missing.
+
+`EditHistory.previous` is `string[]` in the type and `jsonArray` in the table,
+so multiple parents are representable — it is only the manager that will not
+walk them.
+
+### Known limit: one head slot
+
+`FsEditChain` tracks a single head, chosen as the tip with the greatest
+`timeId`. Every node keeps its own lineage and chains are never merged, so once
+the walk starts pulling peers' rows this table holds several tips and "the
+greatest" can be somebody else's. `@rljson/mongo-agent` had exactly this bug —
+lost updates root-caused to a single `_lastApplied` slot rather than per-node
+lineages — and fixed it by tracking lineages. Nothing reads this chain yet, so
+the limit is not reachable; the walk must replace it rather than build on it.
+
+**Tested by** `test/fs-edit-chain.spec.ts`, including the two properties that
+justify the module: two parents round-trip, and a re-derived tree ref gets a
+new entry identity.
+
 ## Known Constraints
 
 ### macOS Finder Paste and Rename

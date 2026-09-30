@@ -24,6 +24,14 @@ export {
   type HubAnnouncement,
 } from './fs-anti-entropy.ts';
 export {
+  createFsChainTables,
+  FS_EDIT_ACTION,
+  FsEditChain,
+  type FsAppendOptions,
+  type FsChainEntry,
+  type FsEditData,
+} from './fs-edit-chain.ts';
+export {
   FsBlobAdapter,
   type BlobToFileOptions,
   type FileBlobMeta,

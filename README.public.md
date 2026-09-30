@@ -808,6 +808,50 @@ itself. Without a beacon or heartbeat it never fires. `agent.antiEntropyStatus`
 reports whether this node and the hub agree, since when they have not, and
 the last repair — a lasting divergence is the one trace a lost message leaves.
 
+## Edit Chain — a provable history
+
+`FsEditChain` records what a folder state was made from. A tree ref is a content
+hash, so a folder that returns to an earlier state re-derives that state's ref
+and no amount of comparing refs can say whether it moved back or never left. A
+chain entry has its own identity, and carries the one thing a tree cannot: what
+was **removed**.
+
+```typescript
+import { FsEditChain } from '@rljson/fs-agent';
+
+const chain = new FsEditChain(db, 'fileTree');
+await chain.init(); // creates its own tables; safe on every start
+
+const entry = await chain.append({
+  treeRef,
+  changed: ['reports/q3.xlsx'],
+  removed: ['reports/q2.xlsx'],
+});
+// entry.head    → this entry's ref
+// entry.previous → what it was made from ([] for a lineage root)
+// entry.timeId  → '<millis>:<nanoid>', a fleet-wide order
+
+await chain.entry(entry.head); // reads it back, undefined if unresolvable
+```
+
+A **merge** entry passes `previous` explicitly with both parents:
+
+```typescript
+await chain.append({ treeRef: merged, previous: [ours, theirs] });
+```
+
+**Nothing consumes the chain yet.** It is written so a fleet accumulates real
+ancestry before anything depends on its shape. `FsAgent` behaviour is unchanged
+by its presence.
+
+| | |
+| --- | --- |
+| `init()` | creates `<treeKey>Edits` / `MultiEdits` / `EditHistory`, adopts the existing tip |
+| `head` | the entry this node's lineage ends at, or `undefined` |
+| `append(opts)` | writes one entry, returns it |
+| `entry(head)` | reads one back; `undefined` when this node cannot resolve it |
+| `createFsChainTables(db, treeKey)` | the table creation on its own |
+
 ## Bounce-Back Prevention
 
 Bidirectional sync can cause infinite loops when both clients detect each
