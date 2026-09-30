@@ -33,6 +33,7 @@ import {
   FsConflictResolver,
 } from './fs-conflict-resolver.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
+import { FsEditChain } from './fs-edit-chain.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
 import { stateBeaconEvent } from '@rljson/db';
@@ -406,6 +407,14 @@ export class MassDeleteRefusedError extends RestoreIncompleteError {
   }
 }
 
+/** What one push changed, against the state announced before it. */
+export interface FsTreeDelta {
+  /** Relative paths added or modified, `/`-separated. */
+  changed: string[];
+  /** Relative paths removed, `/`-separated. */
+  removed: string[];
+}
+
 export class FsAgent {
   private _scanner: FsScanner;
   private _adapter: FsBlobAdapter;
@@ -480,6 +489,26 @@ export class FsAgent {
    * deletion is never announced at all: silently undone, everywhere.
    */
   private readonly _pendingDeletes = new Set<string>();
+
+  /**
+   * This folder's history: one entry per state this node pushed.
+   *
+   * Created on the first `syncToDb`, and BEST-EFFORT throughout — a chain that
+   * cannot be written must never stop a folder syncing. Nothing consumes it
+   * yet; see `src/fs-edit-chain.ts`.
+   */
+  private _chain?: FsEditChain;
+
+  /**
+   * `relativePath → content hash` of the tree this node last announced.
+   *
+   * The chain entry has to say what a push CHANGED and what it REMOVED, and
+   * only a comparison against the previously announced content tells those
+   * apart from "everything, because this is the first push". Kept beside
+   * {@link _announcedFiles}, which answers the coarser question of which paths
+   * peers could know about.
+   */
+  private _announcedContent = new Map<string, string>();
 
   /**
    * The ref last written to {@link AGENT_STATE_FILE}.
@@ -2105,6 +2134,24 @@ export class FsAgent {
     // The remembered ref is what separates the two cases, and it must be: a
     // folder the USER emptied has a remembered state, so that deletion is a
     // fact about a folder this agent was tracking and still goes out.
+    // This folder's history. Created here because `syncToDb` is where a db and
+    // a treeKey first exist together, and idempotent, so a restart continues
+    // the lineage rather than starting a new root.
+    //
+    // fs-agent creates its OWN tables: the One Client creates the trees table,
+    // and an agent expecting tables its host never created would fail at
+    // runtime on any node whose host is one release behind. Best-effort, for
+    // the same reason the appends are — a chain that cannot be created must
+    // not stop a folder syncing.
+    try {
+      const chain = new FsEditChain(db, treeKey);
+      await chain.init();
+      this._chain = chain;
+    } catch (err) {
+      /* v8 ignore next -- @preserve best-effort; the sync runs without it */
+      this._writeSyncError('chain/init', err);
+    }
+
     if (isSilentJoiner) {
       console.warn(
         `[FsAgent] ${this._rootPath} is empty and has no remembered state — ` +
@@ -2124,7 +2171,10 @@ export class FsAgent {
       this._currentRef = initialRef;
       this._persistCurrentRef(initialRef);
       this._lastSentContentKey = this._contentKeyFromTree(initialTree);
-      this._rememberAnnounced(initialTree);
+      await this._recordChainEntry(
+        initialRef,
+        this._rememberAnnounced(initialTree),
+      );
       await this._sendRef(
         connector,
         initialRef,
@@ -2312,7 +2362,7 @@ export class FsAgent {
             this._lastSentRef = ref;
             this._lastPushedRef = ref;
             this._lastSentContentKey = contentKey;
-            this._rememberAnnounced(tree);
+            await this._recordChainEntry(ref, this._rememberAnnounced(tree));
 
             // Leaving a state by our OWN edit retires it, exactly as adopting
             // a state by an incoming one does (`_adoptAppliedRef`). Only the
@@ -2711,21 +2761,72 @@ export class FsAgent {
     );
   }
 
-  private _rememberAnnounced(tree: FsTree): void {
+  private _rememberAnnounced(tree: FsTree): FsTreeDelta {
+    const content = this._getFileContentMap(tree);
+    const previous = this._announcedContent;
+    const first = previous.size === 0;
+
+    // What this push changed, measured against what was announced before it.
+    //
+    // On the FIRST announcement everything would count as changed, which would
+    // make the opening chain entry list a whole folder — 1 200 paths on a real
+    // one. It lists nothing instead: a first push removes nothing and
+    // establishes a baseline, and the tree ref already says what the baseline
+    // is. Only the deltas after it are worth recording.
+    const changed: string[] = [];
+    const removed: string[] = [];
+    if (!first) {
+      for (const [path, hash] of content) {
+        if (previous.get(path) !== hash) changed.push(path);
+      }
+      for (const path of previous.keys()) {
+        if (!content.has(path)) removed.push(path);
+      }
+    }
+    this._announcedContent = content;
+
     this._announcedFiles.clear();
-    for (const path of this._getFileContentMap(tree).keys()) {
+    for (const path of content.keys()) {
       this._announcedFiles.add(join(this._rootPath, path));
     }
-    // EXPERIMENT (WP2): the clear is gone.
+
+    // The tombstone log is NOT cleared here, and it used to be.
     //
     // "Once peers have been told, a file's absence is theirs to know about" is
     // true only of a peer that HEARD. A partitioned node's deletion reached
     // nobody, and on rejoin the fleet's tree still contains the file — so the
     // apply puts it back on the node that deleted it, the local scan finds it
-    // present, and the deletion is never announced at all. Measured as T4.
-    //
-    // A tombstone therefore has to outlive the announcement that it was
-    // supposed to be superseded by.
+    // present, and the deletion is never announced at all. Measured as mesh
+    // scenario T4; see `doc/known-limits.md`.
+    return { changed, removed };
+  }
+
+  /**
+   * Appends one entry to this folder's history. Best-effort.
+   *
+   * A chain that cannot be written must never stop a folder syncing, so every
+   * failure is recorded and swallowed — the same discipline as
+   * {@link _persistCurrentRef}. Nothing reads the chain yet, so a gap in it
+   * costs nothing today; when something does, a gap is what `complete: false`
+   * is for.
+   * @param treeRef - The state the folder ended up at.
+   * @param delta - What that push changed and removed.
+   */
+  private async _recordChainEntry(
+    treeRef: string,
+    delta: FsTreeDelta,
+  ): Promise<void> {
+    if (!this._chain) return;
+    try {
+      await this._chain.append({
+        treeRef,
+        changed: delta.changed,
+        removed: delta.removed,
+      });
+    } catch (err) {
+      /* v8 ignore next -- @preserve best-effort; see the doc comment */
+      this._writeSyncError('chain/append', err);
+    }
   }
 
   private _adoptAppliedRef(connector: Connector, treeRef: string): void {
@@ -2813,7 +2914,12 @@ export class FsAgent {
         this._lastSentRef = ref;
         this._lastPushedRef = ref;
         this._lastSentContentKey = this._contentKeyFromTree(tree);
-        this._rememberAnnounced(tree);
+        // A merge revision is the one state with TWO parents, and that is
+        // exactly the shape `FsEditChain` writes its rows by hand to allow.
+        // The chain entry is still LINEAR here, because naming both parents
+        // means mapping two tree refs to two chain heads, and nothing resolves
+        // that direction yet. It belongs with the walk.
+        await this._recordChainEntry(ref, this._rememberAnnounced(tree));
         this._currentRef = ref;
         return ref;
       },

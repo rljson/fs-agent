@@ -884,6 +884,11 @@ A **merge** entry passes `previous` explicitly with both parents:
 await chain.append({ treeRef: merged, previous: [ours, theirs] });
 ```
 
+`FsAgent` writes this for you: one entry per state it pushes, with `removed`
+filled in from what that push deleted. It is best-effort — a history that
+cannot be written never stops a folder syncing — and it needs no setup, because
+the agent creates its own tables on the first `syncToDb`.
+
 **Nothing consumes the chain yet.** It is written so a fleet accumulates real
 ancestry before anything depends on its shape. `FsAgent` behaviour is unchanged
 by its presence.

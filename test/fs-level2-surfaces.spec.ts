@@ -215,4 +215,60 @@ describe('level 2 — surfaces', () => {
     expect(typeof asPeer.isTombstoned).toBe('function');
     expect(await asPeer.isTombstoned!('doomed.txt')).toBe(true);
   }, 30_000);
+
+  // ...........................................................................
+  // S5 — the agent WRITES the chain as it pushes.
+  //
+  // WP1a built `FsEditChain` and nothing called it. This is the assertion that
+  // the agent actually keeps a history of its own folder: after a push, there
+  // is an entry whose `treeRef` is the state that was pushed, whose `previous`
+  // is the entry before it, and whose `removed` names what the push deleted.
+  //
+  // `removed` is the half that matters for WP2b. A tree records what a folder
+  // holds; only this records what it deliberately stopped holding, and it has
+  // to be written by the thing that knows — the push — rather than inferred
+  // later by a peer that never saw the file.
+  //
+  // → WP1b.
+  // ...........................................................................
+  it('S5: a push appends a chain entry naming what it removed', async () => {
+    const io = new IoMem();
+    await io.init();
+    await io.isReady();
+    const db = await makeDb(io);
+
+    await writeFile(join(dir, 'doomed.txt'), 'doomed');
+    await writeFile(join(dir, 'keeper.txt'), 'keeper');
+
+    const agent = new FsAgent(dir, new BsMem(), {
+      timeouts: { debounceMs: 20 },
+    });
+    agents.push(agent);
+    const connector = new Connector(
+      db,
+      Route.fromFlat(`/${TREE}`),
+      new SocketMock(),
+    );
+    stops.push(await agent.syncToDb(db, connector, TREE));
+    await new Promise((r) => setTimeout(r, 300));
+
+    // The folder's first state is an entry.
+    const chain = new FsEditChain(db, TREE);
+    await chain.init();
+    const first = chain.head;
+    expect(first, 'the initial push left no chain entry').toBeTruthy();
+    const firstEntry = await chain.entry(first as string);
+    expect(firstEntry?.treeRef).toBe(agent['_currentRef']);
+
+    await unlink(join(dir, 'doomed.txt'));
+    await new Promise((r) => setTimeout(r, 500));
+
+    // And the deletion is an entry of its own, naming the path.
+    const after = new FsEditChain(db, TREE);
+    await after.init();
+    const entry = await after.entry(after.head as string);
+    expect(entry?.removed).toEqual(['doomed.txt']);
+    expect(entry?.previous).toEqual([first]);
+    expect(entry?.treeRef).toBe(agent['_currentRef']);
+  }, 30_000);
 });
