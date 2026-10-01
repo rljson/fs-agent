@@ -284,6 +284,19 @@ describe('fs mesh', () => {
   // This is the one scenario of the seven that reproduces a field data loss
   // off-lab, and it does so in seconds.
   //
+  // **IT PASSES 8 OF 8 WITH `bucketSync` ON**, as `A4` in
+  // `fs-mesh-additive.spec.ts` — byte-for-byte this scenario, same nodes, same
+  // partition, same assertions, one switch. So the pair is the measurement:
+  //
+  //   here, `bucketSync` off   4–5 of 8
+  //   A4,   `bucketSync` on    8 of 8
+  //
+  // This stays skipped because it measures the OLD repair model, which the
+  // plan corrects rather than removes, and that model is still the default.
+  // When `bucketSync` becomes the default this test should be deleted, not
+  // un-skipped: it would then be asserting the behaviour of a path nothing
+  // takes.
+  //
   // Measured 2026-09-30 against 0.0.85: `doomed.txt` comes back on EVERY node
   // INCLUDING A — the node that deleted it. That is mongo's "deleted customer
   // came back", which mongo guards explicitly, and it is the failure the whole
