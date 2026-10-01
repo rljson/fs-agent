@@ -4019,6 +4019,24 @@ export class FsAgent {
             // at all. Deleting a file created earlier in the session is
             // precisely that shape. See `doc/safety-rescan.md`.
             this._adoptAppliedRef(connector, treeRef);
+            // And tell the anti-entropy, which is comparing REFS and cannot
+            // reach this conclusion on its own.
+            //
+            // This is the hole the eight-minute red came through. The agent
+            // had ALREADY computed the answer one line above — the per-path
+            // content map says the two folders are the same — and kept it to
+            // itself. The anti-entropy then rediscovered the same fact the
+            // long way round: declare a divergence, wait out the grace
+            // period, start a repair, run a bucket round, find the roots
+            // identical, and only then clear. Measured on the lab: 38
+            // identical files with identical hashes, `diverged: true` for over
+            // EIGHT MINUTES across six merge repairs, logging "equivalent
+            // content, skipping restore" each time — the apply path saying the
+            // right thing to nobody.
+            //
+            // The content map is the authority on "is this the same folder",
+            // and every place that consults it has to report what it found.
+            this._antiEntropy?.agreedOn(treeRef);
             // And record the state as OURS, which this path used to leave
             // half-done — the connector's bookkeeping was updated, the agent's
             // was not.
@@ -4345,17 +4363,43 @@ export class FsAgent {
           // disagrees with what it just applied announces a parent nobody can
           // be in, and every deletion it ever sends is refused.
           //
-          // It went unnoticed for exactly as long as nothing said it out loud,
-          // so this says it. Not an error: the folder holds the right BYTES,
-          // and the agent recovers by converging on content. It is the warning
-          // that a node has left the ancestry conversation.
+          // So when the two disagree, the CONTENT MAP decides which kind of
+          // disagreement it is, because the two readings call for opposite
+          // responses:
+          //
+          //  - same content, different ref — benign, and NOT a divergence.
+          //    The anti-entropy compares refs and would report it as one
+          //    forever, so it is told. A tombstone this node refused, a
+          //    rollout where a peer still derives the old ref: the folders
+          //    agree and nothing needs repairing.
+          //  - different content — this node really is short of what it
+          //    applied (a locked file, an unfetchable blob), and a divergence
+          //    is the correct signal. Said out loud, because it went unnoticed
+          //    for exactly as long as nothing said it.
+          //
+          // Either way not an error: the folder holds the bytes it could get,
+          // and the agent converges on content.
           if (postRestoreRef !== treeRef) {
+            const sameContent = this._treesHaveEquivalentContent(
+              postRestoreTree,
+              incomingTree,
+            );
+            if (sameContent) {
+              this._antiEntropy?.agreedOn(treeRef);
+            }
             console.warn(
               `[FsAgent] applied ${treeRef.slice(0, 8)}… but re-derived ` +
-                `${postRestoreRef.slice(0, 8)}… — this node's ancestry no ` +
-                `longer matches its peers'`,
+                `${postRestoreRef.slice(0, 8)}… — ` +
+                (sameContent
+                  ? 'same content, so not a divergence'
+                  : "this node is short of what it applied"),
             );
           }
+          // NOT recorded when the refs already match. `_contentAgreed` is
+          // bounded, and an entry saying "these two equal refs describe equal
+          // content" answers a question ref equality has already settled —
+          // while evicting one of the mismatches that is the only reason the
+          // set exists.
           this._currentRef = postRestoreRef;
           this._persistCurrentRef(postRestoreRef);
 
@@ -4758,6 +4802,29 @@ export class FsAgent {
         (pendingRef !== null && pendingRef !== hubRef) ||
         processing ||
         this._remoteApplyInFlight,
+      // Does that ref describe the folder this node already has?
+      //
+      // A state beacon carries a ref and nothing else, and unlike a ref event
+      // it triggers no apply — so without this, nothing in the agent ever
+      // reads that tree and nothing ever discovers the two folders are
+      // identical. The divergence then stands until a repair happens to run a
+      // bucket round, which is how `diverged: true` lasted eight minutes on a
+      // node holding exactly the hub's files.
+      //
+      // The comparison is the per-path content map, which is the authority on
+      // "the same folder" — the same question `@rljson/mongo-agent` asks per
+      // DOCUMENT, and the reason it has no equivalent of this failure: it
+      // never compares two whole-collection fingerprints at all.
+      //
+      // One fetch per ref, and the verdict is cached, so a repeating beacon
+      // costs nothing. A folder mid-scan answers `false` rather than
+      // comparing against a partial picture.
+      sameContent: async (hubRef) => {
+        const mine = this._scanner.tree;
+        if (mine === null || this._remoteApplyInFlight) return false;
+        const theirs = await this._fetchTreeFromDb(db, treeKey, hubRef);
+        return this._treesHaveEquivalentContent(mine, theirs);
+      },
       repair: (action, hubRef, hubPredecessors, attempt) => {
         if (action === 'push') {
           // The hub missed our push. Re-announce the state we are in, as a

@@ -190,10 +190,18 @@ describe('FsAntiEntropy', () => {
     const state = view(v);
     const repairs: Array<[AntiEntropyAction, string, string[], number]> = [];
     const log = vi.fn();
+    // One deferred answer per ref, so a test can hold a content check open and
+    // watch what a repeat announcement does with it.
+    const asked: string[] = [];
+    const pending = new Map<string, (same: boolean) => void>();
     const ae = new FsAntiEntropy(options, {
       view: () => state,
       busy: () => busy,
       repair: (...args) => repairs.push(args),
+      sameContent: (ref) => {
+        asked.push(ref);
+        return new Promise<boolean>((resolve) => pending.set(ref, resolve));
+      },
       now: () => now,
       log,
     });
@@ -202,6 +210,13 @@ describe('FsAntiEntropy', () => {
       state,
       repairs,
       log,
+      asked,
+      answer: async (ref: string, same: boolean) => {
+        pending.get(ref)?.(same);
+        pending.delete(ref);
+        await Promise.resolve();
+        await Promise.resolve();
+      },
       advance: (ms: number) => (now += ms),
       setBusy: (b: boolean) => (busy = b),
     };
@@ -536,5 +551,97 @@ describe('FsAntiEntropy', () => {
       ae.observe({ ref: `r${CONTENT_AGREED_MAX + 49}`, origin: 'hub' });
       expect(ae.status.diverged).toBe(false);
     });
+  });
+
+  // ...........................................................................
+  // Asking whether the content is the same, rather than whether the
+  // fingerprints are.
+  //
+  // A state beacon carries a ref and triggers no apply, so without this
+  // nothing in the agent ever reads the hub's tree and nothing discovers that
+  // the two folders are identical. Measured on the lab: `diverged: true` for
+  // over EIGHT MINUTES on a node holding exactly the hub's 38 files, across
+  // six merge repairs, logging "equivalent content, skipping restore" every
+  // time.
+  // ...........................................................................
+  it('asks once per ref, not once per beacon', async () => {
+    // A beacon repeats. A second fetch of the tree the first fetch is still
+    // reading answers the same question at twice the cost.
+    const h = setup({ currentRef: 'LOCAL', lastAppliedRef: 'LOCAL' });
+    h.ae.observe({ ref: 'HUB', predecessors: ['OTHER'] });
+    h.ae.observe({ ref: 'HUB', predecessors: ['OTHER'] });
+    h.ae.observe({ ref: 'HUB', predecessors: ['OTHER'] });
+    expect(h.asked).toEqual(['HUB']);
+
+    // And once the answer is yes, it is never asked again.
+    await h.answer('HUB', true);
+    expect(h.ae.status.diverged).toBe(false);
+    h.ae.observe({ ref: 'HUB', predecessors: ['OTHER'] });
+    expect(h.asked).toEqual(['HUB']);
+  });
+
+  // ...........................................................................
+  it('clears a divergence the content check disproves', async () => {
+    const h = setup({ currentRef: 'LOCAL', lastAppliedRef: 'LOCAL' });
+    h.ae.observe({ ref: 'HUB', predecessors: ['OTHER'] });
+    // Reported while it is genuinely unknown — the node has not read that
+    // tree yet. The defect was never finding out, not reporting it meanwhile.
+    expect(h.ae.status.diverged).toBe(true);
+
+    await h.answer('HUB', true);
+    expect(h.ae.status.diverged).toBe(false);
+  });
+
+  // ...........................................................................
+  it('leaves a real divergence standing when the content differs', async () => {
+    // The control. A signal that cannot go red is as useless as one that
+    // cannot go green, and a `no` must not be cached either — content
+    // differing is exactly what the repair is for.
+    const h = setup({ currentRef: 'LOCAL', lastAppliedRef: 'LOCAL' });
+    h.ae.observe({ ref: 'HUB', predecessors: ['OTHER'] });
+    await h.answer('HUB', false);
+    expect(h.ae.status.diverged).toBe(true);
+
+    // Not cached, so a later beacon asks again — the two sides move.
+    h.ae.observe({ ref: 'HUB', predecessors: ['OTHER'] });
+    expect(h.asked).toEqual(['HUB', 'HUB']);
+  });
+
+  // ...........................................................................
+  it('survives a content check that fails', async () => {
+    // An unreachable tree, a timeout, a peer gone. This was only ever an
+    // opportunity to avoid a repair, so losing it must cost nothing but the
+    // repair happening as it did before.
+    const h = setup({ currentRef: 'LOCAL', lastAppliedRef: 'LOCAL' });
+    const ae = new FsAntiEntropy(
+      { graceMs: 100, maxBackoffMs: 350 },
+      {
+        view: () => h.state,
+        busy: () => false,
+        repair: () => {},
+        sameContent: () => Promise.reject(new Error('tree unreachable')),
+      },
+    );
+    expect(() =>
+      ae.observe({ ref: 'HUB', predecessors: ['OTHER'] }),
+    ).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ae.status.diverged).toBe(true);
+  });
+
+  // ...........................................................................
+  it('works without a content check at all', () => {
+    // Optional, because a host that cannot answer is no worse off than before:
+    // the repair still runs and a bucket round still settles it.
+    const h = setup({ currentRef: 'LOCAL', lastAppliedRef: 'LOCAL' });
+    const ae = new FsAntiEntropy(
+      { graceMs: 100, maxBackoffMs: 350 },
+      { view: () => h.state, busy: () => false, repair: () => {} },
+    );
+    expect(() =>
+      ae.observe({ ref: 'HUB', predecessors: ['OTHER'] }),
+    ).not.toThrow();
+    expect(ae.status.diverged).toBe(true);
   });
 });

@@ -432,6 +432,24 @@ export interface AntiEntropyDeps {
     hubPredecessors: string[],
     attempt: number,
   ) => void;
+  /**
+   * Whether a hub ref describes the same CONTENT as this folder.
+   *
+   * **This is what stops a divergence being reported on a difference of
+   * fingerprints alone.** The decision above compares refs, which is all a
+   * state beacon carries — and a beacon, unlike a ref event, triggers no
+   * apply, so nothing else in the agent ever fetches that tree and nothing
+   * ever discovers that the two folders are identical. Measured on the lab:
+   * `diverged: true` for over EIGHT MINUTES on a node holding exactly the
+   * hub's 38 files.
+   *
+   * Costs one tree fetch per hub ref first seen as a divergence, and the
+   * verdict is cached in {@link _contentAgreed}, so a repeating beacon costs
+   * nothing. Optional, because a host that cannot answer is no worse off than
+   * before: the repair still runs and a bucket round still settles it.
+   * @param ref - The hub's ref.
+   */
+  sameContent?: (ref: string) => Promise<boolean>;
   /** Clock, for tests. */
   now?: () => number;
   /** Log sink. */
@@ -492,6 +510,14 @@ export class FsAntiEntropy {
    */
   private readonly _contentAgreed = new Set<string>();
 
+  /**
+   * Hub refs a content check is already running for.
+   *
+   * A beacon repeats, and a second fetch of a tree the first fetch is already
+   * reading answers the same question at twice the cost.
+   */
+  private readonly _contentChecking = new Set<string>();
+
   private _hubRef: string | null = null;
   private _localRef: string | null = null;
   private _repairs = 0;
@@ -504,6 +530,34 @@ export class FsAntiEntropy {
     this._options = { ...DEFAULT_ANTI_ENTROPY, ...options };
     this._now = _deps.now ?? Date.now;
     this._log = _deps.log ?? ((m) => console.warn(m));
+  }
+
+  /**
+   * Asks whether a hub ref describes this folder's content, and records a
+   * `yes`.
+   *
+   * Fire and forget: the answer arrives after this announcement is done with,
+   * and clears the divergence then. A `no` is not recorded — content really
+   * differing is what the repair is for, and caching a `no` would have to be
+   * invalidated the moment either side changes.
+   * @param ref - The hub ref under consideration.
+   */
+  private _checkContent(ref: string): void {
+    if (!this._deps.sameContent) return;
+    if (this._contentAgreed.has(ref) || this._contentChecking.has(ref)) return;
+    this._contentChecking.add(ref);
+    void this._deps
+      .sameContent(ref)
+      .then((same) => {
+        if (same) this.agreedOn(ref);
+      })
+      .catch(() => {
+        // Unreachable tree, timeout, a peer gone. The repair path handles it;
+        // this was only ever an opportunity to avoid one.
+      })
+      .finally(() => {
+        this._contentChecking.delete(ref);
+      });
   }
 
   /**
@@ -589,8 +643,13 @@ export class FsAntiEntropy {
       this._divergedSince ??= now;
       this._attempts = 0;
       this._nextRepairAt = now + this._options.graceMs;
+      this._checkContent(hubRef);
       return;
     }
+
+    // Our state has not moved, but the hub's may have. A ref never asked
+    // about is one this node could still be agreeing with.
+    this._checkContent(hubRef);
 
     if (!this._options.enabled) return;
     if (now < this._nextRepairAt) return;
