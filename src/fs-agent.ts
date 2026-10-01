@@ -1123,16 +1123,36 @@ export class FsAgent {
     filePath: string,
     stream: ReadableStream<Uint8Array>,
   ): Promise<void> {
-    /* v8 ignore next -- @preserve win32 branch not exercised on Linux/macOS CI */
-    const target =
-      process.platform !== 'win32'
-        ? filePath
-        : join(
-            dirname(filePath),
-            `${ATOMIC_TMP_PREFIX}${Date.now().toString(36)}-${Math.floor(
-              Math.random() * 1e9,
-            ).toString(36)}`,
-          );
+    // A temp file in the SAME directory, then a rename — on every platform,
+    // not only Windows.
+    //
+    // It used to write straight to `filePath` everywhere but win32, which
+    // means a multi-megabyte file existed at its final name, truncated to
+    // zero, and grew as the stream arrived. Three things can see that, and all
+    // three are worse than a slow restore:
+    //
+    //  - a USER opening the document mid-restore gets a truncated file, and
+    //    for the .dbf and .PRJZ documents this agent exists to carry that is
+    //    silent corruption;
+    //  - this agent's own SCANNER, whose safety rescan runs every five
+    //    seconds, can hash the partial content and announce it to the whole
+    //    network as authoritative — a wrong file, published, with nothing
+    //    saying so;
+    //  - a crash leaves a half-written file that looks complete.
+    //
+    // The call site has claimed "temp + fsync + rename" for a long time. The
+    // branch that did any of it was the one marked as never exercised on CI.
+    //
+    // Rename within a directory is atomic on POSIX and on NTFS, and costs one
+    // directory entry — nothing next to writing the bytes. The prefix is
+    // already in the scanner's ignore list, so a temp file in a watched folder
+    // is not mistaken for user content.
+    const target = join(
+      dirname(filePath),
+      `${ATOMIC_TMP_PREFIX}${Date.now().toString(36)}-${Math.floor(
+        Math.random() * 1e9,
+      ).toString(36)}`,
+    );
 
     const handle = await open(target, 'w');
     try {
@@ -1152,23 +1172,21 @@ export class FsAgent {
       }
     } catch (error) {
       await handle.close();
-      /* v8 ignore start -- @preserve Windows-only temp cleanup; CI runs on Linux */
-      if (target !== filePath) {
-        await unlink(target).catch(() => {});
-      }
-      /* v8 ignore stop -- @preserve */
+      // The partial file must not survive the failure — it is invisible to
+      // everything while it carries this name, and leaving it behind would
+      // make it litter.
+      /* v8 ignore next -- @preserve a temp file this call just created */
+      await unlink(target).catch(() => {});
       throw error;
     }
     await handle.close();
 
-    /* v8 ignore start -- @preserve Windows-only atomic path; CI runs on Linux */
-    if (target !== filePath) {
-      try {
-        await rename(target, filePath);
-      } catch (err) {
-        await unlink(target).catch(() => {});
-        throw err;
-      }
+    try {
+      await rename(target, filePath);
+      /* v8 ignore start -- @preserve a rename within one directory, onto a path the caller owns */
+    } catch (err) {
+      await unlink(target).catch(() => {});
+      throw err;
     }
     /* v8 ignore stop -- @preserve */
   }
@@ -1628,8 +1646,9 @@ export class FsAgent {
         await mkdir(dirname(filePath), { recursive: true });
 
         try {
-          // Write file atomically (temp + fsync + rename) so a crash
-          // mid-restore never leaves a half-written, corrupt file on disk.
+          // Written to a temp file and renamed into place, so nothing — not a
+          // user, not this agent's own scanner — ever sees the file at a
+          // partial size under its real name. See `_atomicWriteStream`.
           await FsAgent._atomicWriteStream(filePath, fileStream);
           this._restoreWritten++;
 

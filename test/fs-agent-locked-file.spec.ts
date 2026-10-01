@@ -43,10 +43,10 @@ vi.mock('fs/promises', async (importOriginal) => {
         ...rest,
       );
     },
-    // A restore writes through a file handle now, so the lock has to be refused
-    // where Windows actually refuses it: at the open, not at the write. A
-    // document CARAT is holding fails `CreateFile` for write access — this is a
-    // closer model of the real fault than the old `writeFile` mock was, not a
+    // A restore writes through a file handle, so the lock has to be refused
+    // where Windows actually refuses it rather than at the write. A document
+    // CARAT is holding fails `CreateFile` for write access — this is a closer
+    // model of the real fault than the old `writeFile` mock was, not a
     // workaround for it. Read opens are left alone: the scanner uses them on
     // the source folder, and a held document can still be read.
     open: (path: unknown, flags?: unknown, ...rest: never[]) => {
@@ -55,6 +55,27 @@ vi.mock('fs/promises', async (importOriginal) => {
       return (actual.open as (...a: never[]) => Promise<unknown>)(
         path as never,
         flags as never,
+        ...rest,
+      );
+    },
+    // And at the RENAME, which is where the refusal now lands.
+    //
+    // A restore writes to a temp file and renames it into place, so that
+    // nothing — not a user, not this agent's own scanner — ever sees a
+    // multi-megabyte file at a partial size under its real name. The open
+    // therefore succeeds: it opens `.fsagent-tmp-…`, which nothing is holding.
+    //
+    // Windows refuses the rename instead: `MoveFileEx` with
+    // REPLACE_EXISTING fails when the destination is open without
+    // FILE_SHARE_DELETE, which is how a document a user has open behaves. The
+    // error codes are the same ones `_isLockLike` already classifies, so the
+    // agent's handling is unchanged — only the call that reports the lock has
+    // moved, and this mock moves with it.
+    rename: (from: unknown, to: unknown, ...rest: never[]) => {
+      if (isLocked(to)) return Promise.reject(lockError());
+      return (actual.rename as (...a: never[]) => Promise<void>)(
+        from as never,
+        to as never,
         ...rest,
       );
     },
