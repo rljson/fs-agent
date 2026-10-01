@@ -238,6 +238,11 @@ export const buildFsMesh = async (opts: {
    * a `~H~` chain head. A mixed-version fleet, by construction.
    */
   oldWireFormat?: readonly string[];
+  /**
+   * Answer a divergence with an ADDITIVE bucket-sync round instead of
+   * replacing a folder. `FsAgentOptions.bucketSync` on every node.
+   */
+  bucketSync?: boolean;
 }): Promise<FsMesh> => {
   const treeKey = opts.treeKey ?? 'sharedTree';
   const names = opts.names ?? ['A', 'B'];
@@ -315,6 +320,7 @@ export const buildFsMesh = async (opts: {
       antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
       timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
       announceTreeRef: opts.oldWireFormat?.includes(name) ?? false,
+      bucketSync: opts.bucketSync ?? false,
     });
 
     stops.push(await agent.syncToDb(db, connector, treeKey));

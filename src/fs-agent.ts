@@ -35,10 +35,16 @@ import {
 } from './fs-conflict-resolver.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import {
+  FsBucketSync,
+  isBucketSync,
+  type BucketSyncHost,
+} from './fs-bucket-sync.ts';
+import {
   FsEditChain,
   planRemovals,
   type FsChainEntry,
 } from './fs-edit-chain.ts';
+import { TOMBSTONE_BLOB, type ReconcilePlan } from './fs-manifest.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
 import { stateBeaconEvent } from '@rljson/db';
@@ -73,6 +79,23 @@ export interface FsAgentOptions {
    * Default: off, which is the better format.
    */
   announceTreeRef?: boolean;
+  /**
+   * Reconcile a divergence ADDITIVELY instead of replacing a folder.
+   *
+   * With this on, a divergence the anti-entropy would have answered with
+   * `pull` or `merge` runs a bucket-sync round instead: the two sides compare
+   * manifests and each fetches what it is missing. Nothing is replaced, so
+   * neither side's work can be discarded — which is the property §3.1 of the
+   * plan says makes the two measured data losses impossible rather than
+   * rarer.
+   *
+   * **Default off.** It replaces the repair model rather than correcting it,
+   * and `src/fs-agent.ts` records that this class of change "has been reverted
+   * four times for being shipped on reasoning". On in the mesh, where the
+   * additive outcome is asserted; off everywhere else until a lab run says
+   * otherwise.
+   */
+  bucketSync?: boolean;
   /** Ignore patterns for scanning */
   ignore?: string[];
   /** Maximum depth for directory traversal */
@@ -696,6 +719,12 @@ export class FsAgent {
 
   /** See {@link FsAgentOptions.announceTreeRef}. */
   private _announceTreeRef: boolean;
+
+  /** See {@link FsAgentOptions.bucketSync}. */
+  private _bucketSyncOn: boolean;
+
+  /** The bucket-sync conversation, when {@link _bucketSyncOn}. */
+  private _bucketSync?: FsBucketSync;
   /**
    * Ancestry head: the content ref of the revision currently representing the
    * filesystem state. New local revisions descend from it; received revisions
@@ -712,6 +741,7 @@ export class FsAgent {
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._announceTreeRef = options.announceTreeRef ?? false;
+    this._bucketSyncOn = options.bucketSync ?? false;
     this._antiEntropyOptions = options.antiEntropy;
     this._scanner = new FsScanner(rootPath, {
       ...options,
@@ -3103,6 +3133,153 @@ export class FsAgent {
   }
 
   /**
+   * Builds the bucket-sync host and the conversation that drives it.
+   *
+   * The host is the only thing that may touch the folder: the protocol decides
+   * what to say and what a reply means and cannot delete anything itself,
+   * which is what keeps the destructive half where the mass-delete guard can
+   * see it.
+   * @param connector - The transport.
+   * @param db - The route's database, for fetching what the plan asks for.
+   * @param treeKey - The trees table key.
+   * @returns The conversation.
+   */
+  private _makeBucketSync(
+    connector: Connector,
+    db: Db,
+    treeKey: string,
+  ): FsBucketSync {
+    const host: BucketSyncHost = {
+      manifest: () => this._manifest(),
+      send: (ref) => {
+        // Cleared first, because `Connector` dedups by ref on both sides and a
+        // round is only unique by its id — the clear makes a RE-sent message
+        // deliverable too, which a retry needs.
+        connector.invalidateSent?.(ref);
+        connector.send(ref);
+      },
+      ready: () =>
+        // A node mid-cold-start or mid-apply has a partial manifest, and
+        // advertising one makes a peer see differences that are not there.
+        this._scanner.tree !== null && !this._remoteApplyInFlight,
+      apply: (plan) => this._applyReconcilePlan(plan, db, treeKey),
+      log: (message) => console.log(message),
+    };
+    return new FsBucketSync(host);
+  }
+
+  /**
+   * This folder's manifest: `path → blobId`, tombstones included.
+   *
+   * A tombstoned path is carried at {@link TOMBSTONE_BLOB}, so a deletion
+   * travels through the ordinary comparison instead of as an absence — the
+   * ambiguity the whole plan exists to remove. A path that is both tombstoned
+   * and live is LIVE: the user created it again, and a stale tombstone must
+   * not advertise it as gone.
+   * @returns The manifest.
+   */
+  private _manifest(): ReadonlyMap<string, string> {
+    const tree = this._scanner.tree;
+    const live = tree ? this._getFileContentMap(tree) : new Map<string, string>();
+    const out = new Map<string, string>();
+    for (const absolute of this._pendingDeletes) {
+      out.set(relative(this._rootPath, absolute).split(sep).join('/'), TOMBSTONE_BLOB);
+    }
+    // Live entries LAST, so a path that was deleted and created again
+    // overwrites its own tombstone rather than being advertised as gone.
+    for (const [path, blobId] of live) out.set(path, blobId);
+    return out;
+  }
+
+  /**
+   * Performs what a bucket-sync round concluded.
+   *
+   * **Additive, except for the drops, and those are bounded.** `fetch` only
+   * ever writes a path this node does not hold, so nothing it does can
+   * destroy work. `drop` is the delete-wins direction and goes through the
+   * same mass-delete reasoning an ordinary prune does.
+   * @param plan - What to do.
+   * @param db - Unused today; kept so a fetch can reach the route's store when
+   *   a blob is not already local.
+   * @param treeKey - Likewise.
+   */
+  private async _applyReconcilePlan(
+    plan: ReconcilePlan,
+    db: Db,
+    treeKey: string,
+  ): Promise<void> {
+    void db;
+    void treeKey;
+
+    // ---- additive half ----
+    for (const [path, blobId] of plan.fetch) {
+      const target = join(this._rootPath, ...path.split('/'));
+      // A path this node deliberately deleted is not fetched back. The peer
+      // has not heard about the deletion yet; it will, and our manifest
+      // already says so.
+      if (this._pendingDeletes.has(target)) continue;
+      try {
+        await this._adapter.blobToFile(
+          { name: path, blobId, size: 0, mtime: Date.now(), path: target },
+          target,
+        );
+      } catch (err) {
+        // One unreachable blob is worth one missing file, never the whole
+        // round — the same rule the restore path learned the hard way.
+        this._writeSyncError(`bucketSync/fetch/${path}`, err);
+      }
+    }
+
+    // ---- destructive half, bounded ----
+    if (plan.drop.length > 0) {
+      const held = this._scanner.tree
+        ? this._getFileContentMap(this._scanner.tree).size
+        : 0;
+      const tooMany =
+        plan.drop.length > MASS_DELETE_MIN_FILES &&
+        plan.drop.length / Math.max(held, 1) > MASS_DELETE_MAX_RATIO;
+      if (tooMany) {
+        console.error(
+          `[FsAgent] MASS DELETE REFUSED on ${this._rootPath}: a bucket-sync ` +
+            `round would remove ${plan.drop.length} of ${held} files. ` +
+            `Nothing was deleted.`,
+        );
+        this._writeSyncError(
+          'bucketSync/massDeleteGuard',
+          new Error(`refused ${plan.drop.length}/${held} drops`),
+        );
+      } else {
+        for (const path of plan.drop) {
+          const target = join(this._rootPath, ...path.split('/'));
+          try {
+            await rm(target, { force: true });
+            // Tombstoned as well as removed, so a third node pushing the file
+            // in the window before this node announces cannot put it back.
+            this._pendingDeletes.add(target);
+          } catch (err) {
+            /* v8 ignore next -- @preserve a file we cannot remove is retried */
+            this._writeSyncError(`bucketSync/drop/${path}`, err);
+          }
+        }
+        this._persistTombstones();
+      }
+    }
+
+    // `redelete` needs no action here: our manifest already advertises those
+    // tombstones, so the peer acts on them in its own round. Naming it in the
+    // plan is what makes the omission deliberate rather than forgotten.
+    if (plan.conflict.length > 0) {
+      // NAMED, not resolved. Both sides edited the same file, which no
+      // additive step can settle — the ordinary conflict resolver owns it.
+      console.warn(
+        `[FsAgent] bucket-sync: ${plan.conflict.length} path` +
+          `${plan.conflict.length === 1 ? '' : 's'} edited on both sides: ` +
+          `${plan.conflict.slice(0, 3).join(', ')}`,
+      );
+    }
+  }
+
+  /**
    * Gathers the deletions behind a plain TREE REF, via its chain entry.
    *
    * The bridge from an unmarked announcement to the chain — the hub's
@@ -3429,6 +3606,10 @@ export class FsAgent {
     // to resolve the heads its peers announce. See `_ensureChain`.
     await this._ensureChain(db, treeKey);
 
+    if (this._bucketSyncOn && !this._bucketSync) {
+      this._bucketSync = this._makeBucketSync(connector, db, treeKey);
+    }
+
     // Start watching filesystem (if not already watching)
     await this._ensureWatching();
 
@@ -3616,7 +3797,19 @@ export class FsAgent {
           // edits) is resolved inline — a 3-way merge into a merge revision D —
           // *before* the destructive restore could clobber local changes, all
           // while the watcher is paused; `behind` falls through to fast-forward.
+          //
+          // Skipped entirely under bucket sync. An inline merge MATERIALISES a
+          // merged tree with `cleanTarget`, so it is whole-folder replacement
+          // by another name — and it is reached from the ordinary apply, not
+          // only from a repair, which is why switching the repair to additive
+          // was not enough on its own. Measured: A1 still lost the
+          // partitioned node's own file two runs in four with the merge left
+          // in place.
+          //
+          // Under bucket sync the apply only ADDS and the round reconciles, so
+          // there is nothing for a merge to decide.
           if (
+            !this._bucketSyncOn &&
             this._resolveConflicts &&
             this._currentRef &&
             predecessorRefs &&
@@ -3812,9 +4005,25 @@ export class FsAgent {
             return;
           }
 
+          // WITH BUCKET SYNC, AN ABSENCE IS NEVER A DELETION.
+          //
+          // The whole point of carrying deletions as tombstone ENTRIES is that
+          // a path missing from a peer's tree no longer means the peer deleted
+          // it — it means the peer has not got it. Pruning on that basis is
+          // the whole-folder replacement this package is replacing, and
+          // leaving it on while the repair went additive was not a half
+          // measure but a contradiction: measured, A1 lost the file the
+          // partitioned node had created, two runs in four, with the bucket
+          // round working perfectly alongside it.
+          //
+          // Deletions arrive as `drop` from a round that knows which side
+          // deleted, bounded by the same mass-delete reasoning. So the apply
+          // stops guessing.
           const withholdPrune =
             restoreOptions?.cleanTarget &&
-            ((ancestryExpected && !declaresAncestry) || !senderSawMyState);
+            (this._bucketSyncOn ||
+              (ancestryExpected && !declaresAncestry) ||
+              !senderSawMyState);
           const applyOptions = withholdPrune
             ? { ...restoreOptions, cleanTarget: false }
             : restoreOptions;
@@ -4181,6 +4390,15 @@ export class FsAgent {
         return Promise.resolve();
       }
 
+      // A bucket-sync message is not a state and must never reach the apply
+      // path: it is a question or an answer about manifests. Claimed here,
+      // before anything tries to fetch a tree by it.
+      if (isBucketSync(treeRef)) {
+        return this._bucketSync
+          ? this._bucketSync.receive(treeRef).then(() => undefined)
+          : Promise.resolve();
+      }
+
       const schedule = (ref: string) =>
         // A freshly-arrived ref resets the recovery budget to 0.
         scheduleProcess(
@@ -4287,6 +4505,23 @@ export class FsAgent {
           );
           return;
         }
+        // ADDITIVE RECONCILIATION, when it is switched on.
+        //
+        // `pull` replaces this folder with the hub's and `merge` applies the
+        // hub's tree under the ordinary rules — both are whole-folder, so both
+        // can discard work. A bucket round cannot: the two sides compare
+        // manifests and each fetches what it is missing. That is the property
+        // §3.1 of the plan says makes the two measured data losses impossible
+        // rather than rarer, and it is why this is the last work package and
+        // its own switch.
+        if (this._bucketSync?.start()) {
+          console.log(
+            `[FsAgent] divergence answered by a bucket-sync round rather ` +
+              `than a ${action}`,
+          );
+          return;
+        }
+
         // `merge` first tries the ordinary rules, ancestry included. Only if
         // that made no progress does it drop the ancestry, which makes the
         // apply additive: nothing is pruned, both sides end up with the union,

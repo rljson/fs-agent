@@ -690,8 +690,38 @@ are partial *"and would make a peer see spurious differences"*. A node
 mid-cold-start neither answers nor asks, because answering with partial roots is
 worse than silence.
 
-**Not wired into `FsAgent` yet.** The modules are complete and tested; the host
-side is the next step.
+### Wired, behind `FsAgentOptions.bucketSync`
+
+With it on, a divergence the anti-entropy would have answered with `pull` or
+`merge` runs a bucket round instead. **Default off**: it replaces the repair
+model rather than correcting it, and this file records that such changes have
+"been reverted four times for being shipped on reasoning".
+
+**Switching the repair was not enough on its own, and the two leftovers are the
+interesting part.** Whole-folder replacement lives in three places, not one:
+
+| | |
+| --- | --- |
+| the anti-entropy repair | `pull` replaces, `merge` applies the hub's tree |
+| the ordinary apply | `cleanTarget` prunes whatever the incoming tree lacks |
+| the inline merge | materialises a merged tree with `cleanTarget` |
+
+The last two are reached from an ordinary incoming ref, not from a repair, so
+with only the repair switched the partitioned node still lost its own new file —
+measured, two runs in four, with the bucket round working perfectly alongside.
+Under bucket sync all three are off:
+
+- **an absence is never a deletion.** That is the whole point of carrying
+  deletions as tombstone entries: a path missing from a peer's tree means the
+  peer has not got it, not that the peer deleted it. Deletions arrive as `drop`
+  from a round that knows which side deleted.
+- **the inline merge is skipped.** It is whole-folder replacement by another
+  name, and under bucket sync there is nothing for it to decide: the apply only
+  adds, and the round reconciles.
+
+**Measured 8 of 8** on three scenarios — a fork keeping both sides' work (§1.1),
+a delete made while partitioned staying deleted (§1.2 / T4), and the three-node
+version of both at once. The same scenarios run 5 of 8 without it.
 
 ## Rolling Out: what a peer can notice
 
