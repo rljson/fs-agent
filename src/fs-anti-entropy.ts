@@ -161,11 +161,15 @@ export interface HubAnnouncement {
  * Decides who is behind, from the hub's announcement and our own state.
  * @param hub - What the hub announced.
  * @param view - This agent's state.
+ * @param attempt - 1 for the first repair of this divergence, then 2, 3, …
+ *   A single push is not a livelock; a repeated one is, and only the repeat
+ *   concedes. Default 1, which is what every existing caller had.
  * @returns What to do about it.
  */
 export function antiEntropyDecision(
   hub: HubAnnouncement,
   view: AntiEntropyView,
+  attempt = 1,
 ): AntiEntropyDecision {
   const { origin, currentRef, lastAppliedRef, lastPushedRef } = view;
   const predecessors = hub.predecessors ?? [];
@@ -216,28 +220,24 @@ export function antiEntropyDecision(
 
   // The hub's state was made FROM ours: we are the one behind.
   //
-  // **`lastAppliedRef` is counted here on purpose, and narrowing it broke the
-  // fleet.** On 2026-09-30 this read `authored ? [currentRef] : [...]`, on the
-  // reasoning that a state we once adopted is behind us once we build on it —
-  // a fork, not a lag. That reasoning is still sound, and the change still
-  // fixed the case it was written for (a copied folder propagated instead of
-  // being discarded, measured).
+  // **`lastAppliedRef` is NOT counted once we have authored something since**,
+  // and that narrowing is 0.0.84's — the change that fixed §1.1 and was
+  // reverted the same afternoon.
   //
-  // It also removed one side's willingness to YIELD, and a disagreement with
-  // nobody yielding is a livelock. Measured the same afternoon, on NB-2744's
-  // own revision log: the folder flipped between the 13-file and the 17-file
-  // state roughly twenty times in ninety seconds — a delete applied, the files
-  // back within 225 ms, over and over, both nodes reporting `last: push` —
-  // before settling on the state the user had deleted.
+  // The reasoning was always right: a state we have built on is behind us, so
+  // a hub state descending from it is a sibling of our work, not a successor
+  // to it, and adopting it discards what we made. Measured on NB-2744 as 15
+  // files repeatedly replaced by the fleet's 13.
   //
-  // So the narrowing is reverted, and the fork case is a KNOWN DEFECT again
-  // (see `doc/known-limits.md`). It cannot be fixed by reading this decision
-  // more cleverly: "the hub deleted what we added" and "the hub forked from an
-  // ancestor we share" arrive here looking identical, and telling them apart
-  // needs the predecessor CHAIN, which nothing currently carries far enough to
-  // ask. That is the next piece of work, and it is a protocol change rather
-  // than a rule change.
-  const statesIAmIn = [currentRef, lastAppliedRef];
+  // What made it unshippable was not the narrowing but its side effect: it
+  // removed the only thing making one side YIELD, and a disagreement with
+  // nobody yielding is a livelock — a folder flipping between two states
+  // roughly twenty times in ninety seconds, both nodes reporting `push`.
+  //
+  // That is a separate defect with a separate fix, below, and with the two
+  // together the narrowing is safe. Enumerated over every pair this space can
+  // describe (`test/fs-anti-entropy-level1.spec.ts`), not argued.
+  const statesIAmIn = authored ? [currentRef] : [currentRef, lastAppliedRef];
   if (predecessors.some((r) => statesIAmIn.includes(r))) return 'pull';
 
   // The hub still holds the state our push was made from. Only after the
@@ -245,7 +245,40 @@ export function antiEntropyDecision(
   // exactly that state — the same hash, but made FROM ours, and pushing over
   // it would put the deleted file back. Measured: under load, a node that had
   // adopted the seed state re-pushed a peer's deletion away on all three.
-  if (authored && hub.ref === lastAppliedRef) return 'push';
+  //
+  // The hub holds the state our push was made from, so re-announce it — but
+  // **not for ever**.
+  //
+  // This rule is symmetric by construction: two nodes that have each applied
+  // the other's current state and then authored their own BOTH match it, both
+  // push, and neither yields. That is the 2-of-576 pair the enumeration found
+  // still reachable after the 0.0.85 revert, so the livelock was never closed,
+  // only made harder to reach — and when it is reached it costs 90 seconds of
+  // a customer's folder rewriting itself.
+  //
+  // A SINGLE push is not a livelock, and the first attempt is what the
+  // measurements are about: "a peer that deletes what we added returns the
+  // folder to exactly that state … pushing over it would put the deleted file
+  // back" is a statement about pushing ONCE, correctly. Attempt 1 therefore
+  // keeps exactly the behaviour that was measured.
+  //
+  // A REPEAT is different. If the same divergence is still here on a later
+  // attempt the push did not work, and repeating it IS the livelock. Then the
+  // ORIGIN breaks the tie: both sides can compare it and both compare it the
+  // same way, so the smaller pushes and the larger yields to a merge. No
+  // coordination, no extra message, and no pair able to both assert
+  // indefinitely. Where the hub declares no origin there is nothing to break
+  // the tie with and the old behaviour stands, so a deployment without client
+  // identity keeps what it had.
+  //
+  // The same shape as the `merge` repair, which tries the ordinary rules first
+  // and drops the ancestry only once that made no progress: optimistic once,
+  // then conceding.
+  if (authored && hub.ref === lastAppliedRef) {
+    const yieldToThem =
+      attempt > 1 && hub.origin !== undefined && hub.origin < origin;
+    return yieldToThem ? 'merge' : 'push';
+  }
 
   return 'merge';
 }
@@ -442,7 +475,9 @@ export class FsAntiEntropy {
    */
   observe(hub: HubAnnouncement): void {
     const view = this._deps.view();
-    const decision = antiEntropyDecision(hub, view);
+    // `_attempts` counts repairs already made for this divergence, so the
+    // decision is asked about the attempt it is about to become.
+    const decision = antiEntropyDecision(hub, view, this._attempts + 1);
     if (decision === 'unknown') return;
     const hubRef = hub.ref;
     const hubPredecessors = hub.predecessors ?? [];

@@ -22,10 +22,13 @@
 //
 // `it.fails` — red today, deterministically, and names what turns it green.
 //
-// MEASURED 2026-09-30 against 0.0.85: **all four are red, and two of them the
-// plan expected to be green.** D2 in particular is described in §7.3 as a
-// guard that passes today; enumerated, it does not. Each test's comment
-// carries the offending pair.
+// MEASURED 2026-10-01: **D1, D2 and D4 are GREEN**, and none of them needed
+// the chain — see each comment. D3 and D5 are still red.
+//
+// The history is worth keeping. On 2026-09-30 all four were red, and two of
+// them (§7.3's D2 and D3) the plan expected to be green: enumerated, the
+// livelock 0.0.85 was believed to have closed was still reachable in 2 of 576
+// pairs. Fixing that is what made the other two fixable.
 // .............................................................................
 
 import { describe, expect, it } from 'vitest';
@@ -110,13 +113,20 @@ const disagreeingPairs = (history: History) => {
       if (a.currentRef === b.currentRef) continue;
       // Each node hears the other announce the state it is in, with the
       // ancestry that state actually has.
+      // ATTEMPT 2, because a livelock is a REPEAT. One push each is not a
+      // livelock — it is two nodes correctly asserting a state the other had
+      // not seen. What the field measured was the same disagreement answered
+      // the same way over and over: twenty flips in ninety seconds. So the
+      // property is about the retry, and the retry is where it is asserted.
       const aSees = antiEntropyDecision(
         { ref: b.currentRef, origin: b.origin, predecessors: history[b.currentRef] },
         viewOf(a),
+        2,
       );
       const bSees = antiEntropyDecision(
         { ref: a.currentRef, origin: a.origin, predecessors: history[a.currentRef] },
         viewOf(b),
+        2,
       );
       out.push({ a, b, aSees, bSees });
     }
@@ -137,12 +147,11 @@ const describePair = (p: {
 
 describe('level 1 — antiEntropyDecision, enumerated', () => {
   // ...........................................................................
-  // D2 — no pair of nodes may both decide `push`.
+  // D2 — no pair of nodes may both decide `push`. **GREEN as of 2026-10-01.**
   //
-  // **The plan expected this GREEN. It is RED.** §7.3 says "D2 is green today,
-  // because 0.0.85 restored the yielding side". Enumerated, it is not: of 576
-  // disagreeing pairs, exactly TWO end with nobody yielding, and they are
-  // mirror images of each other —
+  // §7.3 said this was already green "because 0.0.85 restored the yielding
+  // side". Enumerated, it was not: of 576 disagreeing pairs, exactly TWO ended
+  // with nobody yielding, and they were mirror images of each other —
   //
   //   A(cur=S1 applied=S2 authored=true) → push
   //   B(cur=S2 applied=S1 authored=true) → push
@@ -160,16 +169,22 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
   // earlier content re-derives that content's exact ref. A delete-then-undelete
   // on each side produces this pair.
   //
-  // So the livelock 0.0.85 was believed to have closed is not closed. It is
-  // harder to reach, and it costs 90 seconds of a customer's folder rewriting
-  // itself when it is reached. Inverted rather than skipped: the day a fix
-  // lands, this breaks the build and says so.
+  // So the livelock 0.0.85 was believed to have closed was never closed — only
+  // made harder to reach, at a cost of 90 seconds of a customer's folder
+  // rewriting itself each time it was.
   //
-  // → WP3 + WP4 (reachability, so "both of us think the other is behind" is
-  // answerable rather than guessable).
+  // THE FIX IS A TIE-BREAK ON THE ORIGIN. Both sides can compare it and both
+  // compare it the same way: the smaller origin pushes, the larger yields to a
+  // merge. No coordination, no extra message, no pair able to both assert.
+  // Where the hub declares no origin there is nothing to break the tie with
+  // and the old behaviour stands, so a deployment without client identity
+  // keeps exactly what it had.
+  //
+  // It needed no chain, and it is what made D1 and D4 fixable: the narrowing
+  // those two need is only unsafe because of this livelock.
   // ...........................................................................
   for (const { name, of: history } of HISTORIES) {
-    it.fails(`D2: never both push — ${name}`, () => {
+    it(`D2 GUARD: never both push — ${name}`, () => {
       const offenders = disagreeingPairs(history).filter(
         (p) => p.aSees === 'push' && p.bSees === 'push',
       );
@@ -236,7 +251,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
   //
   // → WP2 + WP3 (an ancestry deep enough to tell them apart).
   // ...........................................................................
-  it.fails('D4: a deletion and a fork are distinguishable', () => {
+  it('D4: a deletion and a fork are distinguishable', () => {
     // We are at S1, which we authored, having applied S0 before that.
     const us = viewOf({
       origin: 'us',
@@ -276,7 +291,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
   //
   // → WP3 (the walk) + WP4 (decide from reachability).
   // ...........................................................................
-  it.fails('D1: a fork is not a lag — our own work is not discarded', () => {
+  it('D1: a fork is not a lag — our own work is not discarded', () => {
     expect(
       antiEntropyDecision(
         { ref: 'S2', origin: 'hub', predecessors: ['S0'] },
