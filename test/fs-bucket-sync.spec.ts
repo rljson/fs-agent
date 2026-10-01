@@ -21,9 +21,11 @@ import {
   BQ,
   BR,
   decodeEntries,
+  decodeQuery,
   decodeRoots,
   decodeWanted,
   encodeEntries,
+  encodeQuery,
   encodeRoots,
   encodeWanted,
   FsBucketSync,
@@ -112,20 +114,43 @@ describe('the wire format', () => {
     expect(isBucketSync('~H~abc')).toBe(false);
   });
 
-  it('round-trips roots', () => {
+  it('makes every message UNIQUE, round by round', () => {
+    // Not decoration. `Connector` dedups by ref on both sides, and a protocol
+    // message is byte-identical every time it is sent — `~BQ~` asking for
+    // roots never varies. Marked received once, every later copy is dropped,
+    // and the SECOND reconciliation a node ever attempts goes unanswered for
+    // the rest of the session. Mongo sidesteps it with an `emitRaw` that
+    // bypasses dedup; this `Connector` has no such method.
+    expect(encodeQuery(1)).not.toBe(encodeQuery(2));
+    expect(encodeRoots(1, {})).not.toBe(encodeRoots(2, {}));
+    expect(encodeWanted(1, [3])).not.toBe(encodeWanted(2, [3]));
+    expect(encodeEntries(1, [])).not.toBe(encodeEntries(2, []));
+  });
+
+  it('round-trips roots, carrying the round', () => {
     const roots = bucketRoots(new Map([['a.txt', 'blob-1']]));
-    expect(decodeRoots(encodeRoots(roots))).toEqual(roots);
+    expect(decodeRoots(encodeRoots(7, roots))).toEqual({ round: 7, roots });
   });
 
   it('round-trips an EMPTY manifest, which is a real state', () => {
-    expect(decodeRoots(encodeRoots({}))).toEqual({});
-    expect(decodeRoots(BR)).toEqual({});
+    // A node with nothing in its folder, and not the same thing as a message
+    // that could not be read.
+    expect(decodeRoots(encodeRoots(1, {}))).toEqual({ round: 1, roots: {} });
+  });
+
+  it('round-trips a query', () => {
+    expect(decodeQuery(encodeQuery(9))).toBe(9);
   });
 
   it('round-trips wanted buckets, empty list included', () => {
-    expect(decodeWanted(encodeWanted([7, 19, 4095]))).toEqual([7, 19, 4095]);
-    expect(decodeWanted(encodeWanted([]))).toEqual([]);
-    expect(decodeWanted(BG)).toEqual([]);
+    expect(decodeWanted(encodeWanted(2, [7, 19, 4095]))).toEqual({
+      round: 2,
+      buckets: [7, 19, 4095],
+    });
+    expect(decodeWanted(encodeWanted(2, []))).toEqual({
+      round: 2,
+      buckets: [],
+    });
   });
 
   it('round-trips entries, tombstones included', () => {
@@ -133,9 +158,25 @@ describe('the wire format', () => {
       ['a.txt', 'blob-1'],
       ['gone.txt', TOMBSTONE_BLOB],
     ];
-    expect(decodeEntries(encodeEntries(entries))).toEqual(entries);
-    expect(decodeEntries(encodeEntries([]))).toEqual([]);
-    expect(decodeEntries(BE)).toEqual([]);
+    expect(decodeEntries(encodeEntries(3, entries))).toEqual({
+      round: 3,
+      entries,
+    });
+    expect(decodeEntries(encodeEntries(3, []))).toEqual({
+      round: 3,
+      entries: [],
+    });
+  });
+
+  it('answers UNDEFINED for a body it cannot read, and keeps running', () => {
+    // A message from a build that speaks a different dialect, not a reason to
+    // stop syncing. An empty body is the same case: there is no round in it.
+    expect(decodeRoots(BR)).toBeUndefined();
+    expect(decodeQuery(BQ)).toBeUndefined();
+    expect(decodeWanted(BG)).toBeUndefined();
+    expect(decodeEntries(BE)).toBeUndefined();
+    expect(decodeRoots(`${BR}not json`)).toBeUndefined();
+    expect(decodeEntries(`${BE}{`)).toBeUndefined();
   });
 
   it('survives a path containing the characters a delimiter would need', () => {
@@ -151,7 +192,7 @@ describe('the wire format', () => {
       ['dir/quote".txt', 'blob-3'],
       ['dir/ctrl.txt', 'blob-4'],
     ];
-    expect(decodeEntries(encodeEntries(nasty))).toEqual(nasty);
+    expect(decodeEntries(encodeEntries(1, nasty))?.entries).toEqual(nasty);
   });
 });
 
@@ -264,7 +305,7 @@ describe('FsBucketSync', () => {
       // because the peer then exchanges entries to discover there are none.
       const { b } = pair({}, { 'a.txt': '1' });
       b.host.isReady = false;
-      expect(await b.sync.receive(BQ)).toBe(true);
+      expect(await b.sync.receive(encodeQuery(1))).toBe(true);
       expect(b.host.sent).toEqual([]);
     });
 
@@ -285,6 +326,35 @@ describe('FsBucketSync', () => {
     });
   });
 
+  it('shrugs off a message whose body it cannot read', async () => {
+    // A build that speaks a different dialect, or a truncated frame. Each kind
+    // is CLAIMED (so nothing else tries to apply it as a tree ref) and acted
+    // on in no way at all — no reply, no plan, and the node keeps syncing.
+    const { a } = pair({ 'a.txt': '1' }, {});
+    for (const prefix of [BQ, BR, BG, BE]) {
+      expect(await a.sync.receive(prefix)).toBe(true);
+      expect(await a.sync.receive(`${prefix}not json`)).toBe(true);
+    }
+    expect(a.host.sent).toEqual([]);
+    expect(a.host.plans).toEqual([]);
+  });
+
+  it('acts on a reply from a round it had abandoned', async () => {
+    // The round id lets a late answer be recognised rather than mistaken for
+    // the one in flight. It is still worth acting on — the buckets are
+    // derivable from the entries themselves, and the round trip has already
+    // been paid for.
+    const { a, b } = pair({ 'a.txt': '1' }, { 'a.txt': '1', 'b.txt': '2' });
+    a.sync.start();
+    await b.sync.receive(a.host.sent.splice(0)[0]);
+    await a.sync.receive(b.host.sent.splice(0)[0]); // now awaiting round 1
+    expect(a.sync.busy).toBe(true);
+
+    // A reply tagged with a DIFFERENT round than the one we are waiting on.
+    await a.sync.receive(encodeEntries(999, [['late.txt', 'blob-late']]));
+    expect(a.host.plans[0].fetch).toEqual([['late.txt', 'blob-late']]);
+  });
+
   it('ignores a ref that is not its own', async () => {
     const { a } = pair({ 'a.txt': '1' }, {});
     expect(await a.sync.receive('an-ordinary-tree-ref')).toBe(false);
@@ -299,7 +369,7 @@ describe('FsBucketSync', () => {
     // unreconciled until something else noticed it.
     const { a } = pair({}, {});
     expect(a.sync.busy).toBe(false);
-    await a.sync.receive(encodeEntries([['surprise.txt', 'blob-9']]));
+    await a.sync.receive(encodeEntries(99, [['surprise.txt', 'blob-9']]));
     expect(a.host.plans[0].fetch).toEqual([['surprise.txt', 'blob-9']]);
   });
 

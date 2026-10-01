@@ -647,6 +647,24 @@ contain one; a relative PATH has no such guarantee — on POSIX a filename may
 contain any byte but `/` and NUL. No delimiter is safe without escaping, and an
 escaping bug in a message carrying DELETIONS is the expensive kind.
 
+### Every message carries a round id
+
+Not decoration. `@rljson/db`'s `Connector` dedups by ref on **both** sides, and
+a protocol message is byte-identical every time it is sent — `~BQ~` asking for
+roots never varies. Marked received once, every later copy is dropped, and the
+SECOND reconciliation a node ever attempts goes unanswered for the rest of the
+session. Mongo sidesteps this with an `emitRaw` that bypasses dedup; this
+`Connector` has no such method, so the messages are made unique instead.
+
+It buys a second thing: a reply can be matched to its request, so a late answer
+from an abandoned round is recognisable rather than merely surprising — and
+still worth acting on, because its buckets are derivable from the entries and
+the round trip is already paid for.
+
+A body that cannot be parsed is **claimed and ignored** — a build speaking a
+different dialect is not a reason to stop syncing, and claiming it stops
+anything else trying to apply it as a tree ref.
+
 ### It is driven, not autonomous
 
 `FsBucketSync` decides what to say and what a reply means. It never touches a

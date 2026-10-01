@@ -71,6 +71,20 @@ export const BE = '~BE~';
 /** Every prefix this protocol owns. */
 export const BUCKET_SYNC_PREFIXES = [BQ, BR, BG, BE] as const;
 
+// EVERY MESSAGE CARRIES A ROUND ID, and it is not decoration.
+//
+// `@rljson/db`'s `Connector` dedups by ref on BOTH sides, and a protocol
+// message is the same string every time it is sent — `~BQ~` asking for roots is
+// byte-identical on every round. Marked received once, every later copy is
+// dropped, and the second reconciliation a node ever attempts goes unanswered
+// for the rest of the session. Mongo sidesteps this with an `emitRaw` that
+// bypasses dedup; this `Connector` has no such method, so the messages are made
+// UNIQUE instead.
+//
+// It buys a second thing worth having: a reply can be matched to its request,
+// so a late answer from an abandoned round is recognisable rather than merely
+// surprising.
+//
 // The body is JSON, deliberately.
 //
 // Mongo separates its fields with `|`, on the grounds that the character cannot
@@ -84,6 +98,40 @@ export const BUCKET_SYNC_PREFIXES = [BQ, BR, BG, BE] as const;
 // paths, so the trade is easy. It also makes a malformed body throw at the
 // parse rather than decode silently into the wrong paths.
 
+/** A decoded message: which round it belongs to, and its payload. */
+interface Envelope<T> {
+  r: number;
+  d: T;
+}
+
+/**
+ * Wraps a payload in its round.
+ * @param prefix - The message kind.
+ * @param round - The round id.
+ * @param payload - What to carry.
+ * @returns A ref.
+ */
+const envelope = <T>(prefix: string, round: number, payload: T): string =>
+  prefix + JSON.stringify({ r: round, d: payload });
+
+/**
+ * Unwraps a message.
+ * @param prefix - The message kind.
+ * @param ref - The ref.
+ * @returns The round and the payload, or `undefined` for an unreadable body —
+ *   which is a message from a build that speaks a different dialect, not a
+ *   reason to stop syncing.
+ */
+const unwrap = <T>(prefix: string, ref: string): Envelope<T> | undefined => {
+  const body = ref.slice(prefix.length);
+  if (body.length === 0) return undefined;
+  try {
+    return JSON.parse(body) as Envelope<T>;
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * Whether a ref belongs to this protocol.
  * @param ref - The ref as it arrived.
@@ -94,61 +142,88 @@ export const isBucketSync = (ref: string): boolean =>
 
 /**
  * Encodes bucket roots for the wire.
+ * @param round - The round this answers.
  * @param roots - The roots to send.
  * @returns A ref carrying them.
  */
-export const encodeRoots = (roots: BucketRoots): string =>
-  BR + JSON.stringify(roots);
+export const encodeRoots = (round: number, roots: BucketRoots): string =>
+  envelope(BR, round, roots);
 
 /**
  * Decodes bucket roots.
  * @param ref - A `~BR~` ref.
- * @returns The roots. An empty body means an empty manifest, which is a real
- *   state a node can be in rather than a malformed message.
+ * @returns The round and roots, or `undefined` for an unreadable body. An
+ *   EMPTY roots object is a real state — a node with nothing in its folder —
+ *   and is not the same as an unreadable one.
  */
-export const decodeRoots = (ref: string): BucketRoots => {
-  const body = ref.slice(BR.length);
-  if (body.length === 0) return {};
-  return JSON.parse(body) as BucketRoots;
+export const decodeRoots = (
+  ref: string,
+): { round: number; roots: BucketRoots } | undefined => {
+  const parsed = unwrap<BucketRoots>(BR, ref);
+  return parsed ? { round: parsed.r, roots: parsed.d } : undefined;
 };
 
 /**
+ * Encodes a request for the peer's roots.
+ * @param round - The round being started.
+ * @returns A ref.
+ */
+export const encodeQuery = (round: number): string => envelope(BQ, round, 0);
+
+/**
+ * Decodes a request for roots.
+ * @param ref - A `~BQ~` ref.
+ * @returns The round, or `undefined` for an unreadable body.
+ */
+export const decodeQuery = (ref: string): number | undefined =>
+  unwrap<number>(BQ, ref)?.r;
+
+/**
  * Encodes a request for the entries of some buckets.
+ * @param round - The round.
  * @param buckets - The bucket indices wanted.
  * @returns A ref carrying them.
  */
-export const encodeWanted = (buckets: readonly number[]): string =>
-  BG + JSON.stringify(buckets);
+export const encodeWanted = (
+  round: number,
+  buckets: readonly number[],
+): string => envelope(BG, round, buckets);
 
 /**
  * Decodes a request for bucket entries.
  * @param ref - A `~BG~` ref.
- * @returns The bucket indices.
+ * @returns The round and bucket indices, or `undefined`.
  */
-export const decodeWanted = (ref: string): number[] => {
-  const body = ref.slice(BG.length);
-  if (body.length === 0) return [];
-  return JSON.parse(body) as number[];
+export const decodeWanted = (
+  ref: string,
+): { round: number; buckets: number[] } | undefined => {
+  const parsed = unwrap<number[]>(BG, ref);
+  return parsed ? { round: parsed.r, buckets: parsed.d } : undefined;
 };
 
 /**
  * Encodes manifest entries for the wire.
+ * @param round - The round.
  * @param entries - The entries to send.
  * @returns A ref carrying them.
  */
-export const encodeEntries = (entries: readonly ManifestEntry[]): string =>
-  BE + JSON.stringify(entries);
+export const encodeEntries = (
+  round: number,
+  entries: readonly ManifestEntry[],
+): string => envelope(BE, round, entries);
 
 /**
  * Decodes manifest entries.
  * @param ref - A `~BE~` ref.
- * @returns The entries. A tombstone arrives as a path with an empty blob id,
- *   which is the whole point of carrying deletions this way.
+ * @returns The round and entries, or `undefined`. A tombstone arrives as a
+ *   path with an empty blob id, which is the whole point of carrying deletions
+ *   this way.
  */
-export const decodeEntries = (ref: string): ManifestEntry[] => {
-  const body = ref.slice(BE.length);
-  if (body.length === 0) return [];
-  return JSON.parse(body) as ManifestEntry[];
+export const decodeEntries = (
+  ref: string,
+): { round: number; entries: ManifestEntry[] } | undefined => {
+  const parsed = unwrap<ManifestEntry[]>(BE, ref);
+  return parsed ? { round: parsed.r, entries: parsed.d } : undefined;
 };
 
 /** What {@link FsBucketSync} needs from the agent it runs in. */
@@ -193,8 +268,10 @@ export interface BucketSyncHost {
  */
 export class FsBucketSync {
   private readonly _log: (message: string) => void;
-  /** Buckets we asked for entries of, and are waiting for. */
-  private _awaiting: number[] | null = null;
+  /** Buckets we asked for entries of, and the round we asked in. */
+  private _awaiting: { round: number; buckets: number[] } | null = null;
+  /** Monotonic round ids, so no two messages from this node are identical. */
+  private _round = 0;
 
   constructor(private readonly _host: BucketSyncHost) {
     this._log = _host.log ?? (() => {});
@@ -215,7 +292,7 @@ export class FsBucketSync {
    */
   start(): boolean {
     if (!this._host.ready() || this.busy) return false;
-    this._host.send(BQ);
+    this._host.send(encodeQuery(++this._round));
     return true;
   }
 
@@ -235,48 +312,63 @@ export class FsBucketSync {
     }
 
     if (ref.startsWith(BQ)) {
-      this._host.send(encodeRoots(bucketRoots(this._host.manifest())));
+      const round = decodeQuery(ref);
+      if (round === undefined) return true;
+      this._host.send(encodeRoots(round, bucketRoots(this._host.manifest())));
       return true;
     }
 
     if (ref.startsWith(BR)) {
-      const theirs = decodeRoots(ref);
+      const parsed = decodeRoots(ref);
+      if (parsed === undefined) return true;
       const ours = bucketRoots(this._host.manifest());
-      const differ = differingBuckets(ours, theirs);
+      const differ = differingBuckets(ours, parsed.roots);
       if (differ.length === 0) {
         this._log('[FsBucketSync] roots agree — nothing to reconcile');
         this._awaiting = null;
         return true;
       }
-      this._awaiting = differ;
+      this._awaiting = { round: parsed.round, buckets: differ };
       this._log(
         `[FsBucketSync] ${differ.length} of ${Object.keys(ours).length} ` +
           `buckets differ — asking for their entries`,
       );
-      this._host.send(encodeWanted(differ));
+      this._host.send(encodeWanted(parsed.round, differ));
       return true;
     }
 
     if (ref.startsWith(BG)) {
-      const wanted = decodeWanted(ref);
+      const parsed = decodeWanted(ref);
+      if (parsed === undefined) return true;
       this._host.send(
-        encodeEntries(entriesInBuckets(this._host.manifest(), wanted)),
+        encodeEntries(
+          parsed.round,
+          entriesInBuckets(this._host.manifest(), parsed.buckets),
+        ),
       );
       return true;
     }
 
-    // `~BE~`: their entries. Compare against ours for the SAME buckets — not
-    // against the whole manifest, or every path outside the exchange would
-    // look like something they are missing.
-    const theirEntries = decodeEntries(ref);
+    // `~BE~`: their entries.
+    const parsed = decodeEntries(ref);
+    if (parsed === undefined) return true;
+
+    // Compared against OUR entries for the SAME buckets — not against the
+    // whole manifest, or every path outside the exchange would look like
+    // something the peer is missing and a four-message round would turn into a
+    // full manifest dump.
+    //
+    // The buckets come from the round we are waiting on when the reply matches
+    // it. A reply from a round we abandoned, or one we never asked for, still
+    // carries usable information and its buckets are derivable from the
+    // entries themselves — discarding it would waste a round trip already paid
+    // for and leave the difference unreconciled until something else noticed.
     const buckets =
-      this._awaiting ??
-      // A reply we did not ask for still carries usable information, and its
-      // buckets are derivable from the entries themselves. Ignoring it would
-      // waste a round trip that has already been paid for.
-      [...new Set(theirEntries.map(([path]) => bucketOf(path)))];
+      this._awaiting?.round === parsed.round
+        ? this._awaiting.buckets
+        : [...new Set(parsed.entries.map(([path]) => bucketOf(path)))];
     const ourEntries = entriesInBuckets(this._host.manifest(), buckets);
-    const plan = reconcile(ourEntries, theirEntries);
+    const plan = reconcile(ourEntries, parsed.entries);
     this._awaiting = null;
 
     const work =
