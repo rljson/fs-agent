@@ -145,8 +145,20 @@ describe('FsScanner', () => {
       expect(fileTree).toBeDefined();
       const meta = fileTree?.meta as any;
       expect(meta?.size).toBe(12); // "test content" length
-      expect(meta?.mtime).toBeTypeOf('number');
       expect(fileTree?.isParent).toBe(false);
+      // NO mtime, and that is the point: it is excluded from the content
+      // identity so two machines holding the same bytes derive the same ref.
+      // With it in, they did not — at millisecond granularity — and a node
+      // whose ref disagreed with its peers' had every deletion it sent
+      // refused (`KNOWN-WEAKNESSES.md` §1). The absolute `path` has been
+      // excluded the same way, and for the same reason, all along.
+      expect(meta?.mtime).toBeUndefined();
+      expect(meta?.path).toBeUndefined();
+      // Observed and kept, just not hashed: the restore's skip-a-write
+      // optimisation checks a file's mtime against what the scan saw.
+      const known = scanner.knownFile('metadata.txt');
+      expect(known?.mtime).toBeTypeOf('number');
+      expect(known?.size).toBe(12);
     });
   });
 

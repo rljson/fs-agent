@@ -296,7 +296,7 @@ describe('FsAgent', () => {
       expect(content2).toBe('content2');
     });
 
-    it('should preserve file metadata', async () => {
+    it('preserves content and size, but not the author\'s timestamp', async () => {
       await writeFile(join(testDir, 'test.txt'), 'test content');
 
       const agent = new FsAgent(testDir);
@@ -311,10 +311,37 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
       await agent.restore(tree, targetDir);
 
-      // Check metadata is preserved
+      // Content and size round-trip; the AUTHOR'S TIMESTAMP DOES NOT, and
+      // that is deliberate as of the §1 fix.
+      //
+      // mtime used to be part of a file node, and therefore part of the tree
+      // ref. That made a ref stop being a shared identity: two machines
+      // holding the same bytes derived different refs whenever the bytes were
+      // created independently rather than restored — the same document saved
+      // twice, a seeded fixture, a folder copied to two laptops — and at
+      // MILLISECOND granularity. A node whose ref disagrees with its peers'
+      // announces parents nobody can be in, so every deletion it sends is
+      // refused by everybody: `KNOWN-WEAKNESSES.md` §1, *"deletions do not
+      // reliably propagate"*, reproduced on four machines three times.
+      //
+      // The trade was measured, not assumed: 10 of 10 on the four-node
+      // directory deletion with mtime out, 8 of 10 with it in. Losing the
+      // author's clock is cosmetic; losing deletions is data loss.
+      //
+      // A restored file therefore carries the time it ARRIVED. The restore
+      // still honours `meta.mtime` when a tree carries one, so a peer on an
+      // older build still has its timestamps respected — see
+      // `_restoreTree`.
       const restoredStats = await stat(join(targetDir, 'test.txt'));
-      expect(restoredStats.mtime.getTime()).toBe(originalStats.mtime.getTime());
       expect(restoredStats.size).toBe(originalStats.size);
+      expect(await readFile(join(targetDir, 'test.txt'), 'utf-8')).toBe(
+        'test content',
+      );
+      // And the tree carries no timestamp to restore from.
+      const fileNode = [...tree.trees.values()].find(
+        (t) => (t.meta as { name?: string })?.name === 'test.txt',
+      );
+      expect((fileNode?.meta as { mtime?: number })?.mtime).toBeUndefined();
     });
 
     it('should ignore unknown node types when cleaning target', async () => {
@@ -811,7 +838,7 @@ describe('FsAgent', () => {
       ).rejects.toThrow();
     });
 
-    it('should preserve file timestamps during restore', async () => {
+    it('restores content, stamping the file when it arrives', async () => {
       // Create file with specific timestamp
       const testFile = join(testDir, 'timestamped.txt');
       await writeFile(testFile, 'content');
@@ -839,12 +866,18 @@ describe('FsAgent', () => {
       const agent2 = new FsAgent(targetDir, agent.bs);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
-      // Verify timestamp preserved (within 1 second tolerance)
+      // The bytes arrive; the author's timestamp does not. See the §1 note on
+      // `preserves content and size, but not the author's timestamp` above —
+      // mtime is out of the content identity so that a tree ref means the same
+      // thing on every machine.
       const restoredStats = await stat(join(targetDir, 'timestamped.txt'));
-      const timeDiff = Math.abs(
-        restoredStats.mtime.getTime() - originalMtime.getTime(),
+      expect(await readFile(join(targetDir, 'timestamped.txt'), 'utf-8')).toBe(
+        await readFile(join(testDir, 'timestamped.txt'), 'utf-8'),
       );
-      expect(timeDiff).toBeLessThan(1000);
+      // Stamped when it landed here, which is at or after the original.
+      expect(restoredStats.mtime.getTime()).toBeGreaterThanOrEqual(
+        originalMtime.getTime(),
+      );
     });
   });
 

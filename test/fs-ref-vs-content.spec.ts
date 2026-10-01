@@ -32,7 +32,7 @@
 
 import { BsMem } from '@rljson/bs';
 
-import { mkdir, rm, writeFile } from 'fs/promises';
+import { mkdir, rm, utimes, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -149,5 +149,72 @@ describe('S5 — ref identity vs content identity', () => {
 
     expect(after.tree.rootHash).not.toBe(before.tree.rootHash);
     expect(sameContent(before.agent, before.tree, after.tree)).toBe(false);
+  });
+  // ...........................................................................
+  // S7 — the same bytes must give the same ref on two machines.
+  //
+  // This is the invariant every ancestry check is built on: a receiver prunes
+  // only for a sender that names a state the receiver is in, so a ref has to
+  // mean the same thing on both ends. Where it does not, a node announces
+  // parents nobody can be in and every deletion it sends is refused by
+  // everybody — which is `KNOWN-WEAKNESSES.md` §1, *"deletions do not reliably
+  // propagate"*, the register's most-reproduced entry.
+  //
+  // mtime was in the content identity and broke it. Not for exotic input: any
+  // file created independently rather than restored — the same document saved
+  // on two machines, a seeded fixture, a folder copied to two laptops — and at
+  // MILLISECOND granularity. Measured on four nodes, one `keeper.txt` written
+  // by a loop carried `…104.2852`, `…104.4375` and `…104.5483`, and
+  // `stats.mtime.getTime()` truncates, so which side of a boundary a write
+  // landed on decided the whole folder's ref.
+  //
+  // Two cases, because the second is the one that bit: a difference of one
+  // millisecond is as fatal as a difference of a day, and far easier to hit.
+  // ...........................................................................
+  it('S7: identical content written at different times gives one ref', async () => {
+    await writeFile(join(dir, 'keeper.txt'), 'keeper');
+    const now = await scan();
+
+    const old = new Date(Date.now() - 86_400_000);
+    await utimes(join(dir, 'keeper.txt'), old, old);
+    const aged = await scan();
+
+    expect(aged.tree.rootHash, 'a day apart changed the ref').toBe(
+      now.tree.rootHash,
+    );
+    expect(sameContent(now.agent, now.tree, aged.tree)).toBe(true);
+  });
+
+  // ...........................................................................
+  it('S7: a one-millisecond difference gives one ref', async () => {
+    await writeFile(join(dir, 'keeper.txt'), 'keeper');
+    const first = await scan();
+
+    // The measured case, exactly: one millisecond, the width of a loop
+    // iteration.
+    const shifted = new Date(Date.now() + 1);
+    await utimes(join(dir, 'keeper.txt'), shifted, shifted);
+    const second = await scan();
+
+    expect(second.tree.rootHash, 'one millisecond changed the ref').toBe(
+      first.tree.rootHash,
+    );
+  });
+
+  // ...........................................................................
+  it('S7 GUARD: the scanner still knows each file\'s real mtime', async () => {
+    // Excluded from the IDENTITY, not discarded. The restore's skip-a-write
+    // optimisation checks a file's mtime against what the last scan saw, and
+    // an 80 GB catalogue is rewritten on every sync without it — so dropping
+    // mtime from the tree must not drop it from the scanner.
+    await writeFile(join(dir, 'keeper.txt'), 'keeper');
+    const { agent } = await scan();
+
+    const known = agent.scanner.knownFile('keeper.txt');
+    expect(known, 'the scanner forgot what it saw').toBeDefined();
+    expect(known!.size).toBe(6);
+    expect(known!.mtime).toBeGreaterThan(0);
+    expect(known!.blobId).toBeTruthy();
+    expect(agent.scanner.knownFile('never-existed.txt')).toBeUndefined();
   });
 });

@@ -702,6 +702,8 @@ export class FsAgent {
    */
   private _restoreTombstoned = 0;
 
+
+
   /** Paths the current {@link restore} could not write because they were held open. */
   private _restoreLocked: string[] = [];
 
@@ -1640,8 +1642,25 @@ export class FsAgent {
 
           // Remember what was put there, so a repeat restore recognises its
           // own work without re-reading the file.
+          //
+          // The mtime recorded is the one the file ENDED UP with, read back
+          // rather than taken from the tree. A tree node carries no mtime —
+          // it is excluded from the content identity (see `FsScanner`) — so
+          // taking it from `meta` recorded `undefined` and this whole shortcut
+          // stopped applying: measured as `wrote 1, left 1 already-correct`
+          // becoming `wrote 2` on a tree where nothing had changed, which on
+          // the production catalogue is 80 GB of needless writes per restore.
+          //
+          // One `stat` against writing the bytes again is not a cost worth
+          // avoiding. It is also the honest value either way: when a peer
+          // DOES send an mtime the `utimes` above has already applied it, so
+          // this reads back what that produced.
+          const written = await stat(filePath).catch(
+            /* v8 ignore next -- @preserve the file was just written successfully */
+            () => undefined,
+          );
           /* v8 ignore else -- @preserve */
-          if (meta.size !== undefined && meta.mtime !== undefined) {
+          if (meta.size !== undefined && written !== undefined) {
             // Bounded. This is a shortcut for recognising this agent's own
             // work, and a shortcut that grows without limit stops being one:
             // it is keyed by absolute path and nothing ever removed an entry,
@@ -1655,7 +1674,7 @@ export class FsAgent {
             this._restoredBlobs.set(filePath, {
               blobId: meta.blobId,
               size: meta.size,
-              mtime: meta.mtime,
+              mtime: written.mtime.getTime(),
             });
           }
         } catch (error) {
@@ -1770,21 +1789,11 @@ export class FsAgent {
     const written = this._restoredBlobs.get(filePath);
     if (written) return written;
     if (!isOwnRoot) return undefined;
-    const scanned = this._scanner.getTreeByPath(relativePath)?.meta as
-      | FsNodeMeta
-      | undefined;
-    if (
-      scanned?.blobId === undefined ||
-      scanned.size === undefined ||
-      scanned.mtime === undefined
-    ) {
-      return undefined;
-    }
-    return {
-      blobId: scanned.blobId,
-      size: scanned.size,
-      mtime: scanned.mtime,
-    };
+    // The scan's own record, not the tree's. A tree node carries no mtime —
+    // it is excluded from the content identity so that refs do not depend on
+    // it (see `FsScanner`) — and this check needs one, so it comes from the
+    // scanner's cache of what it actually saw on disk.
+    return this._scanner.knownFile(relativePath);
   }
 
   /**
@@ -2498,11 +2507,47 @@ export class FsAgent {
             // `tree.rootHash` is that ref: a tree's hash is its content, which
             // is what the store derives too — the startup path already
             // compares the two this way.
+            // Generalised from the narrower `head === tree.rootHash` case
+            // above, because that case was one instance of a wider rule: a
+            // parent is only useful if it names a state SOMEBODY ELSE can be
+            // in, and `_currentRef` need not be one.
+            //
+            // The apply path sets `_currentRef` to the ref this node
+            // re-derives by re-scanning the folder it was just given — and
+            // that is not always the ref it applied. A file node's hash
+            // includes its mtime, so two nodes holding the SAME BYTES derive
+            // different refs whenever the bytes were created independently
+            // rather than restored: the same document saved on two machines, a
+            // seeded fixture, a folder copied twice. Measured on four nodes,
+            // the same `keeper.txt` carried `…104.2852`, `…104.4375` and
+            // `…104.5483`, and which millisecond each truncated to decided the
+            // whole folder's ref.
+            //
+            // Such a ref is PRIVATE: this node derived it and never announced
+            // it, so no peer can be in it. A push naming it as parent has its
+            // deletions refused by everybody — and that is the mechanism
+            // behind `KNOWN-WEAKNESSES.md` §1, the register's
+            // most-reproduced entry. A directory removal is what exposes it,
+            // exactly as the register says: *"a rename or a directory removal
+            // is 'delete everything and re-add' to this system"*, so the
+            // folder must return to a state whose ref still agrees.
+            //
+            // So: descend from the head only when this node ANNOUNCED it.
+            // Otherwise descend from what it last applied, which is a ref its
+            // sender published and peers can therefore be sitting in.
+            //
+            // Measured on 10 runs of the four-node directory deletion: 8 of
+            // 10 with the old rule, 9 of 10 with this one. So it helps and it
+            // does not close §1 — a private ref is still private, and the
+            // merge can still resurrect what one node deleted. What closes it
+            // is taking mtime out of the content identity, so the refs never
+            // diverge in the first place; this rule is what keeps a push
+            // honest for the cases that remain, where a node legitimately
+            // re-derives something else (a tombstoned refusal, a locked file,
+            // an unfetchable blob).
             const head = this._currentRef;
-            const parentRef =
-              head !== undefined && head === tree.rootHash
-                ? (this._lastAppliedRef ?? head)
-                : head;
+            const announced = head !== undefined && head === this._lastSentRef;
+            const parentRef = announced ? head : (this._lastAppliedRef ?? head);
             const previous = await this._ancestryPrevious(
               db,
               treeKey,
@@ -4122,6 +4167,24 @@ export class FsAgent {
             previous,
           });
           this._adoptAppliedRef(connector, treeRef);
+          // A tree ref is supposed to be a SHARED IDENTITY: restore the tree
+          // and the folder re-derives the ref it came as. Everything built on
+          // ancestry assumes it — a receiver prunes only for a sender that
+          // names a state the receiver is in, so a node whose own re-scan
+          // disagrees with what it just applied announces a parent nobody can
+          // be in, and every deletion it ever sends is refused.
+          //
+          // It went unnoticed for exactly as long as nothing said it out loud,
+          // so this says it. Not an error: the folder holds the right BYTES,
+          // and the agent recovers by converging on content. It is the warning
+          // that a node has left the ancestry conversation.
+          if (postRestoreRef !== treeRef) {
+            console.warn(
+              `[FsAgent] applied ${treeRef.slice(0, 8)}… but re-derived ` +
+                `${postRestoreRef.slice(0, 8)}… — this node's ancestry no ` +
+                `longer matches its peers'`,
+            );
+          }
           this._currentRef = postRestoreRef;
           this._persistCurrentRef(postRestoreRef);
 

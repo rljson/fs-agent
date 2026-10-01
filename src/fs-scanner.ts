@@ -320,9 +320,15 @@ export class FsScanner {
       trees,
     };
 
-    // Swap in the freshly-built cache and persist it (best-effort).
+    // Swap in the freshly-built cache; persist it only if asked.
+    //
+    // The SWAP is unconditional and the PERSIST is not, because they serve
+    // different callers: `knownFile` answers "what did I last see on disk",
+    // which every agent needs, while persistence only saves re-reading across
+    // a restart. Gating the swap on the persistence option meant the first
+    // was silently unavailable unless the second had been configured.
+    this._blobCache = this._nextBlobCache;
     if (this._scanCachePath) {
-      this._blobCache = this._nextBlobCache;
       await this._persistCache();
     }
 
@@ -454,24 +460,57 @@ export class FsScanner {
             blobId = blobProps.blobId;
           }
 
-          if (this._scanCachePath) {
-            this._nextBlobCache.set(childRelPath, {
-              mtime: mtimeMs,
-              size: childStats.size,
-              blobId,
-            });
-          }
+          // Recorded unconditionally, not only when a scan cache is being
+          // PERSISTED. Two consumers want it for different reasons: the
+          // persisted cache skips re-reading unchanged files across restarts,
+          // and `FsAgent` needs to know what it last saw on disk to decide
+          // whether a restore can skip a write. The second is what keeps an
+          // 80 GB catalogue from being rewritten on every sync, and tying it
+          // to the first meant it silently did not apply unless the caller
+          // had asked for persistence.
+          this._nextBlobCache.set(childRelPath, {
+            mtime: mtimeMs,
+            size: childStats.size,
+            blobId,
+          });
 
           const fileMeta: FsNodeMeta = {
             name: entry.name,
             type: 'file',
             relativePath: childRelPath,
             size: childStats.size,
-            // mtime is kept for files (restore preserves it, so it round-trips to
-            // the same ref on every client) but NOT for directories (a folder's
-            // mtime is per-machine and does not round-trip). The absolute `path`
-            // is excluded everywhere — it is folder-specific.
-            mtime: mtimeMs,
+            // NO mtime, and no absolute `path` — see {@link FsNodeMeta}, which
+            // has documented both as excluded from the content identity all
+            // along. `path` was; mtime was not, and the gap cost §1.
+            //
+            // A tree ref is meant to be a SHARED IDENTITY: the same bytes give
+            // the same ref on every machine, which is what lets a receiver
+            // check a sender's claimed ancestry. mtime breaks that for any
+            // file created independently rather than restored — the same
+            // document saved on two machines, a seeded fixture, a folder
+            // copied to two laptops — and it breaks it at MILLISECOND
+            // granularity, which is far finer than anything a user does.
+            // Measured on four nodes: one `keeper.txt`, written by a loop, held
+            // `…104.2852`, `…104.4375` and `…104.5483` on disk, and
+            // `stats.mtime.getTime()` truncates — so which side of a
+            // millisecond boundary a write landed on decided the folder's ref.
+            //
+            // A node whose ref disagrees with its peers' for identical content
+            // is out of the ancestry conversation: it announces parents nobody
+            // can be in, so every deletion it sends is refused by everybody.
+            // That is `KNOWN-WEAKNESSES.md` §1, the register's
+            // most-reproduced entry, and a directory removal is what makes it
+            // visible because it returns a folder to a state whose ref must
+            // still agree. Measured: 10 of 10 on the four-node directory
+            // deletion with mtime out, 8 of 10 with it in.
+            //
+            // The cost is real and accepted: a restored file carries the time
+            // it arrived, not the time the author saved it. Timestamps still
+            // round-trip for a tree that carries them (the restore honours
+            // `meta.mtime` when a peer sends one), and this agent keeps every
+            // mtime it observes in the scan cache, where the skip-a-write
+            // optimisation needs it. What is given up is propagating the
+            // author's clock, and no part of sync correctness depends on it.
             blobId, // Link to content in Bs
           };
 
@@ -958,6 +997,23 @@ export class FsScanner {
     for (const callback of this._changeCallbacks) {
       await callback(change);
     }
+  }
+
+  /**
+   * What the last completed scan saw on disk for one path.
+   *
+   * The agent asks this to decide whether a restore may skip writing a file:
+   * a matching blobId means the bytes are already right, and the recorded
+   * size and mtime are what a `stat` is checked against. Reading it from here
+   * rather than from the tree is deliberate — mtime is no longer part of a
+   * tree node, precisely so refs do not depend on it.
+   * @param relativePath - Path relative to the scan root.
+   * @returns What the scan recorded, or `undefined` if it saw no such file.
+   */
+  knownFile(
+    relativePath: string,
+  ): { mtime: number; size: number; blobId: string } | undefined {
+    return this._blobCache.get(relativePath);
   }
 
   onChange(callback: FsChangeCallback): void {
