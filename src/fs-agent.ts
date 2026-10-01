@@ -3086,12 +3086,16 @@ export class FsAgent {
         return undefined;
       }
       return { treeRef: entry.treeRef, entry };
+      /* v8 ignore start -- @preserve a chain read that THROWS, rather than
+         missing a row, means the store itself is unavailable — and this node
+         must stay deaf to that head rather than stop syncing. Not provoked by
+         a test because provoking it means breaking the store under a live
+         agent, which proves less than the one-line guarantee it makes. */
     } catch (err) {
-      /* v8 ignore next -- @preserve an unreadable chain must not deafen us */
       this._writeSyncError('chain/resolveHead', err);
-      /* v8 ignore next -- @preserve */
       return undefined;
     }
+    /* v8 ignore stop -- @preserve */
   }
 
   /**
@@ -3135,12 +3139,14 @@ export class FsAgent {
         treeRef: resolved.treeRef,
         reachability: await this._chain.classify(ourHead, entry.head),
       };
+      /* v8 ignore start -- @preserve as above: a THROWN walk leaves the
+         decision without the chain's answer, which is exactly the case the
+         heuristics are kept for. */
     } catch (err) {
-      /* v8 ignore next -- @preserve a failed walk falls back to the heuristics */
       this._writeSyncError('chain/classify', err);
-      /* v8 ignore next -- @preserve */
       return { treeRef: resolved.treeRef };
     }
+    /* v8 ignore stop -- @preserve */
   }
 
   /**

@@ -307,10 +307,25 @@ describe('fs mesh', () => {
     await mesh.node('B').write('meanwhile.txt', 'meanwhile');
     await mesh.node('B').write('more/one.txt', '1');
     await mesh.node('B').write('more/two.txt', '2');
-    // Well past `MESH_ANTI_ENTROPY.graceMs` (500 ms) and several backoffs, so
-    // the repair has demonstrably run rather than possibly run.
-    await sleep(8_000);
-    expect(await mesh.node('A').files()).toEqual(['keeper.txt']);
+    // Waited FOR, not slept through. The eight-second sleep this replaces was
+    // long enough on an idle machine and not under full-suite load, where the
+    // same shape in `fs-mesh-additive.spec.ts` passed 8 of 8 alone and failed
+    // in the suite: the test was measuring its own setup rather than the
+    // behaviour. A condition is true when it is true.
+    expect(await mesh.node('A').settlesOn(['keeper.txt'])).toEqual([
+      'keeper.txt',
+    ]);
+    // And the fleet has demonstrably moved on, so A cannot simply
+    // fast-forward everyone onto its deletion when it returns.
+    expect(
+      await mesh.node('B').settlesOn([
+        'doomed.txt',
+        'keeper.txt',
+        'meanwhile.txt',
+        'more/one.txt',
+        'more/two.txt',
+      ]),
+    ).toContain('meanwhile.txt');
 
     mesh.node('A').heal();
 

@@ -214,7 +214,6 @@ export function antiEntropyDecision(
       // on a truncated walk is how a node decides it is ahead of a peer it is
       // actually behind.
       return 'blocked';
-    /* v8 ignore next -- @preserve `undefined` falls through to the heuristics */
     default:
       break;
   }

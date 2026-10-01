@@ -34,7 +34,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe('additive reconciliation', () => {
   let mesh: FsMesh | undefined;
@@ -65,7 +64,12 @@ describe('additive reconciliation', () => {
     mesh.node('A').cut();
     await mesh.node('A').write('from-a.txt', 'a');
     await mesh.node('B').write('from-b.txt', 'b');
-    await sleep(3_000);
+    // Waited FOR, not slept through: a fixed delay encodes how fast the
+    // machine is, and under load it stops being long enough.
+    expect(await mesh.node('A').settlesOn(['from-a.txt', 'seed.txt'])).toEqual([
+      'from-a.txt',
+      'seed.txt',
+    ]);
     mesh.node('A').heal();
 
     const result = await mesh.converged({ timeoutMs: 60_000 });
@@ -96,7 +100,9 @@ describe('additive reconciliation', () => {
     mesh.node('A').cut();
     await mesh.node('A').del('doomed.txt');
     await mesh.node('B').write('meanwhile.txt', 'meanwhile');
-    await sleep(3_000);
+    expect(await mesh.node('A').settlesOn(['keeper.txt'])).toEqual([
+      'keeper.txt',
+    ]);
     mesh.node('A').heal();
 
     const result = await mesh.converged({
@@ -132,7 +138,14 @@ describe('additive reconciliation', () => {
     await mesh.node('A').del('doomed.txt');
     await mesh.node('A').write('from-a.txt', 'a');
     await mesh.node('B').write('from-b.txt', 'b');
-    await sleep(3_000);
+    // A3 is the one that caught this: 8 of 8 alone, failing in the full suite,
+    // because three seconds was not long enough under contention for A to
+    // finish noticing its own deletion before it was healed. The test was
+    // measuring its own setup.
+    expect(await mesh.node('A').settlesOn(['from-a.txt', 'seed.txt'])).toEqual([
+      'from-a.txt',
+      'seed.txt',
+    ]);
     mesh.node('A').heal();
 
     const result = await mesh.converged({

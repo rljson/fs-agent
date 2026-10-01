@@ -159,6 +159,20 @@ export interface FsMeshNode {
    * @returns Sorted, `/`-separated paths relative to this node's folder.
    */
   files(): Promise<string[]>;
+  /**
+   * Waits until this node's file set is exactly `paths`.
+   *
+   * **Use this instead of a sleep to set a scenario up.** A fixed wait encodes
+   * an assumption about how fast the machine is, and under full-suite load
+   * that assumption fails: A3 passed 8 of 8 alone and failed in the suite,
+   * because a three-second partition was not long enough for a node to finish
+   * noticing its own deletion before it was healed. The test then measures the
+   * setup rather than the behaviour.
+   * @param paths - The expected file set, sorted.
+   * @param timeoutMs - How long to allow. Default 20 000.
+   * @returns What the node held when it gave up, so a failure reads.
+   */
+  settlesOn(paths: string[], timeoutMs?: number): Promise<string[]>;
 }
 
 // .............................................................................
@@ -365,6 +379,16 @@ export const buildFsMesh = async (opts: {
         }
       },
       files: () => listFiles(folder),
+      settlesOn: async (paths, timeoutMs = 20_000) => {
+        const want = JSON.stringify(paths);
+        const deadline = Date.now() + timeoutMs;
+        let seen = await listFiles(folder);
+        while (JSON.stringify(seen) !== want && Date.now() < deadline) {
+          await sleep(100);
+          seen = await listFiles(folder);
+        }
+        return seen;
+      },
     });
   }
 
