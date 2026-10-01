@@ -658,6 +658,20 @@ export class FsAgent {
    */
   private _restorePruned = 0;
 
+  /**
+   * Files this restore refused to re-create because they are tombstoned.
+   *
+   * Counted and reported, because the alternative is a guard whose work is
+   * invisible. The same mistake was made once already with `_restorePruned`:
+   * reported before the prune that sets it, so every restore that deleted
+   * files announced itself as one that had deleted none — *"a log that cannot
+   * report an event is worse than no log, because it reads as evidence of
+   * absence"*. A tombstone that silently stops a write is exactly that shape,
+   * and when a deleted file reappears anyway this count is the first thing
+   * worth knowing.
+   */
+  private _restoreTombstoned = 0;
+
   /** Paths the current {@link restore} could not write because they were held open. */
   private _restoreLocked: string[] = [];
 
@@ -1320,6 +1334,7 @@ export class FsAgent {
     this._restoreWritten = 0;
     this._restoreSkipped = 0;
     this._restorePruned = 0;
+    this._restoreTombstoned = 0;
     this._restoreLocked = [];
     this._restoreUnavailable = [];
     await this._restoreTree(
@@ -1388,7 +1403,10 @@ export class FsAgent {
         `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
           `${this._restoreSkipped} already-correct file` +
           `${this._restoreSkipped === 1 ? '' : 's'} untouched` +
-          (this._restorePruned > 0 ? `, DELETED ${this._restorePruned}` : ''),
+          (this._restorePruned > 0 ? `, DELETED ${this._restorePruned}` : '') +
+          (this._restoreTombstoned > 0
+            ? `, REFUSED ${this._restoreTombstoned} tombstoned`
+            : ''),
       );
     }
 
@@ -1513,6 +1531,7 @@ export class FsAgent {
         // performed it.
         if (this._pendingDeletes.has(filePath)) {
           this._restoreSkipped++;
+          this._restoreTombstoned++;
           return;
         }
 
@@ -3084,6 +3103,25 @@ export class FsAgent {
   }
 
   /**
+   * Gathers the deletions behind a plain TREE REF, via its chain entry.
+   *
+   * The bridge from an unmarked announcement to the chain — the hub's
+   * announcements and an older peer's both arrive this way. Best-effort and
+   * never awaited by the apply path: see the call site.
+   * @param treeRef - The state announced, unmarked.
+   */
+  private async _collectRemovalsForTreeRef(treeRef: string): Promise<void> {
+    if (!this._chain) return;
+    try {
+      const entry = await this._chain.entryForTreeRef(treeRef);
+      if (entry) await this._collectIncomingRemovals(entry);
+    } catch (err) {
+      /* v8 ignore next -- @preserve best-effort; the apply proceeds regardless */
+      this._writeSyncError('chain/removalsForTreeRef', err);
+    }
+  }
+
+  /**
    * Gathers the deletions between a peer's head and a state this node knows.
    *
    * NOT just the head's own `removed` list. A removal is stated once, in the
@@ -4165,6 +4203,25 @@ export class FsAgent {
       // Only a marked head needs a read, and only that path becomes async.
       if (!treeRef.startsWith(CHAIN_HEAD_PREFIX)) {
         schedule(treeRef);
+        // AND look its chain entry up anyway, in parallel.
+        //
+        // **The hub's own announcements are unmarked**, and that is where most
+        // refs come from after a partition heals: the bootstrap and the state
+        // beacon advertise from the server's TREES table, not from the ref log
+        // it relayed. So a plain tree ref is not only an older peer — it is the
+        // hub, every time, and a chain consulted only on `~H~` is a chain the
+        // hub routes around.
+        //
+        // Traced on a failing T4: the marked heads stopped arriving once the
+        // partition healed, every walk returned `removed=[]`, and the peer
+        // deletion path never fired ONCE in the scenario it was built for.
+        //
+        // Scheduled FIRST and synchronously, then the lookup — because a query
+        // is a peer read and awaiting one before queueing an apply is how a
+        // late joiner's bootstrap was lost. The apply is debounced, so the
+        // removals have that window to arrive; if they miss it, the next
+        // announcement carries them.
+        void this._collectRemovalsForTreeRef(treeRef);
         return Promise.resolve();
       }
       return this._resolveAnnouncement(treeRef).then((resolved) => {
