@@ -80,11 +80,13 @@ import { dirname, join, relative, sep } from 'path';
 import {
   AGENT_STATE_FILE,
   ATOMIC_TMP_PREFIX,
+  CONFLICT_LOG_FILE,
   FsAgent,
   SYNC_ERROR_FILE,
 } from '../../src/fs-agent.ts';
 
 import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
+import type { FsConflictReport } from '../../src/fs-conflict-resolver.ts';
 
 // .............................................................................
 /** The sync configuration a CARAT One Client ships (`sl-node.ts`). */
@@ -108,7 +110,12 @@ export const MESH_ANTI_ENTROPY: AntiEntropyOptions = {
 };
 
 /** Files the agent keeps beside the content, which are nobody else's business. */
-const BOOKKEEPING = [SYNC_ERROR_FILE, ATOMIC_TMP_PREFIX, AGENT_STATE_FILE];
+const BOOKKEEPING = [
+  SYNC_ERROR_FILE,
+  ATOMIC_TMP_PREFIX,
+  AGENT_STATE_FILE,
+  CONFLICT_LOG_FILE,
+];
 
 const isBookkeeping = (name: string): boolean =>
   BOOKKEEPING.some((prefix) => name === prefix || name.startsWith(prefix));
@@ -223,6 +230,12 @@ export interface FsMesh {
    * @returns What it concluded — never throws, so a caller can assert on the
    *   snapshot and read the disagreement rather than a timeout message.
    */
+  /**
+   * Every conflict any node in this mesh reported, in the order reported.
+   *
+   * Live array, appended to as the mesh runs.
+   */
+  readonly conflicts: readonly FsConflictReport[];
   converged(opts?: {
     stableMs?: number;
     timeoutMs?: number;
@@ -260,6 +273,7 @@ export const buildFsMesh = async (opts: {
 }): Promise<FsMesh> => {
   const treeKey = opts.treeKey ?? 'sharedTree';
   const names = opts.names ?? ['A', 'B'];
+  const conflicts: FsConflictReport[] = [];
   const route = Route.fromFlat(`/${treeKey}`);
   const treeCfg = createTreesTableCfg(treeKey);
 
@@ -331,6 +345,12 @@ export const buildFsMesh = async (opts: {
       // DAG, the inline three-way merge and half the prune rule never run, so
       // a mesh without it tests a code path no client ships.
       resolveConflicts: true,
+      // Collected so a test can assert the agent SAID a conflict happened,
+      // not just that a renamed file turned up. Resolving one used to be
+      // silent, and silence is the defect.
+      onConflict: (reports) => {
+        conflicts.push(...reports);
+      },
       antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
       timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
       announceTreeRef: opts.oldWireFormat?.includes(name) ?? false,
@@ -469,7 +489,17 @@ export const buildFsMesh = async (opts: {
     await rm(opts.root, { recursive: true, force: true, maxRetries: 10 });
   };
 
-  return { nodes, server, treeKey, route, node, snapshot, converged, stop };
+  return {
+    nodes,
+    server,
+    treeKey,
+    route,
+    node,
+    snapshot,
+    converged,
+    stop,
+    conflicts,
+  };
 };
 
 // .............................................................................

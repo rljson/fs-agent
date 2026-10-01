@@ -21,10 +21,11 @@
 // wrote down exactly what they saw.
 // .............................................................................
 
-import { chmod, mkdir, rm, stat, writeFile } from 'fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { CONFLICT_LOG_FILE } from '../../src/fs-agent.ts';
 import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
 
 describe('field defects, reduced off-lab', () => {
@@ -582,4 +583,104 @@ describe('field defects, reduced off-lab', () => {
       expect(result.snapshot[name], `residue on ${name}`).toEqual(['seed.txt']);
     }
   }, 300_000);
+  // ...........................................................................
+  // F10 — the same-file conflict, end to end, which NOTHING covered.
+  //
+  // `fs-conflict-resolver.spec.ts` has 26 tests on the merge: the winner
+  // order, the copy naming, every row of the merge table, a fork collapsing.
+  // All of them use in-memory fakes. Not one of them proved that two real
+  // machines editing one real file end up with BOTH versions on real disk —
+  // and that is the claim the whole design rests on, because the alternative
+  // is one person's work being silently thrown away.
+  //
+  // Running it is how two defects were found that every unit test had agreed
+  // with. The copy came out named
+  //
+  //   shared (conflicted copy db.insertTrees 1970-01-01 000000).txt
+  //
+  // `db.insertTrees` being the DB's name for its own operation rather than a
+  // machine, and the epoch being `clientTimestamp` never set. Those are the
+  // two PRIMARY keys the winner is chosen by, so with both dead the decision
+  // fell through to whichever content hash sorted higher — converging, but
+  // unrelated to who edited last. The unit tests passed throughout; one of
+  // them even had the resulting double space baked into a string literal.
+  //
+  // So this asserts all four things that have to hold at once: both versions
+  // survive, every node agrees which is which, the name is true, and somebody
+  // was TOLD.
+  // ...........................................................................
+  it('F10: two nodes editing one file keep both versions, and say so', async () => {
+    mesh = await buildFsMesh({
+      root: root('samefile'),
+      names: ['A', 'B'],
+      seed: async (folders) => {
+        for (const folder of Object.values(folders)) {
+          await writeFile(join(folder, 'shared.txt'), 'base');
+        }
+      },
+    });
+    expect((await mesh.converged()).converged).toBe(true);
+
+    await Promise.all([
+      mesh.node('A').write('shared.txt', 'FROM-A'),
+      mesh.node('B').write('shared.txt', 'FROM-B'),
+    ]);
+
+    const result = await mesh.converged({
+      timeoutMs: 90_000,
+      stableMs: 5_000,
+    });
+    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+
+    // 1. Both nodes hold exactly two files: the live one and the copy.
+    const files = result.snapshot['A'];
+    expect(files.length, JSON.stringify(result.snapshot)).toBe(2);
+    expect(result.snapshot['B']).toEqual(files);
+    const copyName = files.find((f) => f !== 'shared.txt');
+    expect(copyName, 'no conflict copy was made').toBeDefined();
+
+    // 2. Both VERSIONS survive — the whole point. Read as a set, because
+    //    which one keeps the original path is the resolver's business.
+    const held = new Set<string | undefined>();
+    for (const name of ['A', 'B']) {
+      held.add(await mesh.node(name).read('shared.txt'));
+      held.add(await mesh.node(name).read(copyName!));
+    }
+    expect(held, `versions on disk: ${[...held].join(', ')}`).toEqual(
+      new Set(['FROM-A', 'FROM-B']),
+    );
+
+    // 3. And both nodes agree which is live, or the folders have not really
+    //    converged whatever their file lists say.
+    expect(await mesh.node('A').read('shared.txt')).toBe(
+      await mesh.node('B').read('shared.txt'),
+    );
+
+    // 4. The name is true: no DB operation masquerading as a machine, no
+    //    1970, and no double space where an identity would have gone.
+    expect(copyName).not.toContain('db.insertTrees');
+    expect(copyName).not.toContain('1970');
+    expect(copyName).not.toContain('copy  ');
+    expect(copyName).toMatch(
+      /^shared \(conflicted copy (.+ )?\d{4}-\d{2}-\d{2} \d{6}\)\.txt$/,
+    );
+
+    // 5. Somebody was told. Both channels, because they serve different
+    //    readers: the callback a UI that is running, the file one that starts
+    //    later.
+    const reported = mesh.conflicts.filter((c) => c.path === 'shared.txt');
+    expect(reported.length, 'the conflict was resolved in silence').toBeGreaterThan(0);
+    expect(reported[0].copyPath).toBe(copyName);
+    expect(reported[0].winnerRef).not.toBe(reported[0].loserRef);
+    expect(reported[0].resolvedAt).toBeGreaterThan(0);
+
+    const logged: unknown = JSON.parse(
+      await readFile(join(mesh.node('A').folder, CONFLICT_LOG_FILE), 'utf-8'),
+    );
+    expect(Array.isArray(logged)).toBe(true);
+    expect(
+      (logged as { path: string }[]).some((e) => e.path === 'shared.txt'),
+      'nothing was written where a UI could find it after a restart',
+    ).toBe(true);
+  }, 180_000);
 });

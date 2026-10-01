@@ -14,6 +14,7 @@ import {
   conflictCopyName,
   ConflictResolverDeps,
   ContentMap,
+  DB_OPERATION_ORIGIN,
   decideWinner,
   DIR_MARKER,
   findCommonAncestor,
@@ -21,6 +22,8 @@ import {
   FsConflictResolver,
   fsTreeToContentMap,
   threeWayMerge,
+  tipTimestamp,
+  usableClientId,
 } from '../src/fs-conflict-resolver.ts';
 import type { FsTree } from '../src/fs-scanner.ts';
 
@@ -104,6 +107,134 @@ describe('compareTips / decideWinner', () => {
     expect(
       compareTips(tip('a', 'a', 1, 'X'), tip('a', 'a', 1, 'Y')),
     ).toBe(0);
+  });
+
+  // .........................................................................
+  // The chain stamp is the PRIMARY key, and it had to become one.
+  //
+  // Measured end to end before this existed: two nodes editing one file
+  // produced `shared (conflicted copy db.insertTrees 1970-01-01 000000).txt`.
+  // `db.insertTrees` is the DB's label for its own operation, and the epoch is
+  // `clientTimestamp` never being set — `Db.insertTrees` accepts neither, so
+  // no caller can supply them. With `timestamp` 0 and `clientId` identical on
+  // every node, both top comparisons collapsed and the winner was whichever
+  // CONTENT HASH sorted higher. Deterministic, so the fleet converged; nothing
+  // to do with who edited last, which is what the design says decides.
+  // .........................................................................
+  it('orders by the chain timeId before anything else', () => {
+    // Exactly the dead state: equal timestamps, equal ids. Only the chain
+    // stamp separates them, and the ref is set so that the OLD rule would
+    // have picked the other one.
+    const older = {
+      chainTimeId: '1000:aaa',
+      timeId: 'x',
+      ref: 'zzz',
+      clientId: 'db.insertTrees',
+      timestamp: 0,
+    };
+    const newer = {
+      chainTimeId: '2000:aaa',
+      timeId: 'y',
+      ref: 'aaa',
+      clientId: 'db.insertTrees',
+      timestamp: 0,
+    };
+    expect(compareTips(newer, older)).toBeGreaterThan(0);
+    expect(compareTips(older, newer)).toBeLessThan(0);
+    expect(decideWinner(older, newer).winner).toBe(newer);
+    // And the old rule really would have disagreed, so this test discriminates.
+    expect(older.ref > newer.ref).toBe(true);
+  });
+
+  it('separates two edits made in the same millisecond', () => {
+    // `<millis>:<nanoid>`: the tail is what makes the order total, so two
+    // people saving inside one millisecond still get one answer — and the
+    // same answer on every node.
+    const a = {
+      chainTimeId: '1000:aaa',
+      timeId: 'x',
+      ref: 'r1',
+      clientId: '',
+      timestamp: 0,
+    };
+    const b = {
+      chainTimeId: '1000:bbb',
+      timeId: 'y',
+      ref: 'r2',
+      clientId: '',
+      timestamp: 0,
+    };
+    expect(compareTips(b, a)).toBeGreaterThan(0);
+    expect(compareTips(a, b)).toBeLessThan(0);
+  });
+
+  it('falls back to the old keys when a tip has no chain entry', () => {
+    // A peer on an older build has no chain entry, and must be ordered
+    // exactly as before rather than treated as oldest or newest.
+    const withChain = {
+      chainTimeId: '5000:aaa',
+      timeId: 'x',
+      ref: 'r1',
+      clientId: 'c1',
+      timestamp: 10,
+    };
+    const without = {
+      timeId: 'y',
+      ref: 'r2',
+      clientId: 'c1',
+      timestamp: 20,
+    };
+    // Not comparable on the chain → the greater timestamp wins, as it used to.
+    expect(compareTips(without, withChain)).toBeGreaterThan(0);
+  });
+
+  // .........................................................................
+  it('refuses to print the DB operation name as a machine', () => {
+    // A name in a filename a user has to read must be true or absent.
+    expect(usableClientId(DB_OPERATION_ORIGIN)).toBe('');
+    expect(usableClientId(undefined)).toBe('');
+    expect(usableClientId('')).toBe('');
+    expect(usableClientId('NB-2505')).toBe('NB-2505');
+  });
+
+  it('dates a copy from the chain stamp, not from an unset timestamp', () => {
+    // The millisecond half of `<millis>:<nanoid>` is the authoring node's
+    // clock, and the only real time available — without it a copy was dated
+    // 1970.
+    expect(
+      tipTimestamp({
+        chainTimeId: '1790000000000:abc',
+        timeId: 'x',
+        ref: 'r',
+        clientId: '',
+        timestamp: 0,
+      }),
+    ).toBe(1790000000000);
+    // No chain entry → whatever InsertHistory had, unchanged.
+    expect(
+      tipTimestamp({ timeId: 'x', ref: 'r', clientId: '', timestamp: 42 }),
+    ).toBe(42);
+    // A malformed stamp must not be read as a date.
+    expect(
+      tipTimestamp({
+        chainTimeId: 'nonsense',
+        timeId: 'x',
+        ref: 'r',
+        clientId: '',
+        timestamp: 7,
+      }),
+    ).toBe(7);
+  });
+
+  // .........................................................................
+  it('names a copy without a gap where the machine would go', () => {
+    const taken = new Set<string>();
+    expect(conflictCopyName('doc.txt', '', 1790000000000, taken)).toBe(
+      'doc (conflicted copy 2026-09-21 141320).txt',
+    );
+    expect(conflictCopyName('doc.txt', 'NB-2505', 1790000000000, taken)).toBe(
+      'doc (conflicted copy NB-2505 2026-09-21 141320).txt',
+    );
   });
 
   it('decideWinner picks the higher-ranked tip on either side', () => {
@@ -271,6 +402,10 @@ describe('threeWayMerge', () => {
       {
         path: 'conflict (conflicted copy LOSER 2026-06-18 000000)',
         blobId: 'cB',
+        // Carried explicitly rather than un-parsed back out of the name,
+        // which breaks the moment a real document is itself called
+        // `report (conflicted copy …).txt`.
+        originalPath: 'conflict',
       },
     ]);
   });
@@ -483,7 +618,12 @@ describe('FsConflictResolver', () => {
     expect(h.disk.get('doc.txt')).toBe('vC');
     expect(h.disk.get('onlyB.txt')).toBe('b0'); // written via merge delta
     expect(h.disk.get('onlyC.txt')).toBe('c0'); // from winner restore
-    const copyName = 'doc (conflicted copy  1970-01-01 000000).txt';
+    // No client id, so no gap where one would go. The double space this
+    // literal used to contain was the defect showing through the test: the
+    // id was `db.insertTrees` in production — the DB's name for its own
+    // operation, not a machine — and empty in this fake, and neither case
+    // was ever looked at. See `usableClientId`.
+    const copyName = 'doc (conflicted copy 1970-01-01 000000).txt';
     expect(h.disk.get(copyName)).toBe('vB');
 
     // Merge revision references BOTH tips (loser first by identity order).

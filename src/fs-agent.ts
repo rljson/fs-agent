@@ -32,6 +32,7 @@ import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
   ConflictResolverDeps,
   FsConflictResolver,
+  type FsConflictReport,
 } from './fs-conflict-resolver.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import {
@@ -155,6 +156,21 @@ export interface FsAgentOptions {
    */
   resolveConflicts?: boolean;
   /**
+   * Called when a same-file conflict has been resolved, with one entry per
+   * conflicting path.
+   *
+   * This is the only way to learn that it happened. Before it existed,
+   * resolving a conflict renamed a file and said nothing — the user's whole
+   * evidence was an unexplained `… (conflicted copy …)` appearing in a folder.
+   * Nothing is lost either way; what was missing is anybody being told.
+   *
+   * Not an error channel: two people editing one document at once is ordinary,
+   * both versions are kept, and the folder converges. Hosts that want it after
+   * a restart should read {@link CONFLICT_LOG_FILE}, which this agent writes
+   * regardless of whether a callback is given.
+   */
+  onConflict?: (reports: FsConflictReport[]) => void;
+  /**
    * Repair a divergence from the hub that no message is going to fix — a
    * push the hub never received, a forward this node never received, an
    * apply that gave up. Driven by the hub's periodic announcement: the state
@@ -243,6 +259,30 @@ export const DISCONNECT_PAUSE_MAX_MS = 30_000;
 
 /** Filename for sync error log written to the sync folder */
 export const SYNC_ERROR_FILE = '.sync-errors.log';
+
+/**
+ * Where resolved same-file conflicts are recorded, newest last.
+ *
+ * Its own file rather than a line in `.fsagent-state.json`, because that file
+ * is rewritten WHOLE on every deletion — appending a growing list to it would
+ * make deleting the next file slower in proportion to how many conflicts the
+ * folder has ever had, which is the cost {@link TOMBSTONE_LOG_MAX} exists to
+ * bound.
+ *
+ * And JSON rather than the free text of {@link SYNC_ERROR_FILE}, because this
+ * is meant to be READ by a UI, not grepped by a person.
+ */
+export const CONFLICT_LOG_FILE = '.fsagent-conflicts.json';
+
+/**
+ * How many resolved conflicts the log keeps.
+ *
+ * Small on purpose. This is a notification surface, not an audit trail: what a
+ * user needs is "here is what recently happened to your documents", and a
+ * thousand entries answer a question nobody asked while making the file
+ * expensive to write.
+ */
+export const CONFLICT_LOG_MAX = 200;
 
 /**
  * Filename prefix for the staging files used by atomic writes. The scanner
@@ -723,6 +763,9 @@ export class FsAgent {
     { blobId: string; size: number; mtime: number }
   >();
   private _timeouts: Required<TimeoutConfig>;
+  /** Told when a same-file conflict was resolved. See `onConflict`. */
+  private readonly _onConflict?: (reports: FsConflictReport[]) => void;
+
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
 
@@ -749,6 +792,7 @@ export class FsAgent {
     this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
+    this._onConflict = options.onConflict;
     this._announceTreeRef = options.announceTreeRef ?? false;
     // `announceTreeRef` means "speak the build before this one", and that
     // build has no bucket protocol. An explicit `bucketSync: true` still wins,
@@ -763,6 +807,10 @@ export class FsAgent {
         SYNC_ERROR_FILE,
         ATOMIC_TMP_PREFIX,
         AGENT_STATE_FILE,
+        // Or the notification becomes content: every conflict would write a
+        // file inside the synced folder, which is a change, which propagates,
+        // which every peer then rewrites with its own copy of the log.
+        CONFLICT_LOG_FILE,
       ],
       bs: this._bs,
     });
@@ -964,6 +1012,50 @@ export class FsAgent {
       return typeof ref === 'string' && ref.length > 0 ? ref : undefined;
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * Records resolved conflicts and tells the host.
+   *
+   * Both, not either: the callback is for a UI that is running now, the file is
+   * for one that starts later. A conflict the user never hears about is the
+   * thing this exists to stop, so it does not depend on anyone having
+   * subscribed.
+   *
+   * The whole file is rewritten rather than appended, because it has to stay
+   * valid JSON and bounded. At {@link CONFLICT_LOG_MAX} entries that is a few
+   * tens of kilobytes, and conflicts are rare — unlike deletions, which is why
+   * the tombstone log made the opposite choice.
+   * @param reports - What the resolver resolved, one entry per path.
+   */
+  private _recordConflicts(reports: readonly FsConflictReport[]): void {
+    /* v8 ignore next -- @preserve the resolver never reports an empty list */
+    if (reports.length === 0) return;
+    try {
+      const file = join(this._rootPath, CONFLICT_LOG_FILE);
+      let existing: FsConflictReport[] = [];
+      if (existsSync(file)) {
+        const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'));
+        if (Array.isArray(parsed)) existing = parsed as FsConflictReport[];
+      }
+      const kept = [...existing, ...reports].slice(-CONFLICT_LOG_MAX);
+      writeFileSync(file, JSON.stringify(kept, null, 1), 'utf-8');
+    } catch (err) {
+      // A notification that cannot be filed must not take the merge with it.
+      this._writeSyncError('conflicts/record', err);
+    }
+    for (const report of reports) {
+      console.warn(
+        `[FsAgent] CONFLICT on "${report.path}": kept both — the other ` +
+          `version is at "${report.copyPath}"`,
+      );
+    }
+    try {
+      this._onConflict?.(reports as FsConflictReport[]);
+    } catch (err) {
+      // A host's listener throwing is the host's problem, not the merge's.
+      this._writeSyncError('conflicts/onConflict', err);
     }
   }
 
@@ -3618,6 +3710,28 @@ export class FsAgent {
         return rows as InsertHistoryRow<string>[];
       },
       getRefOfTimeId: (table, timeId) => db.getRefOfTimeId(table, timeId),
+      // The chain's stamp for a branch tip, which is what decides a conflict.
+      //
+      // It has to come from here rather than from InsertHistory because
+      // `Db.insertTrees` writes its own operation name as the row's `origin`
+      // and never sets `clientTimestamp` — so the two keys the resolver used
+      // to order by were a constant and a zero on every node, and the winner
+      // fell through to a content-hash comparison. See
+      // `BranchTip.chainTimeId`.
+      //
+      // Swallowed on failure: an unanswerable stamp orders as "not
+      // comparable" and the resolver falls back, which is strictly better
+      // than failing a merge.
+      onConflicts: (reports) => this._recordConflicts(reports),
+      chainTimeIdOfRef: async (treeRef) => {
+        await this._ensureChain(db, treeKey);
+        return (
+          await this._chain?.entryForTreeRef(treeRef).catch((err) => {
+            this._writeSyncError('chain/timeIdOfRef', err);
+            return undefined;
+          })
+        )?.timeId;
+      },
       fetchTree: (rootRef) => this._fetchTreeFromDb(db, treeKey, rootRef),
       getBlobContent: (blobId) => this._adapter.getFileContent(blobId),
       restoreTree: (tree) =>
@@ -3706,6 +3820,44 @@ export class FsAgent {
     // A no-op on a first start, and cheap when it is not: a redelivered ref
     // whose state the folder already holds costs one content comparison.
     connector.resetReceived?.();
+
+    // Said once, loudly, because the alternative is finding out from a user
+    // whose file disappeared.
+    //
+    // Without `causalOrdering` nothing on the wire says what a sender had seen
+    // when it spoke, so a tree that simply predates this node's newest write
+    // is indistinguishable from one deleting it. The prune rule has a
+    // deliberate escape hatch for that case — judging silence as "has not seen
+    // my state" refused every deletion across twenty tests — and the hatch is
+    // where `KNOWN-WEAKNESSES.md` §3 lives: *"two people save different files
+    // at the same moment on different machines, one file disappears, and the
+    // node that lost it is the one that created it"*.
+    //
+    // It cannot be closed from inside this agent. The distinction needed is
+    // between a tree that PREDATES a local write and one that POSTDATES
+    // somebody deleting it, and no fact available on one machine separates
+    // them: the only local predicate that protects the writer also protects it
+    // from every legitimate deletion, because the AUTHOR of a file never
+    // receives its own path back. Three rules were built and withdrawn proving
+    // it, and the one that closed §3 broke §1 at four nodes in the same run.
+    //
+    // So this is a REQUIREMENT, not a tuning option — and a configuration
+    // that silently loses data should not be reachable silently.
+    if (connector.syncConfig?.causalOrdering !== true) {
+      console.warn(
+        `[FsAgent] ${this._rootPath}: this transport carries no ancestry ` +
+          `(syncConfig.causalOrdering is not true). Deletions and ` +
+          `simultaneous writes cannot be told apart, so a file written here ` +
+          `at the same moment as one written on a peer can be removed from ` +
+          `this node. Turn causalOrdering on.`,
+      );
+      this._writeSyncError(
+        'syncFromDb/noAncestry',
+        new Error(
+          'causalOrdering is off: simultaneous writes may lose the local copy',
+        ),
+      );
+    }
 
     // Before any announcement can arrive: a node that only receives still has
     // to resolve the heads its peers announce. See `_ensureChain`.

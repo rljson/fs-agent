@@ -7,6 +7,7 @@
 import type { Conflict } from '@rljson/db';
 import type { InsertHistoryRow } from '@rljson/rljson';
 
+import { compareTimeId } from './fs-edit-chain.js';
 import type { FsTree } from './fs-scanner.js';
 
 /**
@@ -59,6 +60,31 @@ export function fsTreeToContentMap(tree: FsTree): ContentMap {
 
 /** A branch tip's identity, used for deterministic winner selection. */
 export interface BranchTip {
+  /**
+   * The EDIT CHAIN's `timeId` for this tip, when the chain has an entry for
+   * it — `<millis>:<nanoid>`, minted by the authoring node and carried with
+   * the row, so it is identical on every node.
+   *
+   * This is the primary ordering key, and it has to be, because the two that
+   * used to be are not populated. Measured end to end on two nodes editing
+   * one file: the conflict copy came out named
+   *
+   *   shared (conflicted copy db.insertTrees 1970-01-01 000000).txt
+   *
+   * `db.insertTrees` is the DB's label for its own operation, not a client, and
+   * the epoch is `clientTimestamp` never being set — `Db.insertTrees` accepts
+   * neither, so no caller can supply them. With `timestamp` equal at 0 and
+   * `clientId` equal for everybody, both top comparisons collapsed and the
+   * winner fell through to *whichever content hash sorts higher*. Deterministic,
+   * so the fleet converged; but unrelated to who edited last, which is what
+   * `§11.1` says decides.
+   *
+   * The chain's stamp is what the agent already mints for exactly this kind of
+   * question, so nothing new has to be transported. Absent only for a tip no
+   * chain entry covers (a peer on an older build), which is why it is optional
+   * and why the old keys stay below it as a fallback.
+   */
+  chainTimeId?: string;
   /** InsertHistory timeId of the tip (per-db; used only for local lookups). */
   timeId: string;
   /** Shared content ref of the tip — the cross-client deterministic tiebreak. */
@@ -71,15 +97,37 @@ export interface BranchTip {
 
 /**
  * Total, deterministic order over two tips. Returns a positive number when `a`
- * outranks `b`. Greater timestamp wins; ties broken by greater clientId, then
- * greater **content ref**. The final tiebreak is the ref (not the timeId)
- * because timeIds are per-db — using them would make different peers pick
- * different winners and never converge; the ref is shared, so every peer agrees.
+ * outranks `b`.
+ *
+ * The keys, in order:
+ *
+ *  1. the EDIT CHAIN's `timeId` — the newer edit outranks the older. See
+ *     {@link BranchTip.chainTimeId} for why this had to become the first key:
+ *     the two below it are not populated by `Db.insertTrees`, so without it
+ *     the decision fell through to a content hash comparison.
+ *  2. greater InsertHistory `clientTimestamp`;
+ *  3. greater `clientId`;
+ *  4. greater **content ref**.
+ *
+ * The last tiebreak is the ref rather than the InsertHistory timeId because
+ * timeIds are per-db — using one would make different peers pick different
+ * winners and never converge. The ref is shared, so every peer agrees; and
+ * that claim is only true now that mtime is out of the content identity, which
+ * is what made two peers derive different refs for identical content.
+ *
+ * `compareTimeId` is a total order over `<millis>:<nanoid>` and is identical
+ * on every node, so key 1 preserves the property the rest of this function
+ * exists for. A tip with no chain entry compares as "not comparable" and falls
+ * through, so a peer on an older build is ordered exactly as before.
  * @param a - First tip
  * @param b - Second tip
  * @returns Positive if `a` outranks `b`, negative if `b` outranks `a`, else 0
  */
 export function compareTips(a: BranchTip, b: BranchTip): number {
+  const byChain = compareTimeId(a.chainTimeId, b.chainTimeId);
+  if (byChain !== 0) {
+    return byChain;
+  }
   if (a.timestamp !== b.timestamp) {
     return a.timestamp - b.timestamp;
   }
@@ -165,6 +213,54 @@ export function findCommonAncestor(
 }
 
 /**
+ * What `Db.insertTrees` writes into an InsertHistory row's `origin`: the name
+ * of its own operation, not an identity.
+ *
+ * `Db.insertTrees` accepts no `origin`, so every row this agent writes carries
+ * this, on every node. It is the reason a conflict copy came out named
+ * `shared (conflicted copy db.insertTrees 1970-01-01 000000).txt` — see
+ * {@link BranchTip.chainTimeId}.
+ */
+export const DB_OPERATION_ORIGIN = 'db.insertTrees';
+
+/**
+ * The wall-clock millisecond a tip was authored, as well as it can be known.
+ *
+ * The chain's `timeId` is `<millis>:<nanoid>` and its millisecond half is the
+ * authoring node's clock at the moment of the edit — which is the only real
+ * time available here, because `clientTimestamp` is never set (see
+ * {@link BranchTip.chainTimeId}). Without this a conflict copy was dated
+ * `1970-01-01 000000`.
+ *
+ * Used ONLY for the copy's human-readable name. Ordering uses
+ * {@link compareTimeId} on the whole id, never this number, so two edits in
+ * the same millisecond are still totally ordered.
+ * @param tip - The tip to date.
+ * @returns Milliseconds since the epoch, or `0` when nothing knows.
+ */
+export function tipTimestamp(tip: BranchTip): number {
+  const millis = Number(tip.chainTimeId?.split(':')[0]);
+  return Number.isFinite(millis) && millis > 0 ? millis : tip.timestamp;
+}
+
+/**
+ * An `origin` only when it identifies a client, else the empty string.
+ *
+ * A name in a filename a user has to read must be true or absent. Printing the
+ * DB's operation label as the machine that made the edit is worse than
+ * printing nothing: it reads as information and is not.
+ *
+ * Carrying the real author needs `Db.insertTrees` to accept an origin, which
+ * it does not — a follow-up outside this package. Until then the copy is named
+ * by its time alone.
+ * @param origin - The InsertHistory row's origin, if any.
+ * @returns A usable client id, or `''`.
+ */
+export function usableClientId(origin: string | undefined): string {
+  return !origin || origin === DB_OPERATION_ORIGIN ? '' : origin;
+}
+
+/**
  * Formats a timestamp as a stable UTC `YYYY-MM-DD HHMMSS` string. UTC keeps the
  * conflict-copy name identical across peers in different timezones.
  * @param ms - Milliseconds since the epoch
@@ -209,7 +305,12 @@ export function conflictCopyName(
   const ext = dot > 0 ? base.slice(dot) : '';
 
   const ts = formatConflictTimestamp(timestamp);
-  const marker = `(conflicted copy ${clientId} ${ts})`;
+  // The identity is omitted when there is none, rather than printed empty —
+  // `(conflicted copy  2026-10-01 ...)` with a double space is the kind of
+  // detail a user reports as a bug. See {@link usableClientId}.
+  const marker = clientId
+    ? `(conflicted copy ${clientId} ${ts})`
+    : `(conflicted copy ${ts})`;
 
   let candidate = `${dir}${stem} ${marker}${ext}`;
   let n = 1;
@@ -221,12 +322,57 @@ export function conflictCopyName(
   return candidate;
 }
 
+/**
+ * One same-file conflict, in the terms a user needs to see it in.
+ *
+ * WHY THIS EXISTS. A fork on two DIFFERENT files is merged as a union and
+ * nobody should be asked about it. A fork on the SAME file is a real conflict,
+ * and until now resolving one produced a renamed file and silence: nothing was
+ * lost, but the only evidence was a strange filename appearing in a folder,
+ * with no statement of what happened, which version is live, or where the
+ * other one went.
+ *
+ * Deliberately NOT an error. Two people editing one document at the same time
+ * is ordinary, both versions are kept, and the folder converges. It is an event
+ * to report, which is why it does not go through `_writeSyncError`.
+ *
+ * And deliberately not a question. The winner is already decided — it has to
+ * be, or peers would not converge — so this says what was decided and leaves
+ * reversing it to whoever looks: the losing content is on disk under
+ * {@link copyPath}, so swapping the two files is all it takes.
+ */
+export interface FsConflictReport {
+  /** The path both sides edited. The winner's content is here. */
+  path: string;
+  /** Where the losing version was kept, intact. */
+  copyPath: string;
+  /** Content ref of the branch that keeps {@link path}. */
+  winnerRef: string;
+  /** Content ref of the branch whose version moved to {@link copyPath}. */
+  loserRef: string;
+  /**
+   * When the losing edit was made, in epoch ms, or `0` when nothing knows —
+   * see {@link tipTimestamp} for why that is not always answerable.
+   */
+  loserAt: number;
+  /** When this node resolved the conflict, in epoch ms. */
+  resolvedAt: number;
+}
+
 /** A conflict copy to materialise: the losing content under a renamed path. */
 export interface ConflictCopy {
   /** The renamed path the losing content is written to. */
   path: string;
   /** The losing blobId (content preserved, nothing lost). */
   blobId: string;
+  /**
+   * The path the two sides actually disagreed about.
+   *
+   * Recoverable from {@link path} only by un-parsing a filename, which is the
+   * kind of thing that works until somebody's document is called
+   * `report (conflicted copy ...).txt`.
+   */
+  originalPath: string;
 }
 
 /** The result of a three-way merge. */
@@ -318,7 +464,7 @@ export function threeWayMerge(
         loserTimestamp,
         taken,
       );
-      copies.push({ path: copyPath, blobId: loserVal });
+      copies.push({ path: copyPath, blobId: loserVal, originalPath: path });
     }
   }
 
@@ -340,6 +486,14 @@ export interface ConflictResolverDeps {
   getInsertHistory: (table: string) => Promise<InsertHistoryRow<string>[]>;
   /** Resolve a tip timeId to its tree root ref. */
   getRefOfTimeId: (table: string, timeId: string) => Promise<string | null>;
+  /**
+   * The edit chain's `timeId` for a tree ref, if the chain covers it.
+   *
+   * Optional: a host without a chain, or a tip authored by a peer on an older
+   * build, simply has no answer — and {@link compareTips} falls back to the
+   * keys it used before. See {@link BranchTip.chainTimeId}.
+   */
+  chainTimeIdOfRef?: (treeRef: string) => Promise<string | undefined>;
   /** Fetch a full FsTree by its root ref. */
   fetchTree: (rootRef: string) => Promise<FsTree>;
   /** Read a blob's bytes by blobId. */
@@ -356,6 +510,13 @@ export interface ConflictResolverDeps {
   storeMerge: (tree: FsTree, previous: string[]) => Promise<string>;
   /** Notified with the stored merge ref so the host can suppress the echo. */
   onMergeStored?: (ref: string) => void;
+  /**
+   * Notified once per merge with every same-file conflict it resolved.
+   *
+   * Never called with an empty list, so a host can treat any call as "there is
+   * something to tell the user about".
+   */
+  onConflicts?: (reports: FsConflictReport[]) => void;
   /** Optional structured logger. */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
 }
@@ -403,7 +564,10 @@ export class FsConflictResolver {
       branchTips.push({
         timeId,
         ref: ref ?? '',
-        clientId: (row?.origin as string | undefined) ?? '',
+        chainTimeId: ref
+          ? await this.deps.chainTimeIdOfRef?.(ref)
+          : undefined,
+        clientId: usableClientId(row?.origin as string | undefined),
         timestamp: row?.clientTimestamp ?? 0,
       });
     }
@@ -449,7 +613,7 @@ export class FsConflictResolver {
       winnerMap,
       'theirs',
       loserTip.clientId,
-      loserTip.timestamp,
+      tipTimestamp(loserTip),
     );
 
     // Materialise on disk: restore the winner tree (clean slate), then apply the
@@ -498,6 +662,24 @@ export class FsConflictResolver {
       await this.deps.writeFileAt(
         copy.path,
         await this.deps.getBlobContent(copy.blobId),
+      );
+    }
+
+    // Reported BEFORE the merge is stored, so a host that fails on its own
+    // notification cannot leave the fork unresolved. The copies are already on
+    // disk at this point, which is what the report describes.
+    if (plan.copies.length > 0) {
+      const resolvedAt = Date.now();
+      const loserAt = tipTimestamp(loserTip);
+      this.deps.onConflicts?.(
+        plan.copies.map((copy) => ({
+          path: copy.originalPath,
+          copyPath: copy.path,
+          winnerRef: winnerTip.ref,
+          loserRef: loserTip.ref,
+          loserAt,
+          resolvedAt,
+        })),
       );
     }
 
