@@ -591,6 +591,90 @@ constraint the package already has (`pnpm overrides`, exact pins).
 **Tested by** `test/fs-ref-vs-content.spec.ts`, including the control: the
 canonical-order assertion is red without the sort.
 
+## Additive Reconciliation (`fs-manifest.ts` + `fs-bucket-sync.ts`)
+
+Every reconciliation this agent has is **whole-folder**: `pull` replaces the
+folder with the peer's version, `push` asserts ours over everyone's. Every
+decision is all-or-nothing, so every wrong decision is maximally destructive —
+which is how a copied folder was deleted off the machine that made it, and how
+deleted files came back across a fleet, on the same day.
+
+`@rljson/mongo-agent` never does this: *"PULL IS ADDITIVE: the body-pull path
+only ever fetches docs the peer has and we lack; it never overwrites live
+content."* There is no "whose folder wins". Two nodes compare manifests and each
+fetches what it is missing. **That single property is what makes the two
+measured failures impossible rather than less likely.**
+
+### The comparison
+
+An fs manifest is `path → blobId` — which `_getFileContentMap` already
+produces. Each path falls in one of `BUCKET_COUNT` (4096) buckets by a hash of
+the **path only**, so a modification stays in its bucket instead of looking
+like a delete in one and an add in another. A bucket's root is the **XOR** of
+its entries' digests, so it does not depend on the order a folder was walked in
+— the canonical child order's lesson, one level down.
+
+`BUCKET_COUNT` is a fixed constant. Mongo: *"MUST be identical on every node for
+the per-bucket roots to be comparable."* Roots are sent **sparsely** (non-empty
+buckets only), because a folder is three orders of magnitude smaller than a
+mongo collection and 4096 fixed slots would be almost all empty.
+
+**A deletion is an ENTRY**, carried at an empty blob id, so it travels through
+the ordinary comparison rather than a side channel. A peer still holding the
+file sees something to drop; a peer missing a file it has itself tombstoned
+re-advertises the tombstone instead of fetching the file back.
+
+### Four messages, not mongo's six
+
+| | |
+| --- | --- |
+| `~BQ~` → | ask for the peer's bucket roots |
+| `~BR~` ← | the roots, non-empty buckets only |
+| `~BG~` → | ask for the entries of these buckets |
+| `~BE~` ← | the entries of those buckets |
+
+Mongo needs `AEW`/`AEH` because a document body must be requested and returned.
+An fs entry is `path → blobId` and a blob is **already** content-addressed and
+already fetchable over the existing path, so a node that knows the peer's
+entries fetches the bodies itself.
+
+Nothing here sends file content. Mongo's header records what happens otherwise:
+broadcasting bodies made *"a 453 MB backfill balloon the hub to 3.4 GB and crash
+it"*. The heaviest message is a list of paths.
+
+**The body is JSON.** Mongo delimits with `|` because a collection name cannot
+contain one; a relative PATH has no such guarantee — on POSIX a filename may
+contain any byte but `/` and NUL. No delimiter is safe without escaping, and an
+escaping bug in a message carrying DELETIONS is the expensive kind.
+
+### It is driven, not autonomous
+
+`FsBucketSync` decides what to say and what a reply means. It never touches a
+folder, never reads a socket and **cannot delete anything**: a host supplies the
+manifest and performs the plan, so the destructive half stays where the
+mass-delete guard can see it. That is also why it is testable against a stub
+with no sockets, folders or peers — two stubs wired together are a complete
+two-node conversation.
+
+`reconcile`'s whole vocabulary is `fetch` / `drop` / `redelete` / `conflict`.
+There is no outcome in which one side's folder replaces the other's, and the
+enumeration over {absent, live-x, live-y, tombstone}² proves `drop` and
+`redelete` appear only where one side holds a tombstone for a path the other
+holds live.
+
+A genuine edit conflict is **named, not resolved** — whole-folder replacement
+answered that question by guessing, and the guessing is what this plan removes.
+
+### The cold-start gate
+
+`ready()` — mongo's, for mongo's reason: until a baseline is complete the roots
+are partial *"and would make a peer see spurious differences"*. A node
+mid-cold-start neither answers nor asks, because answering with partial roots is
+worse than silence.
+
+**Not wired into `FsAgent` yet.** The modules are complete and tested; the host
+side is the next step.
+
 ## Rolling Out: what a peer can notice
 
 This branch makes two changes a peer can see, and they are not equally hard.
