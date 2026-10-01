@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   AntiEntropyAction,
+  CONTENT_AGREED_MAX,
   antiEntropyDecision,
   AntiEntropyView,
   DEFAULT_ANTI_ENTROPY,
@@ -435,5 +436,105 @@ describe('FsAntiEntropy', () => {
     ae.observe(hub);
     expect(repairs[0][2]).toEqual(['S1']);
     expect(repairs[0][2]).not.toBe(hub.predecessors);
+  });
+
+  // ...........................................................................
+  describe('content agreement — two refs, one folder', () => {
+    // §2.1b, and the last thing standing between this work and a lockstep
+    // rollout.
+    //
+    // A tree ref hashes the whole tree, so two nodes derive different ones for
+    // byte-identical content whenever anything outside the content map
+    // differs. The scan's canonical child order removed one such cause — and
+    // during a ROLLOUT a node on an older build still derives the old ref, by
+    // construction, for every folder it holds.
+    //
+    // Measured on the lab before any of this: both machines held 38 identical
+    // files with identical hashes, and one reported `diverged: true` for over
+    // EIGHT MINUTES across six merge repairs, logging "equivalent content,
+    // skipping restore" every time. The apply path correctly saw nothing to
+    // transfer; the anti-entropy correctly saw two refs; neither was wrong,
+    // and the system deadlocked against itself by design.
+    //
+    // A bucket round settles what a ref comparison cannot: identical
+    // per-bucket roots mean the folders ARE the same. That verdict is recorded
+    // here, so the divergence stops being reported rather than rediscovered on
+    // every beacon.
+    const build = (onRepair: (a: AntiEntropyAction) => void = () => {}) => {
+      let now = 0;
+      const ae = new FsAntiEntropy(
+        { graceMs: 100 },
+        {
+          view: () => ({
+            origin: 'me',
+            currentRef: 'OUR-NAME-FOR-IT',
+            lastAppliedRef: undefined,
+            lastPushedRef: 'OUR-NAME-FOR-IT',
+          }),
+          busy: () => false,
+          repair: (action) => onRepair(action),
+          now: () => now,
+          log: () => {},
+        },
+      );
+      return { ae, tick: (ms: number) => (now += ms) };
+    };
+
+    const theirName = { ref: 'THEIR-NAME-FOR-IT', origin: 'hub' };
+
+    it('stops reporting a divergence once the content is proven equal', () => {
+      const repairs: AntiEntropyAction[] = [];
+      const { ae, tick } = build((a) => repairs.push(a));
+
+      ae.observe(theirName);
+      expect(ae.status.diverged).toBe(true);
+
+      // The round ran and the roots matched.
+      ae.agreedOn('THEIR-NAME-FOR-IT');
+      expect(ae.status.diverged).toBe(false);
+
+      // And it stays resolved however long the hub keeps announcing it — this
+      // is the eight minutes.
+      for (let i = 0; i < 20; i++) {
+        tick(200);
+        ae.observe(theirName);
+      }
+      expect(ae.status.diverged).toBe(false);
+      expect(repairs).toEqual([]);
+    });
+
+    it('still reports a divergence against a ref it has NOT agreed on', () => {
+      // The verdict is per ref, not a blanket "stop worrying". A hub that
+      // genuinely moves on must still be noticed.
+      const { ae, tick } = build();
+      ae.agreedOn('THEIR-NAME-FOR-IT');
+      ae.observe({ ref: 'SOMETHING-NEW', origin: 'hub' });
+      tick(200);
+      ae.observe({ ref: 'SOMETHING-NEW', origin: 'hub' });
+      expect(ae.status.diverged).toBe(true);
+    });
+
+    it('agrees before the divergence is even noticed', () => {
+      // Order-independent: a round can finish before the beacon that would
+      // have reported the divergence arrives.
+      const { ae } = build();
+      ae.agreedOn('THEIR-NAME-FOR-IT');
+      ae.observe(theirName);
+      expect(ae.status.diverged).toBe(false);
+    });
+
+    it('bounds what it remembers', () => {
+      // Keyed on refs a PEER chooses, so a hub whose state changes constantly
+      // must not grow this without limit.
+      const { ae } = build();
+      for (let i = 0; i < CONTENT_AGREED_MAX + 50; i++) ae.agreedOn(`r${i}`);
+      // The oldest verdicts are forgotten, so an old ref is a divergence
+      // again — which is the safe direction: it gets re-proven by a round.
+      ae.observe({ ref: 'r0', origin: 'hub' });
+      expect(ae.status.diverged).toBe(true);
+      // The newest is still remembered.
+      ae.observe({ ref: `r${CONTENT_AGREED_MAX + 49}`, origin: 'hub' });
+      expect(ae.status.diverged).toBe(false);
+    });
   });
 });

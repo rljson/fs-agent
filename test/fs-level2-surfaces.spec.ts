@@ -29,6 +29,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
+import {
+  reconcile,
+  TOMBSTONE_BLOB,
+  type ManifestEntry,
+} from '../src/fs-manifest.ts';
 
 const TREE = 'fileTree';
 
@@ -169,51 +174,57 @@ describe('level 2 — surfaces', () => {
   }, 30_000);
 
   // ...........................................................................
-  // S4 — a delete WINS over a re-announcement of the deleted state.
+  // S4 — a delete is expressible as something a peer can ACT on.
   //
-  // **RED, deterministically, and this is the one that matters.**
+  // The tombstone-level unit of §1.2. Before, a deletion reached a peer only
+  // as an absence from the next tree, and an absence is indistinguishable from
+  // a file that peer never had — which is how deleted files came back across a
+  // fleet.
   //
-  // The tombstone-level unit of §1.2, and the home the delete defect needed
-  // after T4 turned out to be a coin flip at level 3 (~40% of runs converge).
-  // There is no race here: a peer's tree is applied directly, and either the
-  // file comes back or it does not.
-  //
-  // Two halves, and WP2a delivered only the first:
-  //
-  //   1. a peer's re-announcement must not resurrect the file HERE — green,
-  //      that is `_restoreTree`'s guard, now that the log outlives the push;
-  //   2. the delete must WIN on the peer, so the fleet converges rather than
-  //      splitting — RED. Nothing carries "this was deleted" to anyone. The
-  //      node holds its own deletion and its peers keep the file, for good.
-  //
-  // The assertion below is the second half: after applying a peer's tree that
-  // still contains the deleted file, this node must have something to SAY
-  // about it — a record a peer can read and act on. Today there is no such
-  // surface at all, in any form.
-  //
-  // → WP2b (a delete becomes an edit the chain carries).
+  // This test used to assert a method name (`chain.isTombstoned`) that was
+  // never implemented: an API-shape assertion standing in for a capability,
+  // and the wrong way round. The capability is what matters, and it is the
+  // MANIFEST: a tombstoned path is advertised with an empty blob id, so it
+  // travels through the ordinary comparison and a peer holding the file sees
+  // something to drop.
   // ...........................................................................
-  it.fails('S4: a delete is expressible as something a peer can act on', async () => {
+  it('S4: a deletion is advertised to peers as a fact, not an absence', async () => {
     const db = await makeDb();
-    const chain = new FsEditChain(db, TREE);
-    await chain.init();
+    await writeFile(join(dir, 'doomed.txt'), 'doomed');
+    await writeFile(join(dir, 'keeper.txt'), 'keeper');
 
-    // The deletion, recorded in the chain as WP1a already allows.
-    const entry = await chain.append({
-      treeRef: 'C0',
-      removed: ['doomed.txt'],
+    const agent = new FsAgent(dir, new BsMem(), {
+      timeouts: { debounceMs: 20 },
     });
-    expect(entry.removed).toEqual(['doomed.txt']);
+    agents.push(agent);
+    const connector = new Connector(
+      db,
+      Route.fromFlat(`/${TREE}`),
+      new SocketMock(),
+    );
+    stops.push(await agent.syncToDb(db, connector, TREE));
+    await new Promise((r) => setTimeout(r, 300));
 
-    // And now the half that does not exist: a peer holding the file must be
-    // able to ask "has this path been deleted?" and be told yes. There is no
-    // such question to ask — the chain records the removal, and nothing
-    // consumes it, announces it, or lets a peer resolve a path against it.
-    const asPeer = chain as unknown as {
-      isTombstoned?: (path: string) => Promise<boolean>;
-    };
-    expect(typeof asPeer.isTombstoned).toBe('function');
-    expect(await asPeer.isTombstoned!('doomed.txt')).toBe(true);
+    await unlink(join(dir, 'doomed.txt'));
+    await new Promise((r) => setTimeout(r, 500));
+
+    // The manifest this node advertises SAYS the path is gone.
+    const manifest = agent['_manifest']() as ReadonlyMap<string, string>;
+    expect(manifest.get('doomed.txt')).toBe(TOMBSTONE_BLOB);
+    expect(manifest.get('keeper.txt')).not.toBe(TOMBSTONE_BLOB);
+
+    // And a peer that still holds the file reads that as something to DROP —
+    // not as a file to fetch, and not as nothing at all.
+    const peerStillHasIt: ManifestEntry[] = [
+      ['doomed.txt', 'some-blob'],
+      ['keeper.txt', manifest.get('keeper.txt') as string],
+    ];
+    const plan = reconcile(peerStillHasIt, [
+      ['doomed.txt', TOMBSTONE_BLOB],
+      ['keeper.txt', manifest.get('keeper.txt') as string],
+    ]);
+    expect(plan.drop).toEqual(['doomed.txt']);
+    expect(plan.fetch).toEqual([]);
   }, 30_000);
 
   // ...........................................................................

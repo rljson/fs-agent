@@ -410,4 +410,54 @@ describe('FsBucketSync', () => {
     expect(plan.drop).toEqual([]);
     expect(plan.redelete).toEqual([]);
   });
+
+  it('a redelete converges on the NEXT round, which is tested, not assumed', async () => {
+    // `reconcile` reports `redelete` and the host does nothing about it: our
+    // own manifest already advertises the tombstone, so the peer acts on it in
+    // its own round. That is a claim about a round nobody had run — so here it
+    // is run.
+    //
+    // A: deleted the file. B: still holds it. A's round tells A there is a
+    // redelete and changes nothing; B's round then sees A's tombstone and
+    // drops the file. Convergence takes two rounds and the second one is where
+    // it happens.
+    const { a, b } = pair(
+      { 'doomed.txt': TOMBSTONE_BLOB, 'keeper.txt': 'k' },
+      { 'doomed.txt': 'live-blob', 'keeper.txt': 'k' },
+    );
+
+    await converse(a, b);
+    expect(a.host.plans[0].redelete).toEqual(['doomed.txt']);
+    expect(a.host.plans[0].drop).toEqual([]);
+    expect(a.host.plans[0].fetch).toEqual([]);
+
+    await converse(b, a);
+    expect(b.host.plans[0].drop).toEqual(['doomed.txt']);
+    expect(b.host.plans[0].fetch).toEqual([]);
+  });
+
+  it('whoever asks, the side LACKING the file is the one that fetches', async () => {
+    // The protocol is not symmetric in its effects, and that asymmetry is the
+    // additive property rather than a flaw in it. A round reconciles the state
+    // of the side that STARTED it: the asker compares the answer against its
+    // own entries and acts.
+    //
+    // So a node holding a file its peer lacks plans NOTHING — there is no step
+    // in which having something causes anything to happen to it — and the
+    // peer fetches it when its own round comes round. Whole-folder replacement
+    // is exactly the opposite, and that is how a copied folder was deleted off
+    // the machine that made it.
+    const files = { 'shared.txt': 's' };
+
+    // Asked by the side that HAS it: nothing to do.
+    const haver = pair({ ...files, 'only-a.txt': 'a' }, files);
+    await converse(haver.a, haver.b);
+    expect(haver.a.host.plans).toEqual([]);
+
+    // Asked by the side that LACKS it: it fetches.
+    const lacker = pair(files, { ...files, 'only-a.txt': 'a' });
+    await converse(lacker.a, lacker.b);
+    expect(lacker.a.host.plans[0].fetch).toEqual([['only-a.txt', 'a']]);
+    expect(lacker.a.host.plans[0].drop).toEqual([]);
+  });
 });

@@ -77,15 +77,40 @@ const viewOf = (node: Node): AntiEntropyView => ({
   lastPushedRef: node.authored ? node.currentRef : 'something-else',
 });
 
-/** Every node this space can describe, for one origin. */
+/**
+ * Every node this space can describe, for one origin — and ONLY the reachable
+ * ones.
+ *
+ * The first version enumerated every combination, which generated views no
+ * node can be in: `cur=S2, applied=S0, authored=false` says "I am at S2, I did
+ * not write it, and the last thing I applied was S0" — so how did the folder
+ * get to S2? That artifact was reported as a defect (D3's offenders) and it was
+ * the test over-generating, not the rule misbehaving.
+ *
+ * A node is at `currentRef` for exactly one of two reasons:
+ *
+ * - it AUTHORED it, in which case the last thing it applied may be any earlier
+ *   state or nothing at all;
+ * - it APPLIED it, in which case `lastAppliedRef` IS that state. (It may be a
+ *   different NAME for it — a restore does not always reproduce mtimes, so the
+ *   re-scan can derive another ref for identical content. That case has its own
+ *   example test under D5, with the alias spelled out, because an enumeration
+ *   over three refs cannot express "the same state under another name".)
+ * @param origin - The origin to stamp on every node.
+ * @returns The reachable views.
+ */
 const nodesFor = (origin: string): Node[] => {
   const out: Node[] = [];
   for (const currentRef of REFS) {
     for (const lastAppliedRef of [undefined, ...REFS]) {
-      for (const authored of [true, false]) {
-        out.push({ origin, currentRef, lastAppliedRef, authored });
-      }
+      out.push({ origin, currentRef, lastAppliedRef, authored: true });
     }
+    out.push({
+      origin,
+      currentRef,
+      lastAppliedRef: currentRef,
+      authored: false,
+    });
   }
   return out;
 };
@@ -223,7 +248,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
   const silent = (d: AntiEntropyDecision) => d === 'pull' || d === 'unknown';
 
   for (const { name, of: history } of HISTORIES) {
-    it.fails(`D3: never both silent — ${name}`, () => {
+    it(`D3 GUARD: never both silent — ${name}`, () => {
       const offenders = disagreeingPairs(history).filter(
         (p) => silent(p.aSees) && silent(p.bSees),
       );

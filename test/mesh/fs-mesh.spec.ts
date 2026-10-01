@@ -347,20 +347,27 @@ describe('fs mesh', () => {
   // ...........................................................................
   // T6 — an ancestor row cannot be resolved.
   //
-  // **RED, inverted.** There is nothing to walk yet: `src/fs-edit-chain.ts`
-  // exists but nothing announces a head, so no node can receive a chain with a
-  // hole in it. `lastAppliedRef` remains a single slot that latches
-  // unconditionally — mongo records having had exactly this bug, "lost updates
-  // root-caused to a single `_lastApplied` slot vs. per-node lineages".
+  // **Lives at level 2, deterministically, and is deleted from here.**
   //
-  // The body throws on purpose, so the inversion holds it red until WP3 gives
-  // `collectPuts`'s contract (`complete`, `sealed`) something to assert
-  // against. The day someone implements it, this test turns the suite red and
-  // says so.
-  // ...........................................................................
-  it.fails('T6: an unresolvable ancestor is retried, never latched', async () => {
-    throw new Error('WP3: nothing announces a chain head yet');
-  });
+  // The contract is `collectRemovals`' and `classify`' `complete: false`: an
+  // entry that cannot be READ means its ancestry is unknown, so nothing may be
+  // concluded and nothing latched. `test/fs-collect-removals.spec.ts` and
+  // `test/fs-classify.spec.ts` assert all three ways a walk can be truncated —
+  // a hole mid-chain, an unresolvable head, and the walk budget — in
+  // milliseconds, with the budget case distinguished from the hole because
+  // conflating them made a long-lived node stop repairing for ever.
+  //
+  // It cannot be made deterministic HERE, and the reason is structural rather
+  // than a lack of effort: every node in this mesh reaches every other through
+  // one relay, so a chain entry is resolvable unless its author is cut off —
+  // and a node that is cut off also hears nothing, so there is no moment at
+  // which a peer can see a head whose parents it cannot fetch. Producing one
+  // would mean cutting the io channel while leaving the ref channel up, which
+  // is not a thing a network does.
+  //
+  // An inverted test that cannot be made to fail for the right reason is worse
+  // than no test: it reports a colour nobody can act on. The contract is
+  // covered where it is real.
 
   // ...........................................................................
   // T7 — a large folder cold-starts against a populated peer.

@@ -75,6 +75,13 @@ export interface FsAgentOptions {
    * unambiguity: a folder returning to earlier content produces two entries
    * with the same `dataRef`, and the fallback has to pick the newest.
    *
+   * **It also switches off bucket sync**, for the same reason and in the same
+   * breath: the bucket protocol travels on the ref channel under its own
+   * prefixes, and a build that cannot parse `~H~` cannot parse `~BQ~` either.
+   * It would try to fetch a tree by each protocol message and log a failure
+   * for every one. "Speak the old dialect" has to mean all of it, or the
+   * switch only half works and the half it misses is the noisy one.
+   *
    * So: on during a rollout, off once the fleet is past the old build.
    * Default: off, which is the better format.
    */
@@ -741,7 +748,11 @@ export class FsAgent {
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._announceTreeRef = options.announceTreeRef ?? false;
-    this._bucketSyncOn = options.bucketSync ?? true;
+    // `announceTreeRef` means "speak the build before this one", and that
+    // build has no bucket protocol. An explicit `bucketSync: true` still wins,
+    // so the combination remains testable.
+    this._bucketSyncOn =
+      options.bucketSync ?? !(options.announceTreeRef ?? false);
     this._antiEntropyOptions = options.antiEntropy;
     this._scanner = new FsScanner(rootPath, {
       ...options,
@@ -3163,6 +3174,14 @@ export class FsAgent {
         // advertising one makes a peer see differences that are not there.
         this._scanner.tree !== null && !this._remoteApplyInFlight,
       apply: (plan) => this._applyReconcilePlan(plan, db, treeKey),
+      agreed: () => {
+        // The roots matched, so this folder and the hub's hold the same
+        // content whatever either calls itself. Told to the anti-entropy,
+        // which is comparing REFS and cannot reach that conclusion — and
+        // which otherwise re-reports the same divergence on every beacon.
+        const hubRef = this._antiEntropy?.status.hubRef;
+        if (hubRef) this._antiEntropy?.agreedOn(hubRef);
+      },
       log: (message) => console.log(message),
     };
     return new FsBucketSync(host);

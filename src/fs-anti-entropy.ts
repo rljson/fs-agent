@@ -79,6 +79,15 @@ export interface AntiEntropyOptions {
   maxBackoffMs?: number;
 }
 
+/**
+ * How many content-equivalence verdicts one agent remembers.
+ *
+ * Keyed on refs a PEER chooses, so it is bounded: a hub whose state changes
+ * constantly must not grow this without limit. Large enough that a rollout
+ * window's worth of old-build refs all fit.
+ */
+export const CONTENT_AGREED_MAX = 256;
+
 /** Defaults for {@link AntiEntropyOptions}. */
 export const DEFAULT_ANTI_ENTROPY: Required<AntiEntropyOptions> = {
   enabled: true,
@@ -461,6 +470,29 @@ export class FsAntiEntropy {
   /** Repairs started for {@link _key}. */
   private _attempts = 0;
 
+  /**
+   * Hub refs proven to describe the same CONTENT as this folder.
+   *
+   * A tree ref is a hash of the whole tree, and two nodes can derive different
+   * ones for byte-identical content — the order a filesystem lists a directory
+   * in used to be enough, and during a rollout a node on an older build still
+   * derives the old ref. Measured on the lab: both machines held 38 identical
+   * files with identical hashes and one reported `diverged: true` for over
+   * EIGHT MINUTES across six merge repairs, logging "equivalent content,
+   * skipping restore" every time. The apply path correctly saw nothing to
+   * transfer; the anti-entropy correctly saw two refs; neither was wrong.
+   *
+   * A bucket round settles it: if the per-bucket roots agree, the two folders
+   * ARE the same, whatever either calls itself. That verdict is recorded here
+   * so the divergence stops being reported instead of being rediscovered every
+   * beacon — and so a mixed-version fleet does not spend its rollout window
+   * showing red.
+   *
+   * Bounded, because it is keyed on refs a peer chooses: a hub that changes
+   * state constantly must not grow this without limit.
+   */
+  private readonly _contentAgreed = new Set<string>();
+
   private _hubRef: string | null = null;
   private _localRef: string | null = null;
   private _repairs = 0;
@@ -473,6 +505,30 @@ export class FsAntiEntropy {
     this._options = { ...DEFAULT_ANTI_ENTROPY, ...options };
     this._now = _deps.now ?? Date.now;
     this._log = _deps.log ?? ((m) => console.warn(m));
+  }
+
+  /**
+   * Records that a hub ref describes the same content as this folder.
+   *
+   * Called when a bucket round finds the per-bucket roots identical. See
+   * {@link _contentAgreed}.
+   * @param ref - The hub ref that was compared.
+   */
+  agreedOn(ref: string): void {
+    this._contentAgreed.add(ref);
+    // Oldest out first. A `Set` keeps insertion order, and the oldest verdict
+    // is the one least likely to be asked about again.
+    while (this._contentAgreed.size > CONTENT_AGREED_MAX) {
+      const oldest = this._contentAgreed.values().next().value as string;
+      this._contentAgreed.delete(oldest);
+    }
+    if (this._hubRef === ref) {
+      // Resolve the divergence being watched right now, rather than waiting
+      // for the next announcement to notice.
+      this._key = null;
+      this._divergedSince = null;
+      this._attempts = 0;
+    }
   }
 
   /** Whether repairs are switched on. */
@@ -507,6 +563,15 @@ export class FsAntiEntropy {
 
     this._hubRef = hubRef;
     this._localRef = view.currentRef as string;
+
+    // A ref already proven content-equivalent is not a divergence, however
+    // different the two hashes look. (`unknown` has already returned above.)
+    if (this._contentAgreed.has(hubRef)) {
+      this._key = null;
+      this._divergedSince = null;
+      this._attempts = 0;
+      return;
+    }
 
     if (decision === 'in-sync') {
       this._key = null;

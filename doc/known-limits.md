@@ -5,147 +5,130 @@ was measured, what makes it tolerable, and what fixing it would take — so the
 next person weighs the same evidence instead of rediscovering it from a
 customer.
 
-## A node's own new work can be discarded when the hub has forked
+## CLOSED — a node's own new work can be discarded when the hub has forked
 
-**Measured 2026-09-30.** A folder copied onto NB-2744 produced a state of 15
-files / 55 868 bytes from the fleet's 13 / 29 873. The hub never adopted it and
-went on announcing the old state, whose ancestry reached a state NB-2744 had
-applied the day before. NB-2744 concluded it was behind and chose `pull` —
-against its own new folder — and retried five times.
+**Fixed 2026-10-01.** `antiEntropyDecision` no longer counts `lastAppliedRef`
+as "a state I am in" once this node has authored something since: a state we
+have built on is behind us, so a hub state descending from it is a sibling of
+our work rather than a successor to it.
 
-### Why it is still here
+That is 0.0.84's change, which was reverted because it removed the only thing
+making one side yield and produced a livelock. The livelock has its own fix (see
+below), and with both in place the narrowing is safe.
 
-It was fixed, and the fix caused something worse.
+**Proof:** `test/fs-anti-entropy-level1.spec.ts` D1 and D4, enumerated, with the
+control run both ways — removing the narrowing turns D1, D3 and D4 red.
 
-`antiEntropyDecision` asks whether the hub's state was made from a state "we are
-in", counting both `currentRef` and `lastAppliedRef`. Not counting
-`lastAppliedRef` once we have authored something since is the correct reading —
-a state we have built on is behind us, so a hub state descending from it is a
-sibling, not a successor.
+## CLOSED — two nodes could both refuse to yield
 
-It is also the only thing making one side yield. With it removed, both nodes
-decided `push`, and a disagreement with nobody yielding is a livelock: NB-2744's
-own revision log showed the folder flipping between the 13-file and the 17-file
-state **roughly twenty times in ninety seconds** — a delete applied, the files
-back within 225 ms, over and over — before settling on the state the user had
-deleted. Reverted the same afternoon.
+**Fixed 2026-10-01**, and it was never closed before: §7.3 of the plan believed
+the 0.0.85 revert had restored the yielding side. Enumerated over every
+reachable pair, two still ended with nobody yielding — two nodes that have each
+applied the other's current state and then authored their own both match
+`authored && hub.ref === lastAppliedRef`, both push, neither concedes.
 
-### What it would take
+A single push is not a livelock; the repeat is. So attempt 1 keeps the behaviour
+that was measured, and a later attempt breaks the tie on the ORIGIN: both sides
+compare it the same way, the smaller pushes, the larger yields to a merge. No
+coordination and no extra message. A deployment without client identity has no
+origin to compare and keeps exactly what it had.
 
-The two situations are indistinguishable at this decision:
+**Proof:** D2, both histories, with the control — removing the tie-break turns
+it red.
 
-| | hub's ref | hub's predecessors |
-| --- | --- | --- |
-| a peer deleted what we added | a state we once held | our state |
-| a peer forked from a shared ancestor | a state we once held | an ancestor |
+## CLOSED — one folder could have two refs
 
-Both end at "the hub holds something we recognise, made from something we
-recognise". Telling them apart needs the predecessor **chain** — whether the
-hub's state is reachable *from* ours, or merely shares an ancestor with it — and
-one generation of `predecessors` cannot answer that. Nothing in the node API,
-`/state` or the revisions endpoint exposes ancestry at all today, which is why
-this was diagnosed from symptoms rather than read off.
+**Fixed 2026-10-01, twice over**, because one fix was not enough for a rollout.
 
-So the next step is not a cleverer rule. It is carrying and exposing enough
-ancestry to ask the question, and that is a protocol change.
+A tree ref hashes the whole tree, so two nodes could derive different ones for
+byte-identical content. Measured: both machines held 38 identical files with
+identical hashes and one reported `diverged: true` for over EIGHT MINUTES across
+six merge repairs, logging "equivalent content, skipping restore" every time.
 
-### What to watch for
+1. **The scan emits a canonical child order.** `readdir` is not sorted and the
+   order it returns is a property of the filesystem, not of the folder, so the
+   ref hashed something the content map ignored. Computed, not guessed — the
+   property test in `test/fs-ref-vs-content.spec.ts` is red without the sort.
 
-A folder rewriting itself every few seconds, and `antiEntropy.lastRepair.action`
-reading `push` on **both** sides of a disagreement. One side must always yield.
+2. **A bucket round's verdict is recorded.** The first fix changes every tree
+   ref once, so during a rollout a node on an older build derives the old ref
+   for every folder it holds, by construction — the symptom would have returned
+   for the whole rollout window. Identical per-bucket roots prove two folders
+   are the same whatever either calls itself, and the anti-entropy now
+   remembers that verdict instead of rediscovering the divergence on every
+   beacon.
 
-## A deletion is undone when the common ancestor cannot be read
+Together these mean the rollout needs no lockstep: a mixed fleet differs on
+refs, agrees on content, and reports agreement.
 
-**Measured 2026-09-30, off-lab, in seven seconds** — `test/mesh/fs-mesh.spec.ts`
-T4, committed skipped because it is red.
+**Proof:** `fs-ref-vs-content.spec.ts` for the order, and
+`fs-anti-entropy.spec.ts` → "content agreement — two refs, one folder" for the
+verdict, including that it is per-ref (a hub that genuinely moves on is still
+noticed) and bounded.
 
-A node deletes a file while it is partitioned. On rejoin the file comes back on
-**every** node, including the one that deleted it: the apply restores it, the
-local scan then finds it present, and the deletion is never announced at all.
+## CLOSED — a deletion undone when the common ancestor cannot be read
 
-### Why, and it is narrower than it looks
+**Fixed 2026-10-01.** The one failure in this file that was reproduced off-lab,
+and the one that took the longest.
 
-A three-way merge does **not** need a record of the deletion. Given the common
-ancestor S, our tree and theirs, "absent from theirs and present in S" *is* a
-deletion, provably — and `fs-conflict-resolver.ts` gets that right. The same
-scenario with the ancestor readable passes (T2).
+A node deleted a file while partitioned; on rejoin the file came back on **every**
+node including the one that deleted it. A three-way merge does not need a record
+of the deletion — given the common ancestor it can prove the file was removed —
+but a partitioned node cannot read the rows its peers wrote while it was away,
+so the ancestor was unresolvable and the merge degraded to two trees with no way
+to tell a deliberate absence from an old one.
 
-What fails is the case where the ancestor **cannot be resolved**. A partitioned
-node cannot read the revision rows its peers produced while it was away, so the
-merge degrades to two trees — one with the file, one without — and nothing
-distinguishes a deliberate absence from a state that merely predates the file.
+**Reconciliation is now additive.** Two nodes compare per-bucket manifests and
+each fetches what it is missing; a deletion is carried as an ENTRY at an empty
+blob id, so a peer still holding the file sees something to drop rather than an
+absence to interpret. There is no outcome in which one side's folder replaces
+the other's.
 
-So the missing information is not "that a deletion happened" in general. It is
-that a deletion happened **at a node whose ancestry the reader cannot fetch**.
-That is what a persistent tombstone supplies, and why it is the fix rather than
-better merge logic.
+It needed two more things to be true at once, and neither was in the plan:
 
-### Half of it is fixed; the half that remains is propagation
+- **the prune rule had to stop deleting on authority it does not have.** An
+  absence prunes only for a sender that has demonstrably seen this node's
+  state (`senderSawMyState`, narrowed on authorship — D5).
+- **the inline merge had to stop pruning.** It materialises a merged tree, and
+  one whose ancestor it could not resolve is missing a side's files. Its
+  materialisation is additive and its deletions are targeted at the paths it
+  actually resolved away.
 
-`_pendingDeletes` is now a **persistent tombstone log**, written to
-`.fsagent-state.json` and reloaded on start. Its lifetime used to be one
-announcement — `_rememberAnnounced` cleared it — which is exactly one push too
-early: "once peers have been told, a file's absence is theirs to know about" is
-true only of a peer that HEARD.
+Without those the fix traded a lost delete for a lost add.
 
-**Measured over four runs of T4 with the log persistent:** the node that
-deleted the file now keeps its deletion, every time. Its peers do not.
-
-```
-A: [keeper.txt, meanwhile.txt]              ← the delete held
-B: [doomed.txt, keeper.txt, meanwhile.txt]  ← never heard it
-C: [doomed.txt, keeper.txt, meanwhile.txt]  ← never heard it
-```
-
-So the remaining failure is a **permanent divergence, not a data loss** — which
-is strictly better, and still not good enough. Making a delete WIN on a peer
-that never heard it needs something that carries the deletion as a fact rather
-than as an absence, which is `src/fs-edit-chain.ts` and the work packages after
-it.
-
-### What a tombstone may be recorded for
-
-Only a path `_announcedFiles` holds — a file this node told its peers about.
-The watcher's own path is not trustworthy enough. Deleting one nested file on
-macOS emits TWO deletions, and the first names the **root folder itself**:
-
-```
-["deleted:test-temp-diag", "deleted:nested/deep.txt"]
-```
-
-It also reports directories as `modified`. All of that was harmless while the
-set was cleared on every announcement. A log that outlives the push turns it
-into a permanent tombstone for a file that never existed — and, on a folder
-deletion, into one per file, each refused for good if anyone restores them.
-
-### Still open
-
-**Nothing bounds the log.** Deleting a large folder writes one tombstone per
-file and keeps them. The mass-delete circuit breaker (`MASS_DELETE_MIN_FILES`,
-`MASS_DELETE_MAX_RATIO`) bounds what a restore may prune and does not yet bound
-what a delete may remember; `@rljson/mongo-agent` routes its tombstone
-application through the same breaker for exactly this reason.
-
-### What to watch for
-
-A file the user deleted reappearing on the user's own machine, and no `DELETED`
-count in that node's restore log line. With the log in place, the same defect
-now shows as one node disagreeing with the rest for good, rather than as the
-file coming back.
+**Proof:** mesh scenario T4, 8 of 8, on the default path. Its comment carries
+the whole progression — 4-5 of 8 as shipped, through five packages that were all
+coin flips and two that made it worse.
 
 ## Two people saving the same file at the same time
 
-**The later write does not reliably win.** When two workstations change the
-same file within a few seconds of each other, the agents settle on whichever
-advertisement arrives last, not on whichever save happened last. One of the two
-saves is then replaced — with no conflict, no copy and no log line.
+**The later write does not win. A deterministic one does.**
 
-### Why
+When two workstations change the same file at once, the winner is decided by
+comparing the two blob ids and taking the greater. Both machines see both ids in
+the exchange, so both reach the same answer with no coordination — and unlike
+what it replaces, that answer is the SAME on every node.
+
+What it is not is "the later save wins". There is no reliable ordering of two
+saves on two machines, so the rule is arbitrary by necessity; it is merely no
+longer arbitrary PER NODE. The losing content is reported, and preserved as a
+renamed conflict copy wherever `resolveConflicts` is on.
+
+Leaving it unresolved was tried and is worse: three clients editing one file sat
+on three versions for ever, because an additive step cannot settle a conflict.
+Measured as `simultaneous-edit` failing 4 of 6 in isolation.
+
+### Why the old behaviour was worse
 
 Causal ordering exists (`_ancestryRelation`: *ahead* / *behind* / *diverged*)
 but is consulted only when `resolveConflicts` is on, and that defaults to
-**off**. Without it there is no notion of which change was built on which, so
-the winner is decided by message timing.
+**off**. Without it there was no notion of which change was built on which, so
+the winner was decided by message timing — which is why the measurement below
+was a race that a 2-core CI runner lost two runs in five and a fast laptop won
+twenty times running.
+
+The rule that replaced it is still arbitrary, but it is not a race: it is a
+comparison of two values both sides already hold.
 
 ### What was measured (2026-09-27)
 

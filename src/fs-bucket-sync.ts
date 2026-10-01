@@ -255,6 +255,16 @@ export interface BucketSyncHost {
    * differences"*. A node mid-cold-start must neither answer nor ask.
    */
   ready(): boolean;
+  /**
+   * The roots were identical: the two folders hold the same content.
+   *
+   * Worth telling the host, because a ref comparison cannot reach this
+   * conclusion. Two nodes derive different tree refs for byte-identical
+   * content whenever anything outside the content map differs — and during a
+   * rollout, a node on an older build always does. Measured as eight minutes
+   * of `diverged: true` on 38 identical files.
+   */
+  agreed?(): void;
   /** Log sink. */
   log?: (message: string) => void;
 }
@@ -326,6 +336,10 @@ export class FsBucketSync {
       if (differ.length === 0) {
         this._log('[FsBucketSync] roots agree — nothing to reconcile');
         this._awaiting = null;
+        // Not merely "no work": PROOF that the two folders are the same, which
+        // no ref comparison can give. The host records it so the divergence
+        // stops being reported.
+        this._host.agreed?.();
         return true;
       }
       this._awaiting = { round: parsed.round, buckets: differ };
