@@ -21,7 +21,7 @@
 // wrote down exactly what they saw.
 // .............................................................................
 
-import { chmod, mkdir, rm, writeFile } from 'fs/promises';
+import { chmod, mkdir, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -510,4 +510,76 @@ describe('field defects, reduced off-lab', () => {
     const healed = ['free.txt', 'held/held-open.dbf', 'seed.txt'];
     expect(await mesh.node('B').settlesOn(healed, 60_000)).toEqual(healed);
   }, 180_000);
+  // ...........................................................................
+  // §13 — "A multi-megabyte file reaches nobody", observed 2026-09-15 and
+  // never investigated:
+  //
+  //   FAIL large-file-roundtrip  123389ms
+  //        "big-blob.bin" never reached NB-2510, NB-2505, NB-21624, NB-2744
+  //        after 120 attempts
+  //
+  // Not one of the four nodes, after two minutes of polling. *"The contrast
+  // that makes this interesting: `large-file-near-cap` PASSED in the same run,
+  // in 17.9 s. So a file close to the transport limit crossed fine while this
+  // one reached nobody at all"* — the recipe's 8 MB was always INSIDE the
+  // 50 MB cap, so size alone never explained it.
+  //
+  // And §2, "an oversized file leaves residue that is never cleaned up", which
+  // the register records as having failed in ALL SIX suite runs on 2026-09-02:
+  // `only NB-2744=3 of 2 after 240 attempts` — one node keeps the file after
+  // deletion, so the folder never returns to its expected state.
+  //
+  // Both carry the same instruction — *"RE-MEASURE BEFORE INVESTIGATING"*,
+  // because the whole blob path changed in 0.4.1: fetch is ranged, restore
+  // streams to disk, `setBlob` hashes while writing. A removed cause is not a
+  // measured pass, so this measures it, and the two halves belong in one test
+  // because the second only means anything if the first worked.
+  //
+  // 8 MB is the recipe's own size, kept rather than reduced.
+  // ...........................................................................
+  it('F9: a multi-megabyte file crosses, and deleting it leaves no residue', async () => {
+    const MB = 8;
+    mesh = await buildFsMesh({
+      root: root('bigblob'),
+      names: ['A', 'B', 'C'],
+      seed: async (folders) => {
+        for (const folder of Object.values(folders)) {
+          await writeFile(join(folder, 'seed.txt'), 'seed');
+        }
+      },
+    });
+    expect((await mesh.converged()).converged).toBe(true);
+
+    // Incompressible, so nothing in the path can make this cheap by accident.
+    const big = Buffer.alloc(MB * 1024 * 1024);
+    for (let i = 0; i < big.length; i++) big[i] = (i * 2654435761) & 0xff;
+    await writeFile(join(mesh.node('A').folder, 'big-blob.bin'), big);
+
+    const withBig = ['big-blob.bin', 'seed.txt'];
+    for (const name of ['A', 'B', 'C']) {
+      expect(
+        await mesh.node(name).settlesOn(withBig, 120_000),
+        `big-blob.bin never reached ${name}`,
+      ).toEqual(withBig);
+    }
+    // The BYTES, not just the name — a truncated or empty file would satisfy
+    // a file listing and is exactly what a broken ranged fetch produces.
+    for (const name of ['B', 'C']) {
+      const landed = await stat(join(mesh.node(name).folder, 'big-blob.bin'));
+      expect(landed.size, `${name} holds the wrong number of bytes`).toBe(
+        big.length,
+      );
+    }
+
+    // §2: now delete it, and every node must come back to its expected state.
+    await mesh.node('A').del('big-blob.bin');
+    const result = await mesh.converged({
+      timeoutMs: 120_000,
+      stableMs: 5_000,
+    });
+    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    for (const name of ['A', 'B', 'C']) {
+      expect(result.snapshot[name], `residue on ${name}`).toEqual(['seed.txt']);
+    }
+  }, 300_000);
 });
