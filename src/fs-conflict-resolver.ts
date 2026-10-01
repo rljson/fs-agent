@@ -467,11 +467,27 @@ export class FsConflictResolver {
       await this.deps.writeFileAt(path, await this.deps.getBlobContent(blobId));
     }
 
-    // Delete: files the winner had on disk that the merge resolved away.
-    for (const [path, blobId] of winnerMap) {
-      if (blobId === DIR_MARKER) {
-        continue;
-      }
+    // Delete: every path EITHER branch held that the merge resolved away.
+    //
+    // Both maps, not just the winner's. The winner's alone was enough while
+    // `restoreTree` ran with `cleanTarget` — the prune swept up anything in
+    // neither tree. That prune is now off under bucket sync, because a merged
+    // tree whose common ancestor could not be resolved is missing one side's
+    // files and pruning on its authority destroyed the partitioned node's own
+    // work, 6 runs in 8.
+    //
+    // So the deletions are TARGETED instead: exactly the paths the merge
+    // decided were gone, which is what it actually knows. Strictly better than
+    // a blanket prune even where the prune was safe — it cannot remove a file
+    // the merge never had an opinion about.
+    const resolvedAway = new Set<string>();
+    for (const [path, blobId] of [...winnerMap, ...loserMap]) {
+      // Directories are not deleted by path: an empty one is removed by the
+      // prune that walks the tree, and removing it here would race the files
+      // still being written into it.
+      if (blobId !== DIR_MARKER) resolvedAway.add(path);
+    }
+    for (const path of resolvedAway) {
       if (!plan.merged.has(path)) {
         await this.deps.deleteFileAt(path);
       }

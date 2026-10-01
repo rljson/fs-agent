@@ -331,6 +331,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
             mayPrune: senderSawMyState({
               currentRef: me.currentRef,
               lastAppliedRef: me.lastAppliedRef,
+              lastPushedRef: me.authored ? me.currentRef : 'something-else',
               senderPredecessors: history[sender.currentRef],
               ancestryIsCarried: true,
             }),
@@ -392,12 +393,21 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
     // That is the deletion path's half of §2.2, and it is why WP4 has to make
     // BOTH sites chain-aware. → WP3 + WP4.
     // .........................................................................
-    it.fails('D5: a sender I have moved past may not prune me', () => {
-      // I am at S2, built from S1. I applied S0 long ago and have moved on.
-      // The sender is still at S1, which descends from S0.
+    it('D5: a sender I have moved past may not prune me', () => {
+      // I am at S2, which I AUTHORED. I applied S0 long ago and have moved on.
+      // The sender is still at S1, which descends from S0 — a state that is
+      // behind me, so its tree cannot account for what I have done since and
+      // must not be allowed to delete it.
+      //
+      // Green since the prune rule narrowed `lastAppliedRef` on authorship,
+      // the same change `antiEntropyDecision` needed. The authorship is the
+      // whole condition: a node that has only ever APPLIED has no work of its
+      // own to lose, and both names for its state still count for it — see the
+      // guard below, which is the measured reason that matters.
       expect(
         senderSawMyState({
           currentRef: 'S2',
+          lastPushedRef: 'S2',
           lastAppliedRef: 'S0',
           senderPredecessors: ['S0'],
           ancestryIsCarried: true,
@@ -416,6 +426,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
       expect(
         senderSawMyState({
           currentRef: 'S2',
+          lastPushedRef: 'S2',
           lastAppliedRef: undefined,
           senderPredecessors: [],
           ancestryIsCarried: false,
@@ -430,6 +441,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
       expect(
         senderSawMyState({
           currentRef: 'S2',
+          lastPushedRef: 'S2',
           lastAppliedRef: undefined,
           senderPredecessors: [],
           ancestryIsCarried: true,
@@ -445,7 +457,13 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
       // files and propagated an added file, and NONE could delete one.
       expect(
         senderSawMyState({
+          // NOT authored: this node applied a tree and re-scanned, so its
+          // `currentRef` is its own name for the state the tree arrived
+          // under. It has no work of its own to lose, so both names count —
+          // and with `currentRef` alone, three lab runs in four converged on
+          // 1 201 files and NONE could delete one.
           currentRef: 'rescanned-locally',
+          lastPushedRef: undefined,
           lastAppliedRef: 'S1',
           senderPredecessors: ['S1'],
           ancestryIsCarried: true,

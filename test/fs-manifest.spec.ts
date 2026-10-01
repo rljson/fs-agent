@@ -9,10 +9,11 @@
 //
 // Every reconciliation this agent has is whole-folder, so every wrong decision
 // is maximally destructive. `reconcile` cannot produce a destructive outcome at
-// all — its vocabulary is "fetch what we lack", "drop what the peer proved it
-// deleted" and "re-assert our own deletion". That is the property §3.1 says
-// makes the two measured failures impossible rather than rarer, and the tests
-// below are mostly about proving it has no other outcome.
+// all — its vocabulary is "fetch what we lack", "adopt the peer's side of a
+// conflict", "drop what the peer proved it deleted" and "re-assert our own
+// deletion". That is the property §3.1 says makes the two measured failures
+// impossible rather than rarer, and the tests below are mostly about proving it
+// has no other outcome.
 // .............................................................................
 
 import { describe, expect, it } from 'vitest';
@@ -272,14 +273,60 @@ describe('reconcile', () => {
     expect(plan.redelete).toEqual([]);
   });
 
-  it('NAMES a genuine edit conflict instead of resolving it', () => {
-    // Both sides hold the path with different content. Not reconcilable
-    // additively, so it is reported — whole-folder replacement answered this
-    // by guessing, and the guessing is what the plan removes.
-    const plan = reconcile([E('both.txt', 'mine')], [E('both.txt', 'theirs')]);
-    expect(plan.conflict).toEqual(['both.txt']);
-    expect(plan.fetch).toEqual([]);
-    expect(plan.drop).toEqual([]);
+  describe('a genuine edit conflict', () => {
+    // Naming it and stopping there was the first version, and it cost
+    // convergence: three clients editing one file sat on three versions for
+    // ever, because an additive step cannot resolve a conflict. So the rule
+    // resolves it — and the rule has to give BOTH machines the same answer
+    // from what each already has.
+
+    it('is always reported, whichever side wins', () => {
+      // Reported so the losing content can be preserved as a conflict copy,
+      // and so the event is visible rather than silent.
+      expect(
+        reconcile([E('p', 'aaa')], [E('p', 'zzz')]).conflict,
+      ).toEqual(['p']);
+      expect(
+        reconcile([E('p', 'zzz')], [E('p', 'aaa')]).conflict,
+      ).toEqual(['p']);
+    });
+
+    it('adopts the peer’s version when theirs is the greater blob id', () => {
+      const plan = reconcile([E('p', 'aaa')], [E('p', 'zzz')]);
+      expect(plan.fetch).toEqual([['p', 'zzz']]);
+    });
+
+    it('keeps ours when ours is the greater — the peer adopts it', () => {
+      const plan = reconcile([E('p', 'zzz')], [E('p', 'aaa')]);
+      expect(plan.fetch).toEqual([]);
+    });
+
+    it('gives the two sides the SAME winner, which is the whole point', () => {
+      // Each side sees both blob ids in the exchange, so each reaches the
+      // same conclusion with no coordination and no extra message: exactly
+      // one of them fetches. Arbitrary, and the same arbitrary choice
+      // everywhere — unlike "whichever advertisement arrived last", which is
+      // what it replaces.
+      const ours = E('p', 'blob-A');
+      const theirs = E('p', 'blob-B');
+      const weSee = reconcile([ours], [theirs]);
+      const theySee = reconcile([theirs], [ours]);
+      expect(weSee.fetch.length + theySee.fetch.length).toBe(1);
+      const winner =
+        weSee.fetch.length === 1 ? weSee.fetch[0][1] : ours[1];
+      expect(winner).toBe('blob-B');
+    });
+
+    it('never deletes anything to settle a conflict', () => {
+      for (const [a, b] of [
+        ['aaa', 'zzz'],
+        ['zzz', 'aaa'],
+      ] as const) {
+        const plan = reconcile([E('p', a)], [E('p', b)]);
+        expect(plan.drop).toEqual([]);
+        expect(plan.redelete).toEqual([]);
+      }
+    });
   });
 
   it('produces NO destructive outcome for any additive difference', () => {
@@ -300,6 +347,8 @@ describe('reconcile', () => {
         const theirs = theirBlob === undefined ? [] : [E('p', theirBlob)];
         const plan = reconcile(ours, theirs);
 
+        // Still only about DESTRUCTION. A conflict may now produce a fetch —
+        // that is the deterministic resolution — and a fetch is additive.
         const destructive = plan.drop.length + plan.redelete.length > 0;
         const oneSideDeleted =
           (ourBlob === TOMBSTONE_BLOB && theirBlob !== undefined &&

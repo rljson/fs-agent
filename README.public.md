@@ -847,11 +847,14 @@ Deletions travel as facts rather than absences, so a deleted file stays deleted
 and a file the other side simply has not got yet is never pruned. A genuine edit
 conflict — both sides changed the same file — is reported rather than resolved.
 
-**Default off.** It replaces the repair model rather than correcting it, and it
-needs a lab run before it becomes the default. With it on, three scenarios that
-are ~5-in-8 flaky without it converge 8 out of 8: a fork keeping both sides'
-work, a delete made during a partition staying deleted, and the three-node
-version of both.
+**On by default.** `bucketSync: false` returns to the old whole-folder repair,
+which is kept only as an escape hatch.
+
+A same-file edit conflict is resolved by a rule both machines compute from what
+they already have — the greater blob id wins — so they converge in one round
+with no coordination. Arbitrary, and the same arbitrary answer on every node,
+unlike "whichever advertisement arrived last". The losing content is still
+reported, and preserved as a conflict copy where `resolveConflicts` is on.
 
 ## Deletions are remembered
 

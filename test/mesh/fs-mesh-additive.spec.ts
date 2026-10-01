@@ -21,15 +21,11 @@
 // files converge under the old model too, so these assert that the additive
 // path WORKS and prove nothing about what it fixed.
 //
-// A4 is the controlled one. It is T4's scenario — the only test in this repo
-// that reproduces a field data loss off-lab — run with the switch on, and T4
-// is the same scenario with it off:
-//
-//   T4, `bucketSync` off   4–5 of 8   (`fs-mesh.spec.ts`, committed skipped)
-//   A4, `bucketSync` on    8 of 8
-//
-// Same scenario, same assertions, one switch. That is the evidence; A1–A3 are
-// coverage of the additive path.
+// The scenario that carries the evidence is T4 in `fs-mesh.spec.ts`, which is
+// now GREEN on the default path and whose comment records the whole
+// progression. A4 used to live here as the switched-on copy of it; with the
+// switch on by default the two were the same test, so it is gone and T4 is the
+// one to read.
 // .............................................................................
 
 import { writeFile } from 'fs/promises';
@@ -150,62 +146,4 @@ describe('additive reconciliation', () => {
     }
   }, 120_000);
 
-  // ...........................................................................
-  // A4 — T4, with the switch on. THE CONTROLLED RESULT.
-  //
-  // Byte-for-byte the scenario of `fs-mesh.spec.ts`'s T4, which is the only
-  // test in this repo that reproduces a field data loss off-lab: a node deletes
-  // a file while partitioned, the fleet moves on meanwhile, and on rejoin the
-  // file comes back on every node INCLUDING the one that deleted it.
-  //
-  //   T4, `bucketSync` off   4–5 of 8, measured repeatedly, committed skipped
-  //   A4, `bucketSync` on    8 of 8
-  //
-  // Same three nodes, same eight-second partition, same four files, same
-  // sixty-second budget and ten-second stability window, same assertions. The
-  // only difference is the switch, which is what makes this evidence rather
-  // than a demonstration.
-  //
-  // Eight runs, because anything less is noise: every sub-eight sample taken
-  // while building this plan was wrong, including two that were reported as
-  // results.
-  // ...........................................................................
-  it('A4: T4’s scenario — a partitioned delete, with adds alongside', async () => {
-    mesh = await buildFsMesh({
-      root: root('t4-equivalent'),
-      names: ['A', 'B', 'C'],
-      bucketSync: true,
-    });
-
-    await mesh.node('A').write('doomed.txt', 'doomed');
-    await mesh.node('A').write('keeper.txt', 'keeper');
-    expect((await mesh.converged()).converged).toBe(true);
-
-    mesh.node('A').cut();
-    await mesh.node('A').del('doomed.txt');
-    // The fleet moves on too, so A cannot simply fast-forward everyone onto
-    // its deletion when it returns.
-    await mesh.node('B').write('meanwhile.txt', 'meanwhile');
-    await mesh.node('B').write('more/one.txt', '1');
-    await mesh.node('B').write('more/two.txt', '2');
-    await sleep(8_000);
-    expect(await mesh.node('A').files()).toEqual(['keeper.txt']);
-
-    mesh.node('A').heal();
-    const result = await mesh.converged({
-      timeoutMs: 60_000,
-      stableMs: 10_000,
-    });
-
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
-    const expected = [
-      'keeper.txt',
-      'meanwhile.txt',
-      'more/one.txt',
-      'more/two.txt',
-    ];
-    expect(result.snapshot['A']).toEqual(expected);
-    expect(result.snapshot['B']).toEqual(expected);
-    expect(result.snapshot['C']).toEqual(expected);
-  }, 120_000);
 });

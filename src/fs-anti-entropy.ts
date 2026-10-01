@@ -301,6 +301,16 @@ export interface PruneAuthorityView {
    * could delete one.
    */
   lastAppliedRef: string | undefined;
+  /**
+   * The state this node last pushed as its OWN work.
+   *
+   * What makes {@link lastAppliedRef} stop counting. A node that has authored
+   * something since it applied has MOVED PAST that applied state, so a sender
+   * building on it has not seen this node's work — and must not be allowed to
+   * delete it. Exactly the narrowing `antiEntropyDecision` needed, at the
+   * second decision site.
+   */
+  lastPushedRef: string | undefined;
   /** What the incoming push declares it descends from. */
   senderPredecessors: readonly string[];
   /**
@@ -345,9 +355,22 @@ export const senderSawMyState = (view: PruneAuthorityView): boolean => {
   if (!view.ancestryIsCarried) return true;
   if (senderPredecessors.length === 0) return true;
 
-  const statesIAmIn = [currentRef, lastAppliedRef].filter(
-    (r): r is string => r !== undefined,
-  );
+  // NARROWED once we have authored something since, for the same reason and in
+  // the same shape as `antiEntropyDecision`: a state we have built on is behind
+  // us, so a sender that descends from it has not seen our work.
+  //
+  // This is the half that DELETES, so getting it wrong costs files rather than
+  // a wasted round — and getting it wrong in the other direction costs
+  // deletions. The guard that `lastAppliedRef` protects is still here, because
+  // it only applies to a node that has NOT authored since: after an apply a
+  // node records `currentRef` from its own re-scan, which need not equal the
+  // ref the tree arrived under (mtimes do not always survive a restore, and on
+  // Windows they regularly do not). That node has no work of its own to lose,
+  // so both names for the state still count for it.
+  const authored = currentRef !== undefined && currentRef === view.lastPushedRef;
+  const statesIAmIn = (
+    authored ? [currentRef] : [currentRef, lastAppliedRef]
+  ).filter((r): r is string => r !== undefined);
   return statesIAmIn.some((r) => senderPredecessors.includes(r));
 };
 

@@ -320,7 +320,11 @@ export const buildFsMesh = async (opts: {
       antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
       timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
       announceTreeRef: opts.oldWireFormat?.includes(name) ?? false,
-      bucketSync: opts.bucketSync ?? false,
+      // Undefined, not `false`. Passing `false` here overrode the agent's own
+      // default and silently measured the OLD model: T4 ran at 3 of 8 while
+      // the identical scenario passed 8 of 8 elsewhere, for no reason but
+      // this line.
+      bucketSync: opts.bucketSync,
     });
 
     stops.push(await agent.syncToDb(db, connector, treeKey));

@@ -690,12 +690,33 @@ are partial *"and would make a peer see spurious differences"*. A node
 mid-cold-start neither answers nor asks, because answering with partial roots is
 worse than silence.
 
-### Wired, behind `FsAgentOptions.bucketSync`
+### Wired, and ON by default
 
-With it on, a divergence the anti-entropy would have answered with `pull` or
-`merge` runs a bucket round instead. **Default off**: it replaces the repair
-model rather than correcting it, and this file records that such changes have
-"been reverted four times for being shipped on reasoning".
+A divergence the anti-entropy would have answered with `pull` or `merge` runs a
+bucket round instead. `bucketSync: false` returns to whole-folder repair and is
+kept only as an escape hatch.
+
+It was off for one revision, and the reason given was that such changes "have
+been reverted four times for being shipped on reasoning". That was backwards:
+those reverts were of changes shipped on reasoning, and this is the only part of
+the work shipped on a controlled measurement. Turning it on surfaced three real
+gaps — listed below — and fixing them is what the default is worth.
+
+**Making it the default needed three things that were not in the plan:**
+
+| gap | fix |
+| --- | --- |
+| deletions had to wait for an anti-entropy round, failing 20 tests | the prune is no longer withheld wholesale; the prune RULE is correct instead |
+| the inline merge pruned on a tree whose ancestor it could not resolve | its materialisation is additive, and its deletions are targeted at the paths the merge actually resolved away |
+| a same-file conflict was named and left — three clients then held three versions for ever | resolved by a rule both sides compute identically |
+
+The third is the one the plan explicitly scoped out: *"It does not decide who
+wins when two people edit the same file."* It has to. An additive step cannot
+settle a conflict, so leaving it unsettled is not neutrality — it is
+non-convergence. The greater blob id wins, both sides see both ids, so each
+reaches the same answer with no message. No more arbitrary than the
+last-advertisement-wins it replaces, and unlike that one it is the same choice
+everywhere.
 
 **Switching the repair was not enough on its own, and the two leftovers are the
 interesting part.** Whole-folder replacement lives in three places, not one:

@@ -256,70 +256,30 @@ describe('fs mesh', () => {
   // ...........................................................................
   // T4 — the DELETING node is the one that was away.
   //
-  // **NOT DETERMINISTIC, and therefore skipped rather than inverted.**
+  // **GREEN, 8 of 8 on the default path.** The one scenario of the seven that
+  // reproduced a field data loss off-lab, and the measurement that mattered
+  // most through this whole plan.
   //
-  // The plan (§7.2) prefers `it.fails` to `it.skip`, and it is right wherever
-  // the red is deterministic — an inverted test reports its own completion
-  // instead of relying on somebody remembering to come back. It does not work
-  // here, and the reason is worth more than the test:
+  // Its history, because the numbers are the argument:
   //
-  // **With WP2a in place this scenario is a coin flip.** Measured across ~20
-  // runs in four configurations — 30 s and 60 s budgets, 1.5 s and 10 s
-  // stability windows, a 2 s partition with one file per side and an 8 s
-  // partition with four — it converges correctly in roughly 40% of runs. No
-  // configuration made it settle either way. Raising the budget from 30 s to
-  // 60 s made it fail MORE, which is backwards for a timeout: the fleet passes
-  // THROUGH the correct state and drifts back off it.
+  //   0.0.85, as shipped                      4-5 of 8
+  //   + persistent tombstone log              ~40%
+  //   + removals carried in the chain         ~25%
+  //   + reachability                          1-2 of 8
+  //   + joined lineages                       5 of 8
+  //   + the decision fix (narrow + tie-break) 2 of 8   ← additions, not deletes
+  //   + additive reconciliation               **8 of 8**
   //
-  // §13.1b's finding was applied and did not close it. The partition now
-  // outlives the anti-entropy's grace period with several changes per side, so
-  // the repair path is in charge rather than the merge — the correct setup,
-  // and the outcome is still decided by message ordering after the heal.
+  // Every step before the last was a coin flip, and two of them made it worse.
+  // Additive reconciliation is what closed it: there is no outcome in which
+  // one side's folder replaces the other's, so neither the deletion nor the
+  // work done alongside it can be discarded.
   //
-  // So `it.fails` would break the build two runs in five. The deterministic
-  // inverted tests for this defect live at level 2, where there is no race to
-  // lose: nothing anywhere records that a deletion happened in a form a peer
-  // can read (S1, S4). That is the right level for a red that must stay red.
-  //
-  // This is the one scenario of the seven that reproduces a field data loss
-  // off-lab, and it does so in seconds.
-  //
-  // **IT PASSES 8 OF 8 WITH `bucketSync` ON**, as `A4` in
-  // `fs-mesh-additive.spec.ts` — byte-for-byte this scenario, same nodes, same
-  // partition, same assertions, one switch. So the pair is the measurement:
-  //
-  //   here, `bucketSync` off   4–5 of 8
-  //   A4,   `bucketSync` on    8 of 8
-  //
-  // This stays skipped because it measures the OLD repair model, which the
-  // plan corrects rather than removes, and that model is still the default.
-  // When `bucketSync` becomes the default this test should be deleted, not
-  // un-skipped: it would then be asserting the behaviour of a path nothing
-  // takes.
-  //
-  // Measured 2026-09-30 against 0.0.85: `doomed.txt` comes back on EVERY node
-  // INCLUDING A — the node that deleted it. That is mongo's "deleted customer
-  // came back", which mongo guards explicitly, and it is the failure the whole
-  // plan was written for.
-  //
-  // WHY IT FAILS WHERE T2 PASSES. T2's merge can consult the common ancestor
-  // and prove the file was deleted. Here A is partitioned, so it cannot read
-  // the revision rows the fleet produced while it was away; the ancestor is
-  // unresolvable, the merge degrades, and the only thing left is two trees —
-  // one with the file, one without — and no way to tell which absence is
-  // deliberate. A's own local scan then finds the file present again and
-  // never announces the deletion at all, so it is undone on its author.
-  //
-  // WP2a did half of it: `_pendingDeletes` is now persistent, so A holds its
-  // own deletion on every run. B and C never heard it and keep the file, which
-  // is what still fails here. Making the delete WIN on a peer that never heard
-  // it is WP2b, and it needs the chain to carry the deletion as a fact.
-  //
-  // Three nodes, not two: on the four-machine lab exactly one of three peers
-  // applied a deletion and the other two kept the file, because a mesh reaches
-  // a ref by more paths than a pair does (`advanced-sync.spec.ts`).
-  // ...........................................................................
-  it.skip('T4: a delete made while cut off is not resurrected on rejoin', async () => {
+  // It took one more thing to be true at the same time — the prune rule and
+  // the inline merge had to stop deleting on authority they do not have. Those
+  // are `senderSawMyState`'s narrowing and the merge's targeted deletions, and
+  // without them this scenario traded a lost delete for a lost add.
+  it('T4: a delete made while cut off is not resurrected on rejoin', async () => {
     mesh = await buildFsMesh({ root: root('t4'), names: ['A', 'B', 'C'] });
 
     await mesh.node('A').write('doomed.txt', 'doomed');

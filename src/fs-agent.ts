@@ -741,7 +741,7 @@ export class FsAgent {
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._announceTreeRef = options.announceTreeRef ?? false;
-    this._bucketSyncOn = options.bucketSync ?? false;
+    this._bucketSyncOn = options.bucketSync ?? true;
     this._antiEntropyOptions = options.antiEntropy;
     this._scanner = new FsScanner(rootPath, {
       ...options,
@@ -3532,7 +3532,23 @@ export class FsAgent {
       fetchTree: (rootRef) => this._fetchTreeFromDb(db, treeKey, rootRef),
       getBlobContent: (blobId) => this._adapter.getFileContent(blobId),
       restoreTree: (tree) =>
-        this.restore(tree, undefined, { cleanTarget: true }),
+        // `cleanTarget` OFF under bucket sync, and that one flag is the whole
+        // difference between a merge that resolves a conflict and one that
+        // destroys work.
+        //
+        // The inline merge is what handles two people editing the same file,
+        // so it must keep running — removing it cost three conflict-resolution
+        // tests. But it MATERIALISES its result with a prune, and a merged
+        // tree that could not resolve the common ancestor is missing one
+        // side's files: measured, the partitioned node lost the file it had
+        // created, 6 runs in 8.
+        //
+        // Additive instead. The merge contributes everything it worked out,
+        // nothing it could not account for is deleted on its authority, and
+        // the bucket round removes what a peer actually proved it removed.
+        this.restore(tree, undefined, {
+          cleanTarget: !this._bucketSyncOn,
+        }),
       writeFileAt: async (relativePath, content) => {
         const filePath = join(this._rootPath, relativePath);
         await mkdir(dirname(filePath), { recursive: true });
@@ -3797,19 +3813,7 @@ export class FsAgent {
           // edits) is resolved inline — a 3-way merge into a merge revision D —
           // *before* the destructive restore could clobber local changes, all
           // while the watcher is paused; `behind` falls through to fast-forward.
-          //
-          // Skipped entirely under bucket sync. An inline merge MATERIALISES a
-          // merged tree with `cleanTarget`, so it is whole-folder replacement
-          // by another name — and it is reached from the ordinary apply, not
-          // only from a repair, which is why switching the repair to additive
-          // was not enough on its own. Measured: A1 still lost the
-          // partitioned node's own file two runs in four with the merge left
-          // in place.
-          //
-          // Under bucket sync the apply only ADDS and the round reconciles, so
-          // there is nothing for a merge to decide.
           if (
-            !this._bucketSyncOn &&
             this._resolveConflicts &&
             this._currentRef &&
             predecessorRefs &&
@@ -3951,6 +3955,7 @@ export class FsAgent {
           const senderSawMyState = sawMyState({
             currentRef: this._currentRef,
             lastAppliedRef: this._lastAppliedRef,
+            lastPushedRef: this._lastPushedRef,
             senderPredecessors: predecessorRefs ?? [],
             ancestryIsCarried,
           });
@@ -4005,25 +4010,27 @@ export class FsAgent {
             return;
           }
 
-          // WITH BUCKET SYNC, AN ABSENCE IS NEVER A DELETION.
+          // The prune is withheld on the ORDINARY rules, and under bucket sync
+          // too — it is no longer withheld wholesale.
           //
-          // The whole point of carrying deletions as tombstone ENTRIES is that
-          // a path missing from a peer's tree no longer means the peer deleted
-          // it — it means the peer has not got it. Pruning on that basis is
-          // the whole-folder replacement this package is replacing, and
-          // leaving it on while the repair went additive was not a half
-          // measure but a contradiction: measured, A1 lost the file the
-          // partitioned node had created, two runs in four, with the bucket
-          // round working perfectly alongside it.
+          // It was, briefly, on the reasoning that carrying deletions as
+          // tombstone entries makes an absence meaningless. True, but the cost
+          // was that an ordinary deletion then had to wait for an anti-entropy
+          // round: twenty tests failed, all of them deletion propagation, the
+          // mass-delete guard and conflict resolution. A folder that takes ten
+          // seconds to notice a deleted file is not an improvement on one that
+          // occasionally gets it wrong.
           //
-          // Deletions arrive as `drop` from a round that knows which side
-          // deleted, bounded by the same mass-delete reasoning. So the apply
-          // stops guessing.
+          // What made the wholesale withhold look necessary was the prune rule
+          // itself: it let a sender this node had MOVED PAST delete the work
+          // done since. That is fixed where it belongs, in
+          // `senderSawMyState`, by the same narrowing `antiEntropyDecision`
+          // needed — so an absence prunes only for a sender that has
+          // demonstrably seen this node's state, and deletions keep
+          // propagating at once.
           const withholdPrune =
             restoreOptions?.cleanTarget &&
-            (this._bucketSyncOn ||
-              (ancestryExpected && !declaresAncestry) ||
-              !senderSawMyState);
+            ((ancestryExpected && !declaresAncestry) || !senderSawMyState);
           const applyOptions = withholdPrune
             ? { ...restoreOptions, cleanTarget: false }
             : restoreOptions;
