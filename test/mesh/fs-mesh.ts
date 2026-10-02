@@ -134,6 +134,13 @@ export interface FsMeshNode {
   readonly connector: Connector;
 
   /** Whether this node is currently partitioned. */
+  /**
+   * Everything this node has been observed holding, in order.
+   *
+   * Empty unless the mesh was built with `recordHistory`. Sampled from disk
+   * rather than hooked into the agent, so it sees what a user would see.
+   */
+  readonly timeline: FsTimeline;
   readonly isCut: boolean;
 
   /**
@@ -141,6 +148,20 @@ export interface FsMeshNode {
    * reads included. See the header for why it is total and not selective.
    */
   cut(): void;
+  /**
+   * Stops this node's own messages reaching anyone, while it keeps receiving.
+   *
+   * What a one-way firewall rule or a broken outbound route produces. The node
+   * looks healthy to itself and its work reaches nobody.
+   */
+  mute(): void;
+  /**
+   * Stops anything reaching this node, while its own messages still go out.
+   *
+   * The mirror image, and the nastier one: the node announces states nobody
+   * answers and never hears that the fleet has moved on.
+   */
+  deafen(): void;
   /** Lets it talk again. */
   heal(): void;
 
@@ -183,6 +204,32 @@ export interface FsMeshNode {
 }
 
 // .............................................................................
+/**
+ * What a node held at one moment: relative path → content.
+ *
+ * Content, not a hash: these folders are small and a failing invariant is
+ * something somebody has to read.
+ */
+export type FsSnapshot = Readonly<Record<string, string>>;
+
+/**
+ * A node's state over time, sampled.
+ *
+ * WHY THE PATH MATTERS AND NOT ONLY THE DESTINATION. `converged()` asks what
+ * every node holds at the end, and a fleet can reach the right answer by a
+ * route no user would forgive — a document going back to last week's version
+ * for ten seconds, a deleted file reappearing and being deleted again. Both
+ * converge. Both are the bug reports this project actually gets.
+ *
+ * `@rljson/mongo-agent`'s mesh has asserted this for a while (its
+ * `expectNoRegression` walks a per-node history for version regressions and
+ * post-delete resurrections) and this harness had no equivalent at all.
+ */
+export interface FsTimeline {
+  /** Samples in order, oldest first. */
+  readonly samples: ReadonlyArray<{ atMs: number; files: FsSnapshot }>;
+}
+
 /** What {@link FsMesh.converged} concluded. */
 export interface ConvergenceResult {
   /** Whether every uncut node agreed and stayed still. */
@@ -270,10 +317,20 @@ export const buildFsMesh = async (opts: {
    * replacing a folder. `FsAgentOptions.bucketSync` on every node.
    */
   bucketSync?: boolean;
+  /**
+   * Sample every node's folder on an interval and keep the series, so a test
+   * can assert over the ROUTE a fleet took and not only its destination. See
+   * {@link FsTimeline}.
+   */
+  recordHistory?: boolean;
+  /** How often to sample when `recordHistory` is on. Default 60 ms. */
+  historyMs?: number;
 }): Promise<FsMesh> => {
   const treeKey = opts.treeKey ?? 'sharedTree';
   const names = opts.names ?? ['A', 'B'];
   const conflicts: FsConflictReport[] = [];
+  /** Per node, the series its timeline exposes. Filled by the poller below. */
+  const series = new Map<string, Array<{ atMs: number; files: FsSnapshot }>>();
   const route = Route.fromFlat(`/${treeKey}`);
   const treeCfg = createTreesTableCfg(treeKey);
 
@@ -311,15 +368,28 @@ export const buildFsMesh = async (opts: {
 
     const [serverSocket, clientSocket] = createSocketPair();
 
-    // The partition: every event, both directions. See the header.
+    // The partition. `both` is the faithful default — see the header — but a
+    // one-way cut has to be possible too, because it is what a firewall, a
+    // NAT and an asymmetric route actually produce. A node that can SEND but
+    // not RECEIVE believes it is online and keeps announcing into a void; a
+    // node that can RECEIVE but not SEND looks healthy to itself while its
+    // own work reaches nobody. Both are indistinguishable from health locally,
+    // which is why they are worth testing and a symmetric cut cannot.
     let cut = false;
-    const gag = (socket: { emit: (e: string, ...a: unknown[]) => boolean }) => {
+    let muteOutbound = false;
+    let deafInbound = false;
+    const gag = (
+      socket: { emit: (e: string, ...a: unknown[]) => boolean },
+      blocked: () => boolean,
+    ) => {
       const pass = socket.emit.bind(socket);
       socket.emit = ((event: string, ...args: unknown[]) =>
-        cut ? true : pass(event, ...args)) as typeof socket.emit;
+        blocked() ? true : pass(event, ...args)) as typeof socket.emit;
     };
-    gag(clientSocket);
-    gag(serverSocket);
+    // The CLIENT socket's emit is this node talking; the SERVER socket's emit
+    // is the hub talking to it.
+    gag(clientSocket, () => cut || muteOutbound);
+    gag(serverSocket, () => cut || deafInbound);
 
     serverSocket.connect();
     await server.addSocket(serverSocket);
@@ -368,9 +438,12 @@ export const buildFsMesh = async (opts: {
 
     const abs = (path: string) => join(folder, ...path.split('/'));
 
+    const samples: Array<{ atMs: number; files: FsSnapshot }> = [];
+    series.set(name, samples);
     nodes.push({
       name,
       folder,
+      timeline: { samples },
       agent,
       db,
       connector,
@@ -380,8 +453,16 @@ export const buildFsMesh = async (opts: {
       cut: () => {
         cut = true;
       },
+      mute: () => {
+        muteOutbound = true;
+      },
+      deafen: () => {
+        deafInbound = true;
+      },
       heal: () => {
         cut = false;
+        muteOutbound = false;
+        deafInbound = false;
       },
       write: async (path, content) => {
         const file = abs(path);
@@ -489,6 +570,42 @@ export const buildFsMesh = async (opts: {
     await rm(opts.root, { recursive: true, force: true, maxRetries: 10 });
   };
 
+  // Sampling, when asked for.
+  //
+  // Polled from DISK rather than hooked into the agent, deliberately: a hook
+  // would report what the agent believes, and the invariants are about what a
+  // user would find in the folder. A duplicate consecutive sample is dropped,
+  // so a quiet fleet costs a readdir and nothing else.
+  let historyTimer: ReturnType<typeof setInterval> | null = null;
+  if (opts.recordHistory) {
+    const sample = async () => {
+      for (const n of nodes) {
+        const files: Record<string, string> = {};
+        for (const path of await n.files()) {
+          files[path] = (await n.read(path)) ?? '<unreadable>';
+        }
+        const got = series.get(n.name) as Array<{
+          atMs: number;
+          files: FsSnapshot;
+        }>;
+        const last = got[got.length - 1];
+        if (last && JSON.stringify(last.files) === JSON.stringify(files)) {
+          continue;
+        }
+        got.push({ atMs: Date.now(), files });
+      }
+    };
+    await sample();
+    historyTimer = setInterval(() => void sample(), opts.historyMs ?? 60);
+    historyTimer.unref?.();
+  }
+
+  const stopAll = async () => {
+    if (historyTimer) clearInterval(historyTimer);
+    historyTimer = null;
+    await stop();
+  };
+
   return {
     nodes,
     server,
@@ -497,7 +614,7 @@ export const buildFsMesh = async (opts: {
     node,
     snapshot,
     converged,
-    stop,
+    stop: stopAll,
     conflicts,
   };
 };
