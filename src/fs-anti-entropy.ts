@@ -392,6 +392,20 @@ export interface AntiEntropyStatus {
   hubRef: string | null;
   /** Our state at that moment. */
   localRef: string | null;
+  /**
+   * The paths this node and the hub actually disagree about, when that has
+   * been established.
+   *
+   * The register: *"als Statusinfo bleibt: die Prüfsummen sind
+   * verschieden"* — which tells
+   * an operator nothing they can act on, and tells a user nothing at all. The
+   * content comparison that decides {@link diverged} already knows the answer
+   * per PATH, so the answer is kept rather than reduced to a boolean.
+   *
+   * Empty when the two agree, and empty when nothing has compared them yet —
+   * which {@link diverged} distinguishes.
+   */
+  differingPaths: readonly string[];
   /** How many repairs were started over this agent's lifetime. */
   repairs: number;
   /**
@@ -411,6 +425,19 @@ export interface AntiEntropyStatus {
 }
 
 /** What {@link FsAntiEntropy} needs from the agent it runs in. */
+/** What a content comparison concluded. See {@link AntiEntropyDeps.sameContent}. */
+export interface ContentComparison {
+  /** Whether the two folders hold the same content. */
+  same: boolean;
+  /**
+   * The paths they disagree about — on either side, so a path only one of them
+   * holds is listed too.
+   *
+   * Reported even when {@link same} is true, in which case it is empty.
+   */
+  differing: readonly string[];
+}
+
 export interface AntiEntropyDeps {
   /** This agent's state, read fresh at every announcement. */
   view: () => AntiEntropyView;
@@ -449,7 +476,7 @@ export interface AntiEntropyDeps {
    * before: the repair still runs and a bucket round still settles it.
    * @param ref - The hub's ref.
    */
-  sameContent?: (ref: string) => Promise<boolean>;
+  sameContent?: (ref: string) => Promise<ContentComparison>;
   /** Clock, for tests. */
   now?: () => number;
   /** Log sink. */
@@ -518,6 +545,9 @@ export class FsAntiEntropy {
    */
   private readonly _contentChecking = new Set<string>();
 
+  /** See {@link AntiEntropyStatus.differingPaths}. */
+  private _differingPaths: readonly string[] = [];
+
   private _hubRef: string | null = null;
   private _localRef: string | null = null;
   private _repairs = 0;
@@ -548,8 +578,9 @@ export class FsAntiEntropy {
     this._contentChecking.add(ref);
     void this._deps
       .sameContent(ref)
-      .then((same) => {
-        if (same) this.agreedOn(ref);
+      .then((verdict) => {
+        this._differingPaths = verdict.differing;
+        if (verdict.same) this.agreedOn(ref);
       })
       .catch(() => {
         // Unreachable tree, timeout, a peer gone. The repair path handles it;
@@ -569,6 +600,9 @@ export class FsAntiEntropy {
    */
   agreedOn(ref: string): void {
     this._contentAgreed.add(ref);
+    // Agreement means there is nothing to list, and a stale list is worse than
+    // none: it is what a UI shows somebody.
+    this._differingPaths = [];
     // Oldest out first. A `Set` keeps insertion order, and the oldest verdict
     // is the one least likely to be asked about again.
     while (this._contentAgreed.size > CONTENT_AGREED_MAX) {
@@ -592,6 +626,7 @@ export class FsAntiEntropy {
   /** A snapshot of what this instance has seen and done. */
   get status(): AntiEntropyStatus {
     return {
+      differingPaths: this._differingPaths,
       diverged: this._divergedSince !== null,
       divergedSince: this._divergedSince,
       hubRef: this._hubRef,

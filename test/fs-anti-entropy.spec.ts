@@ -193,14 +193,16 @@ describe('FsAntiEntropy', () => {
     // One deferred answer per ref, so a test can hold a content check open and
     // watch what a repeat announcement does with it.
     const asked: string[] = [];
-    const pending = new Map<string, (same: boolean) => void>();
+    const pending = new Map<string, (v: ContentComparison) => void>();
     const ae = new FsAntiEntropy(options, {
       view: () => state,
       busy: () => busy,
       repair: (...args) => repairs.push(args),
       sameContent: (ref) => {
         asked.push(ref);
-        return new Promise<boolean>((resolve) => pending.set(ref, resolve));
+        return new Promise<ContentComparison>((resolve) =>
+          pending.set(ref, resolve),
+        );
       },
       now: () => now,
       log,
@@ -212,7 +214,7 @@ describe('FsAntiEntropy', () => {
       log,
       asked,
       answer: async (ref: string, same: boolean) => {
-        pending.get(ref)?.(same);
+        pending.get(ref)?.({ same, differing: same ? [] : ['some/path'] });
         pending.delete(ref);
         await Promise.resolve();
         await Promise.resolve();
@@ -235,6 +237,9 @@ describe('FsAntiEntropy', () => {
     });
     expect(ae.enabled).toBe(true);
     expect(ae.status).toEqual({
+      // Empty, and that is not the same as "they agree" — `diverged` says
+      // which. See `AntiEntropyStatus.differingPaths`.
+      differingPaths: [],
       diverged: false,
       divergedSince: null,
       hubRef: null,

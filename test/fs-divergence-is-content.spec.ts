@@ -222,4 +222,67 @@ describe('a divergence is a difference in CONTENT', () => {
     ).toBe(true);
     await rm(other, { recursive: true, force: true });
   }, 30_000);
+  // ...........................................................................
+  // E1 / M7 — the status says WHICH paths differ, not that the hashes do.
+  //
+  // *"Sämtliche Protokollzeilen hängen an einem Schalter, den der
+  // Produktivbetrieb nicht setzt. Als Statusinfo bleibt: 'die Prüfsummen sind
+  // verschieden'."* And the ask: *"die Statusanzeige um die eigentliche Frage
+  // erweitern: welche Dokumente unterscheiden sich."*
+  //
+  // The comparison that decides `diverged` already works per path — it has to,
+  // or it could not decide — so the answer exists and was being thrown away.
+  // ...........................................................................
+  it('names the paths that differ, not just that something does', async () => {
+    await writeFile(join(dir, 'shared.txt'), 'same');
+    await writeFile(join(dir, 'only-mine.txt'), 'mine');
+    const { agent, db, beacon } = await start();
+    await sleep(600);
+
+    // A hub holding one file we lack, one we have with other content, and one
+    // we agree on. All three kinds, because a status that reports only
+    // additions is as misleading as none.
+    const other = `${dir}-other`;
+    await rm(other, { recursive: true, force: true });
+    await mkdir(other, { recursive: true });
+    await writeFile(join(other, 'shared.txt'), 'same');
+    await writeFile(join(other, 'differs.txt'), 'theirs');
+    await new Promise((r) => setTimeout(r, 400));
+    const theirTree = await new FsAgent(other, new BsMem()).extract();
+    const theirs = await new FsDbAdapter(db, TREE).storeFsTree(theirTree, {
+      skipNotification: true,
+    });
+
+    beacon(theirs);
+    await sleep(900);
+
+    const status = agent.antiEntropyStatus!;
+    expect(status.diverged).toBe(true);
+    const differing = [...status.differingPaths].sort();
+    expect(
+      differing,
+      `the status says only that something differs: ${JSON.stringify(status.differingPaths)}`,
+    ).toEqual(['differs.txt', 'only-mine.txt']);
+    // And the one they agree on is NOT listed, or the list is just a file
+    // listing with extra steps.
+    expect(differing).not.toContain('shared.txt');
+    await rm(other, { recursive: true, force: true });
+  }, 30_000);
+
+  // ...........................................................................
+  it('lists nothing while the two agree', async () => {
+    // The counterpart. A list that is never empty is a permanent red mark in
+    // the UI, which is the complaint this started from.
+    await writeFile(join(dir, 'a.txt'), 'a');
+    const { agent, db, beacon } = await start();
+    await sleep(600);
+
+    const mine = await agent.extract();
+    const theirs = await storeOldBuildVariant(db, mine);
+    beacon(theirs);
+    await sleep(900);
+
+    expect(agent.antiEntropyStatus!.diverged).toBe(false);
+    expect(agent.antiEntropyStatus!.differingPaths).toEqual([]);
+  }, 30_000);
 });

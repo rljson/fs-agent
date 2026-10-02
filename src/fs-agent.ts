@@ -520,6 +520,43 @@ export class BlobUnavailableError extends RestoreIncompleteError {
  * judgement has to be made here, and it is deliberately biased: refusing a
  * real mass delete costs one manual step, applying a false one costs the data.
  */
+/**
+ * A restore could not write a path this filesystem will not accept.
+ *
+ * Its own class rather than a {@link BlobUnavailableError}, because the
+ * message is what somebody reads in a support request and "could not fetch
+ * blob" for a 300-character filename sends them to the network when the
+ * problem is the name. The bytes arrived; the path cannot exist here.
+ *
+ * Not retryable, unlike {@link PartialRestoreError}: a name does not become
+ * legal by waiting. The rest of the tree is applied around it.
+ */
+export class UnwritablePathError extends RestoreIncompleteError {
+  constructor(public readonly impossiblePaths: string[]) {
+    super(
+      `restore could not write ${impossiblePaths.length} path` +
+        `${impossiblePaths.length === 1 ? '' : 's'} this filesystem rejects: ` +
+        `${impossiblePaths.join(', ')}`,
+    );
+    this.name = 'UnwritablePathError';
+  }
+}
+
+/**
+ * The volume ran out of space mid-restore.
+ *
+ * Its own class because it is the one restore failure that is not about the
+ * tree at all, and because retrying it is pointless until a person acts. It
+ * aborts rather than skipping the file: a folder being filled on a full disk
+ * would otherwise lose a different file on every attempt.
+ */
+export class DiskFullError extends RestoreIncompleteError {
+  constructor(public readonly path: string) {
+    super(`no space left to write "${path}"`);
+    this.name = 'DiskFullError';
+  }
+}
+
 export class MassDeleteRefusedError extends RestoreIncompleteError {
   constructor(
     public readonly wouldPrune: number,
@@ -753,6 +790,54 @@ export class FsAgent {
    * cannot abandon the rest of the tree and, above all, cannot stop the prune.
    */
   private _restoreUnavailable: string[] = [];
+
+  /** Paths this filesystem rejected outright. See {@link UnwritablePathError}. */
+  private _restoreImpossible: string[] = [];
+
+  /**
+   * How long each stage of the last push and the last apply took, in ms.
+   *
+   * Measured on the lab: *"im Schnitt 3 Sekunden, im schlechtesten Fall 84.
+   * Alle Zeitbudgets der Testsuite hängen an dieser Zahl."* And the reason
+   * nobody could say more than that: *"bisher wird nur die Gesamtzeit
+   * gemessen. Die einzelnen Schritte mitmessen — Scan, Prüfsumme, Ablage,
+   * Meldung, Abholen, Schreiben —, sonst rät man."* (`KNOWN-WEAKNESSES.md`
+   * F5/C7.)
+   *
+   * A total tells you a sync was slow. It does not tell you whether the folder
+   * was being hashed, a blob was crossing the network, or a disk was writing —
+   * and those have different people to talk to. Kept as a plain record so a
+   * host can log or display it without this agent deciding how.
+   */
+  private readonly _stageMs: Record<string, number> = {};
+
+  /**
+   * Times one stage into {@link _stageMs}.
+   *
+   * Overwrites rather than accumulates: the question is "what did the last
+   * cycle cost", and a running total answers a different one and never resets.
+   * @param stage - The stage name.
+   * @param work - What to time.
+   * @returns Whatever `work` returned.
+   */
+  private async _timed<T>(stage: string, work: () => Promise<T>): Promise<T> {
+    const started = Date.now();
+    try {
+      return await work();
+    } finally {
+      this._stageMs[stage] = Date.now() - started;
+    }
+  }
+
+  /**
+   * What each stage of the last push and apply cost, in milliseconds.
+   *
+   * A snapshot, safe to keep: `push.*` is the send side, `apply.*` the receive
+   * side, and a stage absent simply has not run yet in this process.
+   */
+  get stageTimings(): Readonly<Record<string, number>> {
+    return { ...this._stageMs };
+  }
 
   /**
    * What this agent last wrote to each absolute path, so a repeat restore can
@@ -1452,7 +1537,11 @@ export class FsAgent {
    */
   async extract(): Promise<FsTree> {
     // Scan filesystem - stores file content in Bs, returns tree structure
-    const tree = await this._scanner.scan();
+    //
+    // Timed as `push.scan`: hashing a folder and crossing a network are
+    // different costs with different answers, and a single total cannot tell
+    // them apart. See {@link stageTimings}.
+    const tree = await this._timed('push.scan', () => this._scanner.scan());
 
     // Return the tree structure (blobIds are already in file metadata)
     return tree;
@@ -1490,6 +1579,7 @@ export class FsAgent {
     this._restoreTombstoned = 0;
     this._restoreLocked = [];
     this._restoreUnavailable = [];
+    this._restoreImpossible = [];
     await this._restoreTree(
       tree.rootHash,
       tree.trees,
@@ -1502,9 +1592,49 @@ export class FsAgent {
       // Only files that were here BEFORE the restore can be pruned, so that
       // is the population to judge against — a file written during the
       // restore is a fresh user write and is protected separately.
+      //
+      // And a path whose CONTENT arrives under a different name in the same
+      // tree is a MOVE, not a deletion — so it is not counted.
+      //
+      // Without that, renaming a folder is refused outright. To this system a
+      // rename is "delete everything and re-add", so every path under the old
+      // name disappears at once: measured at 140 of 140 files, ratio 1.0,
+      // `MASS DELETE REFUSED`, nothing applied. That is
+      // `KNOWN-WEAKNESSES.md` D5 — *"für das System ist ein Umbenennen 'alles
+      // löschen und neu anlegen'. Damit läuft es in die Löschsperre und
+      // blockiert"* — and the register notes there was never a test for it.
+      //
+      // Judged on the blobId, which is the only thing that survives a rename
+      // and the only thing that distinguishes the two cases: bytes that are
+      // still in the tree are not being destroyed, wherever they now sit. A
+      // real mass deletion removes the content too, so it still trips the
+      // guard.
+      //
+      // Receiver-side, deliberately. The register proposes detecting the move
+      // at the scan; four sender-side fixes in this area have been withdrawn,
+      // and the rule that holds is the one the receiver can check for itself.
+      const incomingBlobs = new Set<string>();
+      for (const [, node] of tree.trees) {
+        const blobId = node?.meta?.blobId as string | undefined;
+        if (blobId) incomingBlobs.add(blobId);
+      }
       let wouldPrune = 0;
+      let moved = 0;
       for (const existing of preRestore) {
-        if (!expectedFiles.has(existing)) wouldPrune++;
+        if (expectedFiles.has(existing)) continue;
+        const rel = relative(this._rootPath, existing).split(sep).join('/');
+        const known = this._scanner.knownFile(rel)?.blobId;
+        if (known !== undefined && incomingBlobs.has(known)) {
+          moved++;
+          continue;
+        }
+        wouldPrune++;
+      }
+      if (moved > 0) {
+        console.log(
+          `[FsAgent] ${moved} file(s) moved rather than deleted — not ` +
+            `counted against the mass-delete guard`,
+        );
       }
       if (
         wouldPrune > MASS_DELETE_MIN_FILES &&
@@ -1585,6 +1715,14 @@ export class FsAgent {
     // could not be.
     if (this._restoreUnavailable.length > 0) {
       throw new BlobUnavailableError([...this._restoreUnavailable].sort());
+    }
+
+    // Last of the three, because it is the least recoverable: a lock clears
+    // and a blob can arrive later, while a name this filesystem rejects never
+    // becomes acceptable. Reporting it first would hide a problem somebody
+    // can actually act on behind one they cannot.
+    if (this._restoreImpossible.length > 0) {
+      throw new UnwritablePathError([...this._restoreImpossible].sort());
     }
   }
 
@@ -1813,6 +1951,46 @@ export class FsAgent {
             this._restoreUnavailable.push(meta.relativePath);
             return;
           }
+          // A path this filesystem will not accept at all.
+          //
+          // Same answer as an unfetchable blob, and for the same reason: one
+          // file's name is worth exactly one missing file, never the rest of
+          // the tree. Without it the raw error escapes and the whole restore
+          // aborts — *"ein zu langer Pfad oder ein reservierter Name ist heute
+          // der billigste Weg, einen ganzen Rechner stillzulegen"*, and the
+          // node then *"empfängt gar nichts mehr und versucht es endlos mit
+          // derselben Datei"* (`KNOWN-WEAKNESSES.md` D2/Y2).
+          //
+          // NOT retried as a lock is, because the name will not become legal.
+          // Reported as unavailable, which is what it is: the tree describes a
+          // file this machine cannot hold.
+          // A full disk, reported as itself.
+          //
+          // *"Was bei voller Platte passiert, wurde nie getestet"*
+          // (`KNOWN-WEAKNESSES.md` D4), and what happened was a raw errno
+          // thrown out of the restore — indistinguishable from a bug, retried
+          // on a schedule, and described in no message anybody reads. The
+          // folder cannot be completed and no amount of retrying changes that
+          // until somebody frees space, so it is said once, loudly, and the
+          // restore stops.
+          if ((error as NodeJS.ErrnoException)?.code === 'ENOSPC') {
+            console.error(
+              `[FsAgent] NO SPACE LEFT on the volume holding ${this._rootPath}` +
+                ` — "${meta.relativePath}" could not be written. Sync is ` +
+                `stopped for this folder until space is freed.`,
+            );
+            this._writeSyncError('restore/diskFull', error);
+            throw new DiskFullError(meta.relativePath);
+          }
+          if (FsAgent._isImpossiblePath(error)) {
+            console.warn(
+              `[FsAgent] restore: "${meta.relativePath}" cannot exist on this ` +
+                `filesystem (${(error as NodeJS.ErrnoException).code}) — ` +
+                `skipped, and the rest of the tree applied.`,
+            );
+            this._restoreImpossible.push(meta.relativePath);
+            return;
+          }
           if (!FsAgent._isLocked(error)) throw error;
           console.warn(
             `[FsAgent] restore: "${meta.relativePath}" is held open by another ` +
@@ -1873,6 +2051,32 @@ export class FsAgent {
    * @param err - The caught value.
    * @returns `true` for a lock-shaped error.
    */
+  /**
+   * Whether a write failed because the PATH is impossible here, rather than
+   * because the file is busy.
+   *
+   * The rules differ per platform and this agent must not encode them: Windows
+   * refuses a component over 255, a total path over 260, the reserved device
+   * names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`…), a trailing space or dot;
+   * POSIX refuses a component over 255 and an embedded NUL. What they share is
+   * the errno, so the errno is what this reads.
+   *
+   * Deliberately NOT retried, unlike a lock: a name does not become legal by
+   * waiting. The file is reported as unavailable and the tree is applied
+   * around it.
+   * @param err - The caught value.
+   * @returns Whether the path itself is the problem.
+   */
+  private static _isImpossiblePath(err: unknown): boolean {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return (
+      code === 'ENAMETOOLONG' ||
+      code === 'EINVAL' ||
+      code === 'EILSEQ' ||
+      code === 'ENOTDIR'
+    );
+  }
+
   private static _isLocked(err: unknown): boolean {
     const code = (err as NodeJS.ErrnoException | null)?.code;
     return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
@@ -2227,7 +2431,9 @@ export class FsAgent {
     options?: RestoreOptions,
   ): Promise<void> {
     const fsTree = await this._fetchTreeFromDb(db, treeKey, rootRef);
-    await this.restore(fsTree, targetPath, options);
+    await this._timed('apply.write', () =>
+      this.restore(fsTree, targetPath, options),
+    );
   }
 
   /**
@@ -2763,10 +2969,12 @@ export class FsAgent {
                   `parent=${parentRef?.slice(0, 8) ?? 'none'} ` +
                   `files=${this._getFileContentMap(tree).size}`,
               );
-              await this._sendRef(
-                connector,
-                ref,
-                parentRef ? [parentRef] : undefined,
+              await this._timed('push.announce', () =>
+                this._sendRef(
+                  connector,
+                  ref,
+                  parentRef ? [parentRef] : undefined,
+                ),
               );
             }
           } catch (err) {
@@ -3971,10 +4179,12 @@ export class FsAgent {
           await this._applyIncomingRemovals(treeRef);
 
           // Fetch incoming tree from DB (without restoring yet)
-          const incomingTree = await FsAgent._withTimeout(
-            this._fetchTreeFromDb(db, treeKey, treeRef),
-            this._timeouts.fetchTree,
-            `syncFromDb → fetchTree(${treeKey}@${treeRef.slice(0, 8)}…)`,
+          const incomingTree = await this._timed('apply.fetchTree', () =>
+            FsAgent._withTimeout(
+              this._fetchTreeFromDb(db, treeKey, treeRef),
+              this._timeouts.fetchTree,
+              `syncFromDb → fetchTree(${treeKey}@${treeRef.slice(0, 8)}…)`,
+            ),
           );
 
           // Log fetch result for diagnostics
@@ -4341,7 +4551,9 @@ export class FsAgent {
           // side processes it, stores again (also broadcasting), and we get
           // an extra bounce-back cycle that can race with real file
           // mutations happening right after the settling period.
-          const postRestoreTree = await this._scanner.scan();
+          const postRestoreTree = await this._timed('apply.rescan', () =>
+            this._scanner.scan(),
+          );
           const dbAdapter = new FsDbAdapter(db, treeKey);
           // Ancestry: this revision descends from the sender's predecessor refs
           // (mapped to local timeIds). restore preserves mtime, so the stored
@@ -4821,9 +5033,25 @@ export class FsAgent {
       // comparing against a partial picture.
       sameContent: async (hubRef) => {
         const mine = this._scanner.tree;
-        if (mine === null || this._remoteApplyInFlight) return false;
+        if (mine === null || this._remoteApplyInFlight) {
+          return { same: false, differing: [] };
+        }
         const theirs = await this._fetchTreeFromDb(db, treeKey, hubRef);
-        return this._treesHaveEquivalentContent(mine, theirs);
+        const same = this._treesHaveEquivalentContent(mine, theirs);
+        // The paths, not just the verdict. The comparison has them, and
+        // "die Prüfsummen sind verschieden" is not something an operator can
+        // act on. See `AntiEntropyStatus.differingPaths`.
+        if (same) return { same, differing: [] };
+        const ours = this._getFileContentMap(mine);
+        const hub = this._getFileContentMap(theirs);
+        const differing = new Set<string>();
+        for (const [path, blob] of hub) {
+          if (ours.get(path) !== blob) differing.add(path);
+        }
+        for (const path of ours.keys()) {
+          if (!hub.has(path)) differing.add(path);
+        }
+        return { same, differing: [...differing].sort() };
       },
       repair: (action, hubRef, hubPredecessors, attempt) => {
         if (action === 'push') {
