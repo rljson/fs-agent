@@ -14,12 +14,13 @@ import {
   readdir,
   rename,
   rm,
+  lstat,
   stat,
   unlink,
   utimes,
   writeFile,
 } from 'fs/promises';
-import { dirname, join, relative, sep } from 'path';
+import { dirname, join, relative, resolve, sep } from 'path';
 
 import {
   AntiEntropyOptions,
@@ -535,7 +536,8 @@ export class UnwritablePathError extends RestoreIncompleteError {
   constructor(public readonly impossiblePaths: string[]) {
     super(
       `restore could not write ${impossiblePaths.length} path` +
-        `${impossiblePaths.length === 1 ? '' : 's'} this filesystem rejects: ` +
+        `${impossiblePaths.length === 1 ? '' : 's'} that cannot be written ` +
+        `here: ` +
         `${impossiblePaths.join(', ')}`,
     );
     this.name = 'UnwritablePathError';
@@ -793,6 +795,15 @@ export class FsAgent {
 
   /** Paths this filesystem rejected outright. See {@link UnwritablePathError}. */
   private _restoreImpossible: string[] = [];
+
+  /**
+   * Paths whose KIND changed — a file where a directory was, or the reverse.
+   *
+   * Counted and reported because such a change removes whatever was there,
+   * and a restore that silently deletes a subtree is one nobody can audit
+   * afterwards.
+   */
+  private _restoreRetyped = 0;
 
   /**
    * How long each stage of the last push and the last apply took, in ms.
@@ -1564,6 +1575,23 @@ export class FsAgent {
       target,
     );
 
+    // The same expected paths, indexed by lower case.
+    //
+    // Needed only by the prune, and only because most of this fleet runs on
+    // case-INSENSITIVE filesystems. Renaming `Angebot.docx` to
+    // `angebot.docx` does not move anything there — it is one path — so the
+    // restore writes the file and then the prune walks the directory, reads
+    // the name the filesystem actually kept, fails to find that exact string
+    // among the expected paths, and DELETES it. Measured: a case-only rename
+    // left the peer with an empty folder.
+    //
+    // Windows and macOS are both case-insensitive by default, so that is
+    // three machines in four.
+    const expectedByLowerCase = new Map<string, string>();
+    for (const expected of expectedFiles) {
+      expectedByLowerCase.set(expected.toLowerCase(), expected);
+    }
+
     // Capture the file set present BEFORE the restore. cleanTarget may only
     // prune files that already existed pre-restore — any file that appears
     // *during* the restore is a fresh user write and must be preserved
@@ -1580,6 +1608,7 @@ export class FsAgent {
     this._restoreLocked = [];
     this._restoreUnavailable = [];
     this._restoreImpossible = [];
+    this._restoreRetyped = 0;
     await this._restoreTree(
       tree.rootHash,
       tree.trees,
@@ -1668,6 +1697,7 @@ export class FsAgent {
         expectedDirs,
         expectedFiles,
         preRestore,
+        expectedByLowerCase,
       );
     }
 
@@ -1785,7 +1815,22 @@ export class FsAgent {
     /* v8 ignore next -- @preserve */
     if (meta.type === 'file') {
       // For files, fetch content using blobId from Bs
+      if (!FsAgent._isInsideRoot(targetPath, meta.relativePath)) {
+        console.error(
+          `[FsAgent] REFUSED a tree path that leaves the sync folder: ` +
+            `"${meta.relativePath}". Nothing was written. This is a tree ` +
+            `that should not exist; the rest of it is still applied.`,
+        );
+        this._writeSyncError(
+          'restore/pathEscapesRoot',
+          new Error(`"${meta.relativePath}" resolves outside ${targetPath}`),
+        );
+        this._restoreImpossible.push(meta.relativePath);
+        return;
+      }
       const filePath = join(targetPath, meta.relativePath);
+      // A directory may be sitting where this file belongs.
+      await this._makeRoomFor(filePath, 'file');
 
       /* v8 ignore else -- @preserve */
       if (meta.blobId) {
@@ -2002,10 +2047,27 @@ export class FsAgent {
       }
     } else if (meta.type === 'directory') {
       // For directories, create directory and recursively restore children
+      if (!FsAgent._isInsideRoot(targetPath, meta.relativePath)) {
+        console.error(
+          `[FsAgent] REFUSED a tree directory that leaves the sync folder: ` +
+            `"${meta.relativePath}". Nothing was created.`,
+        );
+        this._writeSyncError(
+          'restore/pathEscapesRoot',
+          new Error(`"${meta.relativePath}" resolves outside ${targetPath}`),
+        );
+        this._restoreImpossible.push(meta.relativePath);
+        return;
+      }
       const dirPath =
         meta.relativePath === '.'
           ? targetPath
           : join(targetPath, meta.relativePath);
+      // And a file may be sitting where this directory belongs. Never for the
+      // root itself, which is the folder being restored into.
+      if (meta.relativePath !== '.') {
+        await this._makeRoomFor(dirPath, 'directory');
+      }
 
       await mkdir(dirPath, { recursive: true });
 
@@ -2067,6 +2129,114 @@ export class FsAgent {
    * @param err - The caught value.
    * @returns Whether the path itself is the problem.
    */
+  /**
+   * Whether a tree's path stays inside the folder being restored.
+   *
+   * A tree is DATA FROM ANOTHER MACHINE. Nothing has checked where its paths
+   * point, and `join(target, '../escaped.txt')` resolves outside the target —
+   * so a peer, or one corrupted node, could write anywhere this process can.
+   * Measured before this existed: a tree carrying `../escaped.txt` put a file
+   * next to the sync folder, and the restore reported success.
+   *
+   * It needs no malice to matter. A relative path assembled wrongly, a
+   * `relativePath` left absolute by a future scanner, a tree edited by hand to
+   * reproduce a bug — all of them become an arbitrary file write on every node
+   * that applies the tree.
+   *
+   * Checked by RESOLVING rather than by looking for `..`, because `a/../../b`,
+   * a symlinked parent and an absolute path are all the same question and only
+   * one of them contains the obvious substring.
+   * @param target - The folder being restored into.
+   * @param relativePath - The path the tree claims.
+   * @returns Whether it is safe to write.
+   */
+  /**
+   * Clears whatever is at a path so a node of a DIFFERENT KIND can be written
+   * there.
+   *
+   * A path does not only change its contents; it changes what it IS. A user
+   * replaces a stray file with the folder it should have been, an export
+   * writes a single document where an unpacked directory used to sit. Both
+   * mature comparable projects test exactly these transitions —
+   * Syncthing as `filetype_test.go`, Unison as "file replacement" and
+   * "directory replacement" — and this agent did neither.
+   *
+   * Measured before this existed, all three aborting the WHOLE restore with a
+   * raw errno, so a single type change stopped the folder syncing:
+   *
+   *   file → directory          EEXIST: file already exists, mkdir
+   *   empty directory → file    EISDIR: illegal operation on a directory
+   *   directory with files → file   the same
+   *
+   * Nothing is destroyed that the tree does not already say is gone, and the
+   * mass-delete guard has already counted it: the subtree's files are in
+   * `preRestore` and absent from `expectedFiles`, which is exactly the
+   * population it judges. So a type change that would empty a folder is still
+   * refused before the walk reaches here.
+   *
+   * `lstat`, not `stat`: a symlink is a third kind of thing and must not be
+   * followed to decide what to remove.
+   * @param path - Where the node is to be written.
+   * @param want - What the tree says should be there.
+   * @returns Whether something had to be removed.
+   */
+  /**
+   * Whether a path the prune is about to delete is actually the expected file
+   * under another spelling of its name.
+   *
+   * On a case-insensitive filesystem `Angebot.docx` and `angebot.docx` are one
+   * file, so the two paths share an inode. On a case-sensitive one they are
+   * two files with two inodes, and the entry really is extraneous. Comparing
+   * the inode answers both without knowing which kind of filesystem this is.
+   * @param fullPath - The entry the prune found on disk.
+   * @param expectedByLowerCase - Expected paths indexed by lower case.
+   * @returns Whether the entry must be kept.
+   */
+  private async _isSameFileAsExpected(
+    fullPath: string,
+    expectedByLowerCase: Map<string, string>,
+  ): Promise<boolean> {
+    const expected = expectedByLowerCase.get(fullPath.toLowerCase());
+    if (expected === undefined || expected === fullPath) return false;
+    const [here, there] = await Promise.all([
+      lstat(fullPath).catch(() => undefined),
+      lstat(expected).catch(() => undefined),
+    ]);
+    /* v8 ignore next -- @preserve both were just walked or written */
+    if (here === undefined || there === undefined) return false;
+    const same = here.ino === there.ino && here.dev === there.dev;
+    if (same) {
+      console.warn(
+        `[FsAgent] restore: kept "${fullPath}" — the tree spells it ` +
+          `"${expected}" and this filesystem treats them as one file`,
+      );
+    }
+    return same;
+  }
+
+  private async _makeRoomFor(
+    path: string,
+    want: 'file' | 'directory',
+  ): Promise<boolean> {
+    const existing = await lstat(path).catch(() => undefined);
+    if (existing === undefined) return false;
+    const isDir = existing.isDirectory();
+    if (isDir === (want === 'directory')) return false;
+    await rm(path, { recursive: true, force: true });
+    this._restoreRetyped++;
+    console.warn(
+      `[FsAgent] restore: "${path}" was a ${isDir ? 'directory' : 'file'} ` +
+        `and the tree says ${want} — replacing it`,
+    );
+    return true;
+  }
+
+  static _isInsideRoot(target: string, relativePath: string): boolean {
+    const root = resolve(target);
+    const full = resolve(root, relativePath);
+    return full === root || full.startsWith(root + sep);
+  }
+
   private static _isImpossiblePath(err: unknown): boolean {
     const code = (err as NodeJS.ErrnoException | undefined)?.code;
     return (
@@ -2479,12 +2649,20 @@ export class FsAgent {
    * @param expectedDirs - Allowed directory paths
    * @param expectedFiles - Allowed file paths
    * @param preRestore - Files present before the restore (prune candidates)
+   * @param expectedByLowerCase - Expected paths indexed by lower case, so a
+   *   file the tree spells with different capitalisation is recognised as the
+   *   same file rather than pruned.
    */
   private async _pruneExtraneous(
     currentDir: string,
     expectedDirs: Set<string>,
     expectedFiles: Set<string>,
     preRestore: Set<string>,
+    // Defaulted so a caller that does not care about case — the tests that
+    // drive this directly — gets the behaviour it asks for rather than a
+    // crash. An empty index simply matches nothing, which is the same answer
+    // as a case-sensitive filesystem.
+    expectedByLowerCase: Map<string, string> = new Map(),
   ): Promise<void> {
     let entries;
     try {
@@ -2506,6 +2684,7 @@ export class FsAgent {
           expectedDirs,
           expectedFiles,
           preRestore,
+          expectedByLowerCase,
         );
         if (!expectedDirs.has(fullPath)) {
           const remaining = await readdir(fullPath);
@@ -2541,6 +2720,18 @@ export class FsAgent {
           this._announcedFiles.size > 0 &&
           !this._announcedFiles.has(fullPath)
         ) {
+          continue;
+        }
+        // Is this the expected file under a different spelling of its name?
+        //
+        // Decided by INODE rather than by assuming anything about the
+        // filesystem, which gets both kinds right with one rule: on a
+        // case-insensitive volume the expected path and this entry are the
+        // same file and it must be kept; on a case-sensitive one they are two
+        // files and this one really is extraneous. No probing, no platform
+        // check, no configuration. See `expectedByLowerCase`.
+        if (await this._isSameFileAsExpected(fullPath, expectedByLowerCase)) {
+          this._restoreSkipped++;
           continue;
         }
         await rm(fullPath, { force: true });

@@ -577,6 +577,23 @@ export class FsScanner {
           // in one operation and goes out as fast as it ever did; a
           // multi-megabyte copy waits one extra scan, and the alternative for
           // it is being published truncated and *"dort gilt sie als gültig"*.
+          // A timestamp in the FUTURE is not evidence of anything.
+          //
+          // Both halves of the settle rule compare the file's mtime to a
+          // moment of this machine's own clock, and both read a future
+          // timestamp as "touched just now": `mtime > scanStartedAt` is
+          // permanently true and `now - mtime` is negative, so the file is
+          // deferred on every scan and NEVER published. Measured: a file dated
+          // one day ahead was invisible to the tree for good.
+          //
+          // That is not exotic. Clock skew between these machines is a known
+          // problem in its own right (`KNOWN-WEAKNESSES.md` F7/S3/M6 —
+          // *"CARAT lässt Rechner nur auf BIOS-Uhren hören"*), an archive can
+          // carry any timestamp it likes, and a file copied from a machine
+          // running fast arrives dated ahead. None of those is a file being
+          // written, so none of them may be held back.
+          const now = Date.now();
+          const inTheFuture = mtimeMs > now;
           const seen = this._growing.get(childRelPath);
           const growing = seen !== undefined && seen !== childStats.size;
           if (growing) {
@@ -600,8 +617,9 @@ export class FsScanner {
           // D3, rated kritisch. A file being MODIFIED pays nothing, because
           // the last scan knew it; only the first sight of a new one waits.
           const firstSight =
+            !inTheFuture &&
             !this._blobCache.has(childRelPath) &&
-            Date.now() - mtimeMs < (this._options.settleMs as number);
+            now - mtimeMs < (this._options.settleMs as number);
           if (firstSight) this._growing.set(childRelPath, childStats.size);
 
           // And only while WATCHING. A deferral is a promise to come back, and
@@ -614,7 +632,9 @@ export class FsScanner {
           if (
             this._watcher !== null &&
             !this._paused &&
-            (mtimeMs > this._scanStartedAt || growing || firstSight)
+            ((mtimeMs > this._scanStartedAt && !inTheFuture) ||
+              growing ||
+              firstSight)
           ) {
             this._unsettledDuringScan.push(childRelPath);
             this._reuse(childRelPath, trees, childTrees, childRefs);

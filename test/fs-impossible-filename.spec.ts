@@ -174,7 +174,7 @@ describe('F1/D2 — a path the filesystem refuses', () => {
     // And it says the right KIND of thing: a support request that reads
     // "could not fetch blob" for a 300-character filename goes looking at the
     // network.
-    expect(err.message).toContain('this filesystem rejects');
+    expect(err.message).toContain('cannot be written here');
   }, 60_000);
 
   // ...........................................................................
