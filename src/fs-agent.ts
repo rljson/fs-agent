@@ -15,6 +15,7 @@ import {
   rename,
   rm,
   lstat,
+  rmdir,
   stat,
   unlink,
   utimes,
@@ -26,7 +27,6 @@ import {
   AntiEntropyOptions,
   AntiEntropyStatus,
   FsAntiEntropy,
-  senderSawMyState as sawMyState,
   type Reachability,
 } from './fs-anti-entropy.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
@@ -42,6 +42,7 @@ import {
   type BucketSyncHost,
 } from './fs-bucket-sync.ts';
 import {
+  compareTimeId,
   FsEditChain,
   planRemovals,
   type FsChainEntry,
@@ -184,7 +185,24 @@ export interface FsAgentOptions {
 
 /** Restore options */
 export interface RestoreOptions {
-  /** Remove files/dirs on target that are not present in the tree */
+  /**
+   * Remove files and directories on the target that the tree does not contain.
+   *
+   * **Destructive, and the peer-apply path never sets it.** Deleting what a
+   * tree happens to lack is an INFERENCE, and it is the one this package spent
+   * its whole history getting wrong: a tree lacks a path because the sender
+   * removed it, or because the sender never had it, and a content hash cannot
+   * say which. `syncFromDb` therefore applies additively and takes deletions
+   * from the chain, where they are STATED — see `_applyIncomingRemovals`.
+   *
+   * Still honoured by a direct {@link FsAgent.restore} call, which is a caller
+   * saying "make this folder be exactly this tree". That is a different
+   * question, and its answer is one the caller already knows.
+   *
+   * `syncFromDb` still ACCEPTS it, so a configuration carrying
+   * `cleanTarget: true` keeps working unchanged; it no longer authorises a
+   * prune there.
+   */
   cleanTarget?: boolean;
 }
 
@@ -2704,30 +2722,19 @@ export class FsAgent {
         // user write — preserve it so cleanTarget can't delete something the
         // user saved while a restore was in flight.
         //
-        // And only when peers could KNOW it exists.
+        // NO "could a peer have known about this file?" guard any more.
         //
-        // `preRestore` closes the window during a restore; this closes the one
-        // just before it. A file written a moment ago and not yet announced is
-        // invisible to every sender, so a tree that lacks it is not deleting it
-        // — it simply predates it. Pruning on that basis destroys the newest
-        // work in the network on the authority of a peer that never saw it.
+        // It existed because this ran on the peer-apply path, where a file
+        // written a moment ago and not yet announced was invisible to every
+        // sender, so a tree lacking it looked like a deletion. Measured on
+        // four machines: with 1 200 files converged, a file was created and
+        // vanished from EVERY node including the one that created it, one run
+        // in four.
         //
-        // Measured on four machines: with 1 200 files converged, a file was
-        // created and vanished from EVERY node including the one that created
-        // it, one run in four. After convergence each peer's state descends
-        // from the writer's current ref, so a peer pushing a fraction of a
-        // second later is a sender the writer must honour — and its tree does
-        // not contain a file that did not exist when it scanned.
-        // Only meaningful once this agent HAS announced something. An agent
-        // that never has cannot distinguish "written since" from "always
-        // here", and must not withhold pruning on a distinction it cannot
-        // make.
-        if (
-          this._announcedFiles.size > 0 &&
-          !this._announcedFiles.has(fullPath)
-        ) {
-          continue;
-        }
+        // The apply no longer prunes at all, so the only caller left is a
+        // direct `restore({ cleanTarget: true })` — a caller saying "make this
+        // folder be exactly this tree". Second-guessing that with a guard
+        // about what peers know would be answering a question nobody asked.
         // Is this the expected file under a different spelling of its name?
         //
         // Decided by INODE rather than by assuming anything about the
@@ -3381,15 +3388,15 @@ export class FsAgent {
    * @param treeRef - The ref that now describes this folder.
    */
   /**
-   * Re-announce this folder's current state after refusing an incoming tree.
+   * Re-announce this folder's state to a sender that holds far less of it.
    *
-   * A refusal means the sender holds less than this node does, so it is the one
-   * that needs telling. Without this the network settles into a state that is
-   * stable and wrong: the sparse node cannot push, the full node has nothing
-   * new to push, and nothing moves until an unrelated edit happens somewhere.
+   * The sender is the one that needs telling. Without this the network settles
+   * into a state that is stable and wrong: the sparse node cannot push, the
+   * full node has nothing new to push, and nothing moves until an unrelated
+   * edit happens somewhere.
    *
-   * Rate-limited because two nodes can refuse each other — each holding files
-   * the other lacks — and an unthrottled answer to every refusal is a loop.
+   * Rate-limited because two nodes can each hold what the other lacks, and an
+   * unthrottled answer is a loop.
    * @param connector - Connector to broadcast on.
    */
   private async _readvertiseAfterRefusal(connector: Connector): Promise<void> {
@@ -3491,6 +3498,64 @@ export class FsAgent {
    * its own pushes, and the states it adopts from theirs.
    * @param tree - The tree that just went out, or was adopted as ours.
    */
+  /**
+   * Agrees with the fleet on ONE entry for the state this folder is in.
+   *
+   * **This is where the fleet's single history is actually made.** Every node
+   * authors an entry for the state it starts in, and those states are usually
+   * IDENTICAL — peers already in sync hold the same bytes, so they derive the
+   * same tree ref. Without this, the fleet has one lineage per node from the
+   * first second, and then nothing is ever `behind` or `ahead`: `classify`
+   * finds neither head reachable from the other and answers `fork` to every
+   * announcement there has ever been.
+   *
+   * Measured on `a document never goes backwards while one person edits it`,
+   * 6 runs in 8, and the control confirms it predates this session: one writer
+   * saving v0…v8, two receivers cut and healed underneath. Each node's seed
+   * entry listed `changed=[]` — nothing, because nothing had changed — and was
+   * still its own lineage root. A healed receiver's announcement was therefore
+   * a FORK of the writer's, the writer merged it, a conflicted copy appeared
+   * on a file one person had edited, and the writer's own folder went from v8
+   * back to v5.
+   *
+   * **THE OLDEST ENTRY WINS**, asked BY CONTENT rather than taken from the
+   * announcement. Every node can see the same rows, so every node picks the
+   * same one without coordination; and adoption that only moves backwards in
+   * time is monotone, so it cannot oscillate as rows replicate. Whoever
+   * reached this content first described it first.
+   *
+   * Called wherever a ref is recognised as describing this folder as it
+   * stands — and the ECHO path is the one that matters, because that is where
+   * identical seed states meet. There is no content to apply, only a name to
+   * agree on, so the apply never runs and no other path sees them.
+   * @param treeRef - The ref describing this folder's current content.
+   */
+  private async _agreeOnEntryFor(treeRef: string): Promise<void> {
+    if (!this._chain) return;
+    const theirs = await this._chain
+      .oldestEntryForTreeRef(treeRef)
+      .catch(() => undefined);
+    if (!theirs || theirs.head === this._chainHead?.head) return;
+    const mine = this._chainHead
+      ? await this._chain.entry(this._chainHead.head).catch(() => undefined)
+      : undefined;
+    if (mine !== undefined && compareTimeId(theirs.timeId, mine.timeId) >= 0) {
+      return;
+    }
+    this._chainHead = { head: theirs.head, treeRef };
+    // Nothing here is this node's work, so it claims no path. A claim is what
+    // makes a peer's later removal of that path look stale.
+    for (const path of this._getFileContentMap(
+      this._scanner.tree ?? { rootHash: '', trees: new Map() },
+    ).keys()) {
+      this._localPathTimeIds.delete(path);
+    }
+    console.log(
+      `[FsAgent] agreed on the fleet's entry for the state this folder is ` +
+        `already in: head=${theirs.head.slice(0, 8)}…`,
+    );
+  }
+
   /**
    * Parks the chain head an announcement resolved to, for its apply to find.
    *
@@ -4046,10 +4111,42 @@ export class FsAgent {
     if (plan.apply.length === 0) return;
 
 
-    for (const path of plan.apply) {
+    // DEEPEST FIRST, and a directory is removed only when it is EMPTY.
+    //
+    // A removal list carries directory paths as well as file paths, and a
+    // plain `rm` without `recursive` throws on a directory — so the files went
+    // and the folder stayed. Measured as a directory deletion that never
+    // reached the peer (`should propagate directory deletion from A to B`,
+    // both transports) once absence stopped pruning and this became the only
+    // path that deletes.
+    //
+    // `recursive: true` is NOT the fix. It would delete whatever is inside
+    // the directory, including local files the sender never saw and never
+    // stated — the exact class of loss this whole change is about. `rmdir`
+    // refuses a non-empty directory, which is the correct outcome: what is
+    // still in there is somebody's work.
+    //
+    // Children before parents, so a directory is already empty by the time
+    // its own turn comes.
+    const deepestFirst = [...plan.apply].sort(
+      (a, b) => b.split('/').length - a.split('/').length,
+    );
+    for (const path of deepestFirst) {
       const absolute = join(this._rootPath, ...path.split('/'));
       try {
+        const stats = await lstat(absolute).catch(() => undefined);
+        if (stats === undefined) continue;
+        if (stats.isDirectory()) {
+          // Non-empty means somebody's work is in there; leaving it is right,
+          // and it is not an error.
+          await rmdir(absolute).catch(() => {});
+          continue;
+        }
         await rm(absolute, { force: true });
+        // Tombstoned, so a peer that has not yet heard about the deletion
+        // cannot put the file back. Only files: the restore's guard is about
+        // writing a file, and a directory tombstone would refuse one that
+        // merely shares the name.
         this._pendingDeletes.add(absolute);
       } catch (err) {
         /* v8 ignore next -- @preserve a file we cannot remove is retried */
@@ -4195,9 +4292,7 @@ export class FsAgent {
       fetchTree: (rootRef) => this._fetchTreeFromDb(db, treeKey, rootRef),
       getBlobContent: (blobId) => this._adapter.getFileContent(blobId),
       restoreTree: (tree) =>
-        // `cleanTarget` OFF under bucket sync, and that one flag is the whole
-        // difference between a merge that resolves a conflict and one that
-        // destroys work.
+        // ADDITIVE, unconditionally, and no longer only under bucket sync.
         //
         // The inline merge is what handles two people editing the same file,
         // so it must keep running — removing it cost three conflict-resolution
@@ -4206,12 +4301,14 @@ export class FsAgent {
         // side's files: measured, the partitioned node lost the file it had
         // created, 6 runs in 8.
         //
-        // Additive instead. The merge contributes everything it worked out,
-        // nothing it could not account for is deleted on its authority, and
-        // the bucket round removes what a peer actually proved it removed.
-        this.restore(tree, undefined, {
-          cleanTarget: !this._bucketSyncOn,
-        }),
+        // It used to be `!this._bucketSyncOn`, which left the destructive
+        // variant alive for a build with `announceTreeRef` on. That is the
+        // same inference by absence as everywhere else, with the same answer:
+        // the merge contributes everything it worked out, nothing it could not
+        // account for is deleted on its authority, and a real deletion comes
+        // from the chain. This was the last path inside the agent that could
+        // delete a file no peer had ever stated a removal for.
+        this.restore(tree, undefined, { cleanTarget: false }),
       writeFileAt: async (relativePath, content) => {
         const filePath = join(this._rootPath, relativePath);
         await mkdir(dirname(filePath), { recursive: true });
@@ -4402,6 +4499,11 @@ export class FsAgent {
           // state, `_lastSentRef` still matches and it is suppressed again at
           // no cost; if it has moved on, the ref is genuinely news.
           connector.invalidateReceived(treeRef);
+          // An ECHO is the strongest possible statement that two folders hold
+          // the same content: this node sent that exact ref. So it is the
+          // right moment to agree on one entry describing it — and the only
+          // moment, because nothing else on this path runs.
+          if (verdict === 'own-echo') await this._agreeOnEntryFor(treeRef);
           return;
         }
 
@@ -4525,6 +4627,11 @@ export class FsAgent {
             this._persistCurrentRef(treeRef);
             this._lastSentContentKey = this._contentKeyFromTree(currentTree);
             this._rememberAnnounced(currentTree);
+
+            // And agree with the fleet on ONE entry for it. Equivalent
+            // content is the same statement an echo makes, reached the long
+            // way round. See `_agreeOnEntryFor`.
+            await this._agreeOnEntryFor(treeRef);
             return;
           }
 
@@ -4627,201 +4734,103 @@ export class FsAgent {
             }
           }
 
-          // Content differs — restore from incoming tree.
+          // Content differs — restore from incoming tree. ADDITIVELY, AND
+          // THAT IS NOT A SETTING.
           //
-          // A ref that declares NO ancestry may ADD but must never PRUNE.
+          // **An absence is not a deletion.** A tree lacks a path because the
+          // sender removed it, or because the sender never had it, and a
+          // content hash cannot tell the two apart. Every attempt to decide it
+          // from the outside failed, and this is the graveyard: a rule asking
+          // *"could the sender have seen my state?"* from a declared
+          // predecessor ref, a flag for whether the transport carried ancestry
+          // at all, a guard for files this node had not yet announced, and a
+          // set of a thousand remembered past states. Four reverts, 155 files
+          // of measured drift on four machines, and a file deleted from 3 642
+          // that was back moments later.
           //
-          // Deletion is the destructive half of a restore, and a sender that
-          // cannot say what it descends from has not shown it knows the
-          // current state. A node that reconnects is exactly that: a fresh
-          // process with no `_currentRef`, whose first push therefore carries
-          // no predecessors — and until this, every peer applied that stale
-          // tree as authoritative and pruned the files created while it was
-          // away. Measured on four machines: a file reached all three
-          // connected nodes and was deleted from all three, two seconds later,
-          // by the fourth coming back.
+          // Deletions now arrive STATED, in the chain, where the node that
+          // performed one wrote it down: `_applyIncomingRemovals`, ordered by
+          // `timeId`, bounded by the mass-delete guard, and walked back through
+          // `previous` so a deletion made during a partition is still found.
+          // That walk is the only authority, and it runs before this point.
           //
-          // The ancestry guard above cannot catch it, because it is itself
-          // conditional on predecessors being present. So the rule lives here
-          // instead, and it costs nothing legitimate: a genuine first push has
-          // nothing to delete anyway.
-          // Gated on `_resolveConflicts`, and that gate is load-bearing: with
-          // it off, the rule would read a legitimate deletion as untrustworthy
-          // and silently stop deletions propagating — which it did, across
-          // eight tests, before the gate was added.
+          // The failure mode changes from *files silently deleted* to
+          // *deletions silently delayed* — a walk that cannot complete simply
+          // does nothing and the next announcement carries it. That is the
+          // right direction to be wrong in, and it is what this package is
+          // for: a non-destructive decentral sync.
           //
-          // ANCESTRY IS NOW ALWAYS TRANSMITTED (see `_sendRef`), which is the
-          // groundwork for replacing this gate. It is not replaced yet, and the
-          // measurement says why. Flipping it to `true` broke twenty tests:
-          // every deployment without `causalOrdering` carries no ancestry, so
-          // every deletion looked untrustworthy. Narrowing it to "expect
-          // ancestry where the transport actually carries it"
-          // (`connector.syncConfig?.causalOrdering === true`) left two, and
-          // those two are the real question rather than a fixture problem: a
-          // sender only declares ancestry once it HAS a current ref, so a
-          // genuinely fresh client's first push never does — and under the new
-          // rule its deletions would never prune.
-          //
-          // For a real client that is arguably right: a restarted one reloads
-          // its ref from `.fsagent-state.json` and does declare ancestry, so
-          // only a brand-new folder is treated as first contact, which is
-          // exactly the wanted behaviour. But it changes what "delete"
-          // means on a connection, and this class of change has been reverted
-          // four times for being shipped on reasoning. It needs its own
-          // rollout and a lab measurement, not a flag flip at the end of
-          // another one. See section 11 of doc/large-folder-plan.md.
-          // Ancestry is expected wherever it would actually be carried —
-          // either because this client resolves conflicts, or because the
-          // transport puts predecessors on the wire at all.
-          // Ancestry is expected wherever it would actually be carried —
-          // either because this client resolves conflicts, or because the
-          // transport puts predecessors on the wire at all.
-          const ancestryExpected =
-            this._resolveConflicts ||
-            connector.syncConfig?.causalOrdering === true;
-          const declaresAncestry = (predecessorRefs?.length ?? 0) > 0;
+          // `cleanTarget` is still accepted and still honoured by a direct
+          // `restore()` call. See {@link RestoreOptions.cleanTarget}.
+          const applyOptions =
+            restoreOptions?.cleanTarget === true
+              ? { ...restoreOptions, cleanTarget: false }
+              : restoreOptions;
 
-          // THE PRUNE RULE. One comparison, and the only question that
-          // separates a deletion from a straggler:
-          //
-          //   Is the state I am in among the states this push says it builds
-          //   on?
-          //
-          // Yes — the sender has seen what I have. Everything absent from its
-          // tree is absent BECAUSE IT REMOVED IT, and that is a deletion worth
-          // applying. No — it has not seen my state, so what looks like a
-          // deletion is only its own ignorance of my files.
-          //
-          // This needs no DAG walk, no sequence number, and no assumption
-          // about arrival order — the three things that sank four earlier
-          // attempts. A node catching up declares its own previous state,
-          // never mine, so it can never cause a prune however late it arrives.
-          // A node that genuinely deletes has just built on the state we share,
-          // and says so.
-          //
-          // A node with no `_currentRef` has nothing anyone could have built
-          // on, so it never prunes — which is the additive first meeting the
-          // plan asks for in section 12.
-          //
-          // Applied only where the transport actually CARRIES ancestry.
-          // A connector without `causalOrdering` never puts predecessors on the
-          // wire, so every push would look like one that had not seen this
-          // node's state, and every deletion would be refused. That is not a
-          // hypothetical: it is what the first run of this change did to twenty
-          // tests, all of which use a bare connector.
-          const ancestryIsCarried =
-            connector.syncConfig?.causalOrdering === true;
-          //
-          // Only a declaration that EXISTS is judged. A push that says nothing
-          // about what it descends from is left to the rule above, which is
-          // where undeclared ancestry has always been handled — reading silence
-          // as "has not seen my state" refuses every prune from a client whose
-          // first push predates its own `_currentRef`, and that is a real
-          // client on an ordinary startup, not an edge case.
-          //
-          // Two names for the same state, and both count. After an apply this
-          // node records `_currentRef` from its OWN re-scan of the folder,
-          // which need not equal the ref the tree arrived under — mtimes do not
-          // always survive a restore byte for byte, and on Windows they
-          // regularly do not. The peer that now deletes something declares the
-          // ref IT knows that shared state by, so a receiver comparing only
-          // against its own name for it rejects a real deletion.
-          //
-          // Measured: with only `_currentRef`, three lab runs in four converged
-          // perfectly on 1 201 files and propagated an added file — and none of
-          // them could delete one.
-          const statesIAmIn = [this._currentRef, this._lastAppliedRef].filter(
-            (r): r is string => r !== undefined,
+          // What this agent believed at the moment it applied. A rollback is
+          // always SOMEONE deciding a deletion is real, and until this line the
+          // decision left no record — only its consequence, in a count of files
+          // that were suddenly gone.
+          const incomingFileMap = this._getFileContentMap(incomingTree);
+          const currentFileMap = this._getFileContentMap(currentTree);
+          console.log(
+            `[FsAgent] applying ref=${treeRef.slice(0, 8)}… ` +
+              `newestFromSender=${isNewestFromSender} ` +
+              `incomingFiles=${incomingFileMap.size} ` +
+              `currentFiles=${currentFileMap.size}`,
           );
-          // Extracted to `fs-anti-entropy.ts` unchanged, so the rule can be
-          // enumerated (§7.3.1's D5) and so that making it chain-aware has
-          // somewhere to happen. This is the SECOND decision site, and the
-          // plan originally named only the first.
-          const senderSawMyState = sawMyState({
-            currentRef: this._currentRef,
-            lastAppliedRef: this._lastAppliedRef,
-            lastPushedRef: this._lastPushedRef,
-            senderPredecessors: predecessorRefs ?? [],
-            ancestryIsCarried,
-          });
 
-          // A SENDER THAT IS BEHIND IS IGNORED OUTRIGHT, and that decision is
-          // made by the chain, above, before anything else is considered.
+          // A SENDER HOLDING FAR LESS THAN THIS NODE IS THE ONE THAT NEEDS
+          // TELLING, and an additive apply alone will never tell it.
           //
-          // It used to be made here, by comparing the refs a push declared
-          // against a thousand remembered states: every declared parent being
-          // a state this node had held, and none of them the current one, read
-          // as "this sender is behind me". The conclusion was right and the
-          // instrument was not — a declared ref is a content hash, so the test
-          // could only ever match states this node had been in BY CONTENT, and
-          // it needed the sender to declare ancestry in the first place.
+          // This used to happen inside the mass-delete guard's refusal, which
+          // is also where the measurement comes from: a client that had joined
+          // and was then emptied sat at **1 of 3 642 files** with no refusal
+          // logged at all, while a fresh client was refused, answered, and
+          // converged in eleven seconds. And on four nodes, two sat at 5 and
+          // 15 of 121 files and could not recover, because every node holding
+          // the files refused their pushes and then went quiet.
           //
-          // Reachability answers it exactly: the sender's own head is an
-          // ancestor of ours, or it is not. Nothing is lost by ignoring such a
-          // push — a sender that is behind receives this node's newer state,
-          // applies it, and re-pushes anything of its own correctly parented,
-          // one round later.
+          // Nothing prunes on absence any more, so there is no refusal to hang
+          // this off — but the liveness problem it solved is untouched: a
+          // sparse peer pushes, this node applies nothing (there is nothing
+          // new in it), this node's own content does not change, so it has
+          // nothing to announce and says nothing. The sparse peer hears
+          // silence and stays sparse.
           //
-          // Refusing to PRUNE from an old tree was never enough on its own:
-          // applying one additively is what puts a deleted file back. A peer
-          // that has not yet seen a deletion pushes a tree that still contains
-          // the file — measured on the customer's folder, where a file deleted
-          // from 3 642 was back moments later.
-
-          // The prune is withheld on the ORDINARY rules, and under bucket sync
-          // too — it is no longer withheld wholesale.
-          //
-          // It was, briefly, on the reasoning that carrying deletions as
-          // tombstone entries makes an absence meaningless. True, but the cost
-          // was that an ordinary deletion then had to wait for an anti-entropy
-          // round: twenty tests failed, all of them deletion propagation, the
-          // mass-delete guard and conflict resolution. A folder that takes ten
-          // seconds to notice a deleted file is not an improvement on one that
-          // occasionally gets it wrong.
-          //
-          // What made the wholesale withhold look necessary was the prune rule
-          // itself: it let a sender this node had MOVED PAST delete the work
-          // done since. That is fixed where it belongs, in
-          // `senderSawMyState`, by the same narrowing `antiEntropyDecision`
-          // needed — so an absence prunes only for a sender that has
-          // demonstrably seen this node's state, and deletions keep
-          // propagating at once.
-          const withholdPrune =
-            restoreOptions?.cleanTarget &&
-            ((ancestryExpected && !declaresAncestry) || !senderSawMyState);
-          const applyOptions = withholdPrune
-            ? { ...restoreOptions, cleanTarget: false }
-            : restoreOptions;
-          if (applyOptions !== restoreOptions) {
-            console.warn(
-              `[FsAgent] ref=${treeRef.slice(0, 8)}… ` +
-                (declaresAncestry
-                  ? `descends from ${predecessorRefs?.map((r) => r.slice(0, 8)).join(', ')}, ` +
-                    `not from a state this node is in ` +
-                    `(${statesIAmIn.map((r) => r.slice(0, 8)).join(', ') || 'none'})`
-                  : 'declares no ancestry') +
-                ` — applying additively, not pruning.`,
-            );
+          // Non-destructive by construction — it only re-announces what this
+          // node already holds — and rate-limited, because two nodes can each
+          // hold what the other lacks and answer each other forever. The
+          // thresholds are the guard's, so "far less" means the same thing it
+          // has always meant here.
+          let missingFromSender = 0;
+          for (const path of currentFileMap.keys()) {
+            if (!incomingFileMap.has(path)) missingFromSender++;
           }
-          // What this agent believed at the moment it decided a prune was
-          // allowed. A rollback is always SOMEONE deciding a deletion is real,
-          // and until this line the decision left no record — only its
-          // consequence, in a count of files that were suddenly gone.
-          //
-          // Four fields, because each one is a different fix if it turns out to
-          // be the wrong one: whether the connector thought this was the
-          // sender's latest, whether the sender said what it descends from,
-          // whether pruning was allowed at all, and how the incoming tree
-          // compares in size to what is already here.
-          if (restoreOptions?.cleanTarget) {
-            console.log(
-              `[FsAgent] applying ref=${treeRef.slice(0, 8)}… ` +
-                `newestFromSender=${isNewestFromSender} ` +
-                `declaresAncestry=${declaresAncestry} ` +
-                `mayPrune=${applyOptions === restoreOptions} ` +
-                `incomingFiles=${this._getFileContentMap(incomingTree).size} ` +
-                `currentFiles=${this._getFileContentMap(currentTree).size}`,
+          if (
+            missingFromSender > MASS_DELETE_MIN_FILES &&
+            (incomingFileMap.size === 0 ||
+              missingFromSender / currentFileMap.size > MASS_DELETE_MAX_RATIO)
+          ) {
+            console.warn(
+              `[FsAgent] ref=${treeRef.slice(0, 8)}… holds ` +
+                `${incomingFileMap.size} where this node holds ` +
+                `${currentFileMap.size} — the sender is the one missing data.`,
             );
+            // RETIRE IT, or the SECOND time this happens is silent. A tree ref
+            // is a content hash, so a folder emptied twice re-derives the same
+            // ref both times — and the first advertisement left it marked
+            // "already received" here, so the connector drops the second
+            // before this agent ever sees it. Nothing answers and the peer
+            // stays empty for good.
+            //
+            // Measured: a client that had already joined and was then emptied
+            // sat at 1 of 3 642 files with nothing logged at all, while a FRESH
+            // client — whose empty ref this node had never seen — was answered
+            // and converged in eleven seconds. Same shape as the delete fix in
+            // 0.0.31: hearing a state is not the same as having consumed it.
+            connector.invalidateReceived(treeRef);
+            await this._readvertiseAfterRefusal(connector);
           }
           await FsAgent._withTimeout(
             this.restore(incomingTree, undefined, applyOptions),
@@ -4965,6 +4974,33 @@ export class FsAgent {
             // THROUGH the sender's state, so its own next entry names that head
             // as a second parent and the lineages join there instead.
             this._adoptedChainHead = senderHead;
+          }
+
+          // RECEIVING A PATH IS NOT EDITING IT.
+          //
+          // Whatever else happened, every path whose bytes now equal the bytes
+          // that arrived came from the sender. This node did not change it, so
+          // its next entry must not say it did — `_announcedContent` is what
+          // the delta is computed against, so recording the arrival here is
+          // what keeps the path out of `changed`.
+          //
+          // **The second half of the rollback.** With the roots unified a
+          // healed receiver is no longer a fork of the writer at the root, but
+          // one that landed SHORT still authors an entry of its own — correctly,
+          // being short of what you applied is a state of your own. That entry
+          // used to list the received paths as its own changes, stamped with a
+          // fresh `timeId` at heal time, so OLD content carried a NEW time.
+          // The writer then merged against it and the receiver's v5 out-ordered
+          // the writer's v8. Measured: `changed=[doc (conflicted copy …).txt,
+          // doc.txt]` on a node that had edited neither.
+          //
+          // The conflict copy in that list is genuinely local work and stays.
+          const arrived = this._getFileContentMap(incomingTree);
+          const held = this._getFileContentMap(postRestoreTree);
+          for (const [path, hash] of arrived) {
+            if (held.get(path) !== hash) continue;
+            this._announcedContent.set(path, hash);
+            this._localPathTimeIds.delete(path);
           }
 
           // NOT recording the incoming tree's files as prunable.

@@ -431,6 +431,41 @@ describe('FsEditChain.collectRemovals', () => {
       expect(winner).toBeTruthy();
     });
 
+    it('picks the OLDEST whichever order the rows come back in', async () => {
+      // The mirror of the test above, and the same reason: the comparison is
+      // otherwise exercised by whichever way the random `timeId` tails fell,
+      // which is coverage by luck.
+      //
+      // `oldestEntryForTreeRef` is how a fleet agrees on ONE name for one
+      // state — see `FsEditChain.append`'s root rule — so picking the wrong
+      // row means two nodes disagree about their own shared history.
+      const refOf = (result: unknown): string =>
+        (result as Array<Record<string, string>>)[0][`${TREE}EditHistoryRef`];
+      const row = async (stamp: string): Promise<string> =>
+        refOf(
+          await db.addEditHistory(TREE, {
+            timeId: stamp,
+            multiEditRef: `m-${stamp}`,
+            dataRef: 'SHARED',
+            previous: [],
+            _hash: '',
+          } as never),
+        );
+
+      // Descending then ascending, so the loop both replaces and KEEPS.
+      await row('9:zzz');
+      const winner = await row('1:aaa');
+      await row('5:mmm');
+
+      const rows = await db.getEditHistories(TREE, { dataRef: 'SHARED' });
+      expect(rows.length).toBe(3);
+      // The entry itself is unresolvable (its multiEdit is a stub), so this
+      // asserts the SELECTION rather than the reconstruction — which is the
+      // part with the branch in it.
+      expect(await chain.oldestEntryForTreeRef('SHARED')).toBeUndefined();
+      expect(winner).toBeTruthy();
+    });
+
     it('answers undefined for a tree ref no entry produced', async () => {
       await chain.append({ treeRef: 'T1' });
       expect(await chain.entryForTreeRef('never-stored')).toBeUndefined();

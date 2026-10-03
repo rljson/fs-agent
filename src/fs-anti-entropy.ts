@@ -291,96 +291,24 @@ export function antiEntropyDecision(
   return 'merge';
 }
 
-/** What {@link senderSawMyState} needs to answer. */
-export interface PruneAuthorityView {
-  /** The state this node's folder is in. */
-  currentRef: string | undefined;
-  /**
-   * The incoming state this node most recently applied.
-   *
-   * Load-bearing, and not a duplicate of `currentRef`. After an apply a node
-   * records `currentRef` from its OWN re-scan of the folder, which need not
-   * equal the ref the tree arrived under — mtimes do not always survive a
-   * restore byte for byte, and on Windows they regularly do not. A peer that
-   * now deletes something declares the ref IT knows that shared state by.
-   *
-   * Measured: with `currentRef` alone, three lab runs in four converged
-   * perfectly on 1 201 files and propagated an added file — and none of them
-   * could delete one.
-   */
-  lastAppliedRef: string | undefined;
-  /**
-   * The state this node last pushed as its OWN work.
-   *
-   * What makes {@link lastAppliedRef} stop counting. A node that has authored
-   * something since it applied has MOVED PAST that applied state, so a sender
-   * building on it has not seen this node's work — and must not be allowed to
-   * delete it. Exactly the narrowing `antiEntropyDecision` needed, at the
-   * second decision site.
-   */
-  lastPushedRef: string | undefined;
-  /** What the incoming push declares it descends from. */
-  senderPredecessors: readonly string[];
-  /**
-   * Whether the transport puts predecessors on the wire at all
-   * (`syncConfig.causalOrdering`).
-   *
-   * A connector without it never declares ancestry, so every push would look
-   * like one that had not seen this node's state and every deletion would be
-   * refused. That is not hypothetical: it is what the first run of this rule
-   * did to twenty tests.
-   */
-  ancestryIsCarried: boolean;
-}
-
-/**
- * Whether an incoming push may PRUNE this node's files.
- *
- * **The second decision site**, and the plan named only the first
- * (`PLAN-fs-edit-chain.md` §7.3.1). {@link antiEntropyDecision} chooses a
- * repair; this authorises deletions. They are not duplicates — which is why
- * narrowing the first in 0.0.84 correctly left this one alone — but they ask
- * the same underlying question, *has the other side seen a state I am in?*,
- * from the same insufficient inputs. So §2.2's ambiguity exists at both, and
- * a chain consulted for repairs but not for pruning leaves the deletion path
- * guessing exactly as it does today.
- *
- * One comparison, and the only question that separates a deletion from a
- * straggler: is the state I am in among the states this push says it builds
- * on? Yes — the sender has seen what I have, so everything absent from its
- * tree is absent BECAUSE IT REMOVED IT. No — it has not seen my state, so what
- * looks like a deletion is only its own ignorance of my files.
- *
- * Extracted from `FsAgent.syncFromDb` unchanged, so that it can be enumerated
- * (D5) and so that making it chain-aware has somewhere to happen.
- * @param view - This node's state and what the sender declared.
- * @returns Whether the sender has demonstrably seen a state this node is in.
- */
-export const senderSawMyState = (view: PruneAuthorityView): boolean => {
-  const { currentRef, lastAppliedRef, senderPredecessors } = view;
-  // A transport that carries no ancestry, or a push that declares none, is
-  // judged by the rule above this one in `syncFromDb` — not here.
-  if (!view.ancestryIsCarried) return true;
-  if (senderPredecessors.length === 0) return true;
-
-  // NARROWED once we have authored something since, for the same reason and in
-  // the same shape as `antiEntropyDecision`: a state we have built on is behind
-  // us, so a sender that descends from it has not seen our work.
-  //
-  // This is the half that DELETES, so getting it wrong costs files rather than
-  // a wasted round — and getting it wrong in the other direction costs
-  // deletions. The guard that `lastAppliedRef` protects is still here, because
-  // it only applies to a node that has NOT authored since: after an apply a
-  // node records `currentRef` from its own re-scan, which need not equal the
-  // ref the tree arrived under (mtimes do not always survive a restore, and on
-  // Windows they regularly do not). That node has no work of its own to lose,
-  // so both names for the state still count for it.
-  const authored = currentRef !== undefined && currentRef === view.lastPushedRef;
-  const statesIAmIn = (
-    authored ? [currentRef] : [currentRef, lastAppliedRef]
-  ).filter((r): r is string => r !== undefined);
-  return statesIAmIn.some((r) => senderPredecessors.includes(r));
-};
+// .............................................................................
+// `senderSawMyState` and `PruneAuthorityView` lived here, and they are gone.
+//
+// They answered *"may this incoming push PRUNE my files?"* — the second
+// decision site, from the same insufficient inputs as the first: a declared
+// predecessor ref, a flag for whether the transport carried ancestry at all,
+// and two names for one state because *"mtimes do not always survive a restore
+// byte for byte, and on Windows they regularly do not"*.
+//
+// **That last reason stopped being true.** Since mtime left the content
+// identity a receiver's re-scan of applied content derives the same ref the
+// sender announced — which is what makes a receiver able to ADOPT the
+// sender's chain entry at all. One state, one name.
+//
+// And the question itself is gone with them: nothing prunes on absence any
+// more. A deletion is STATED in the chain by the node that performed it, so
+// there is no inference left to authorise. See `RestoreOptions.cleanTarget`.
+// .............................................................................
 
 /** What {@link FsAntiEntropy} can report about itself. */
 export interface AntiEntropyStatus {

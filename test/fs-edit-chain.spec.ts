@@ -195,6 +195,60 @@ describe('FsEditChain', () => {
 
   // ...........................................................................
   describe('append', () => {
+    // .........................................................................
+    // THE ROOT OF A HISTORY IS A FUNCTION OF THE CONTENT.
+    //
+    // Two nodes that start from the same folder must end up with the SAME root
+    // entry, not two rows describing the same thing. Every field of a root row
+    // is already derived from the tree ref — so fixing the stamp makes the
+    // whole row, and therefore its hash, identical on both.
+    //
+    // Without it the fleet has one lineage per node from the first second, and
+    // `classify` answers `fork` to every announcement there has ever been.
+    // Measured in `fs-mesh-invariants.spec.ts`: a writer's own folder went
+    // from v8 back to v5, 6 runs in 8.
+    // .........................................................................
+    it('gives two nodes the SAME root entry for the same content', async () => {
+      // Two chains, two independent `append` calls, one row.
+      const first = new FsEditChain(db, TREE);
+      await first.init();
+      const second = new FsEditChain(db, TREE);
+      await second.init();
+
+      const a = await first.append({ treeRef: 'SEED' });
+      const b = await second.append({ treeRef: 'SEED' });
+
+      expect(b.head).toBe(a.head);
+      expect(b.timeId).toBe(a.timeId);
+      // `0:` orders before every minted id, which is what the beginning of a
+      // history should do.
+      expect(a.timeId.startsWith('0:')).toBe(true);
+    });
+
+    it('gives different content different roots', async () => {
+      const chain = new FsEditChain(db, TREE);
+      await chain.init();
+      const a = await chain.append({ treeRef: 'ONE', previous: [] });
+      const b = await chain.append({ treeRef: 'TWO', previous: [] });
+      expect(b.head).not.toBe(a.head);
+      // Still a total order between two roots, so nothing reads as "equal".
+      expect(a.timeId).not.toBe(b.timeId);
+    });
+
+    it('mints a stamp as soon as anything is STATED', async () => {
+      // A root is only a name for where a folder is. An entry that states a
+      // change is an edit, it happened at a moment, and two nodes stating the
+      // same change are two different events.
+      const chain = new FsEditChain(db, TREE);
+      await chain.init();
+      const stated = await chain.append({
+        treeRef: 'SEED',
+        changed: ['a.txt'],
+        previous: [],
+      });
+      expect(stated.timeId).toMatch(/^[1-9]\d*:/);
+    });
+
     it('records the tree ref, the changes and the removals', async () => {
       const chain = new FsEditChain(db, TREE);
       await chain.init();

@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent';
 import { FsDbAdapter } from '../src/fs-db-adapter';
+import { announceAsPeer } from './chain-announce.ts';
 import { removeTree } from './setup/remove-tree';
 
 /**
@@ -1992,7 +1993,8 @@ describe('FsAgent', () => {
 
       // refSeed describes the folder exactly as it stands → adopted without
       // a restore when it arrives.
-      const refSeed = await dbAdapter.storeFsTree(await agent.extract());
+      const seedOnly = await agent.extract();
+      const refSeed = await dbAdapter.storeFsTree(seedOnly);
 
       // refBoth adds a file, so applying it is a real restore.
       await mkdir(sourceDir, { recursive: true });
@@ -2019,6 +2021,17 @@ describe('FsAgent', () => {
 
       // 3. The peer deletes the file again, returning to refSeed's exact ref.
       //    It has to be deliverable, or the deletion is lost for good.
+      //
+      //    STATED, as a peer states it: the entry says `temp.txt` was removed,
+      //    and the state it produced is byte-for-byte refSeed again. The
+      //    announcement is still the BARE ref, because that is what this test
+      //    is about — a content hash that recurs must survive the connector's
+      //    dedup. A `~H~` head would be a fresh string every time and would
+      //    not exercise it at all.
+      await announceAsPeer(db, treeKey, {
+        tree: seedOnly,
+        removed: ['temp.txt'],
+      });
       connector.simulateIncoming(refSeed);
       await new Promise((resolve) => setTimeout(resolve, 500));
       expect(existsSync(join(testDir, 'temp.txt'))).toBe(false);

@@ -149,6 +149,28 @@ describe('FsEditChain.classify', () => {
     expect(await chain.classify(last.head, theirs.head)).toBe('fork');
   }, 120_000);
 
+  // ...........................................................................
+  it('ends a walk whose whole frontier has already been seen', async () => {
+    // A DAG, not a tree. `base` is reachable from `outer` both directly and
+    // through `left`, so one pass ends with a frontier whose every member has
+    // already been walked. Without that check the loop spins forever on a
+    // frontier it can never shrink.
+    //
+    // Pinned HERE rather than left to a mesh run. It was covered only by
+    // whichever merge a timing-dependent fuzz test happened to produce, which
+    // is how a gate reads 99.9 % on one run and 100 % on the next — and the
+    // shape is three lines to write down exactly.
+    const base = await chain.append({ treeRef: 'B' });
+    const left = await chain.append({ treeRef: 'L', previous: [base.head] });
+    const outer = await chain.append({
+      treeRef: 'O',
+      previous: [left.head, base.head],
+    });
+    const unrelated = await chain.append({ treeRef: 'X', previous: [] });
+
+    expect(await chain.classify(outer.head, unrelated.head)).toBe('fork');
+  });
+
   it('still answers within the budget for an ordinary history', async () => {
     // The control for the case above: the same shape, short enough to resolve,
     // must give the precise answer rather than the safe one.

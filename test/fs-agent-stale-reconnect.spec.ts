@@ -20,6 +20,7 @@ import {
   FsAgent,
 } from '../src/fs-agent.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
+import { announceAsPeer } from './chain-announce.ts';
 
 // A node that is offline while a file is created used to DELETE that file from
 // every other node when it returned. Not a failure to catch up — the file
@@ -105,10 +106,12 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     await new Promise((r) => setTimeout(r, 400));
 
     // The file the stale peer never saw is still here.
+    //
+    // No log to assert any more, and that is the point: this used to be a
+    // RULE that decided, loudly, whether a push was allowed to prune. Nothing
+    // prunes on absence now, so the guarantee holds structurally and there is
+    // nothing to announce.
     expect(existsSync(join(targetDir, 'keep.txt'))).toBe(true);
-    expect(
-      warnSpy.mock.calls.some((c) => String(c[0]).includes('declares no ancestry')),
-    ).toBe(true);
 
     stop();
     agent.scanner.stopWatch();
@@ -168,21 +171,22 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     agent.scanner.stopWatch();
   });
 
-  it('still prunes when the sender DOES declare ancestry', async () => {
+  // A REAL DELETION STILL REACHES THIS NODE — and there is now exactly one way
+  // it can, so three tests collapse into two.
+  //
+  // They used to differ only in what the ADVERTISEMENT declared: predecessors
+  // present, predecessors absent, a transport that carries none at all. Each
+  // one asked whether an absence was trustworthy enough to delete on. A
+  // deletion is stated in the chain now, by the node that performed it, so the
+  // declaration decides nothing and the mechanism is the same in every mode.
+  // What is still worth testing twice is the TRANSPORT, because the old rule
+  // turned itself off where ancestry was not carried.
+  it('applies a deletion the sender STATES', async () => {
     const db = await makeDb();
     const bs = new BsMem();
     await writeFile(join(targetDir, 'gone.txt'), 'gone');
     await writeFile(join(targetDir, 'shared.txt'), 'shared');
-
-    const adapter = new FsDbAdapter(db, 'fsTree');
-    // The predecessor: the state the target is actually in.
-    const parentRef = await adapter.storeFsTree(
-      await new FsAgent(targetDir, bs).extract(),
-    );
     await writeFile(join(sourceDir, 'shared.txt'), 'shared');
-    const newerRef = await adapter.storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
-    );
 
     const agent = new FsAgent(targetDir, bs, {
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
@@ -192,13 +196,17 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       cleanTarget: true,
     });
 
-    connector.simulateIncoming(newerRef, [parentRef]);
-    await new Promise((r) => setTimeout(r, 400));
+    const peer = await announceAsPeer(db, 'fsTree', {
+      tree: await new FsAgent(sourceDir, bs).extract(),
+      removed: ['gone.txt'],
+    });
+    connector.simulateIncoming(peer.announcement);
+    await new Promise((r) => setTimeout(r, 600));
 
-    // A deletion that declares where it came from is still honoured — the
-    // guard must not turn cleanTarget off in general.
     expect(existsSync(join(targetDir, 'gone.txt'))).toBe(false);
-    expect(await readFile(join(targetDir, 'shared.txt'), 'utf-8')).toBe('shared');
+    expect(await readFile(join(targetDir, 'shared.txt'), 'utf-8')).toBe(
+      'shared',
+    );
 
     stop();
     agent.scanner.stopWatch();
@@ -208,17 +216,18 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
   // resolution off no ref carries ancestry at all, so treating its absence as
   // suspicious would stop every deletion propagating — it did, across eight
   // tests, before this gate existed.
-  it('leaves pruning alone where ancestry is never transmitted', async () => {
+  it('applies a stated deletion on a transport that carries no ancestry', async () => {
+    // The mode most deployments run: `resolveConflicts` off, no
+    // `causalOrdering`, so no advertisement ever declares a predecessor. The
+    // OLD rule had to switch itself off here or it refused every deletion —
+    // measured across eight tests. The chain needs no such exception: the
+    // entry travels in the database, not in the advertisement.
     const db = await makeDb();
     const bs = new BsMem();
     await writeFile(join(targetDir, 'gone.txt'), 'gone');
     await writeFile(join(targetDir, 'shared.txt'), 'shared');
     await writeFile(join(sourceDir, 'shared.txt'), 'shared');
-    const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
-    );
 
-    // resolveConflicts defaults to false — the mode most deployments run.
     const agent = new FsAgent(targetDir, bs, {
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
@@ -227,8 +236,12 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       cleanTarget: true,
     });
 
-    connector.simulateIncoming(ref); // no predecessors, as always in this mode
-    await new Promise((r) => setTimeout(r, 400));
+    const peer = await announceAsPeer(db, 'fsTree', {
+      tree: await new FsAgent(sourceDir, bs).extract(),
+      removed: ['gone.txt'],
+    });
+    connector.simulateIncoming(peer.announcement);
+    await new Promise((r) => setTimeout(r, 600));
 
     expect(existsSync(join(targetDir, 'gone.txt'))).toBe(false);
 
@@ -236,10 +249,6 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     agent.scanner.stopWatch();
   });
 
-  // Starting order must be the caller's choice, not something a crash decides
-  // for them. syncToDb called watch() unconditionally, so syncFromDb-then-
-  // syncToDb threw "Already watching" — pushing every caller into push-first,
-  // which is the order that lets a reconnecting client overwrite the network.
   it('allows syncFromDb to be started before syncToDb', async () => {
     const db = await makeDb();
     const bs = new BsMem();
@@ -354,36 +363,34 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       warnSpy.mockRestore();
     });
 
-    it('still prunes for the newest advertisement', async () => {
+    it('applies a stated deletion that arrives as the newest', async () => {
       const db = await makeDb();
       const bs = new BsMem();
       await writeFile(join(targetDir, 'gone.txt'), 'gone');
       await writeFile(join(targetDir, 'shared.txt'), 'shared');
+      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
 
       const agent = new FsAgent(targetDir, bs, {
         timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
       });
       const connector = makeSeqConnector(db);
       // Both directions, as every real client runs: the node has a state of
-      // its own, and therefore something a sender can build on.
+      // its own, and therefore a lineage the deletion is ordered against.
       const stopTo = await agent.syncToDb(db, connector, 'fsTree');
       const stop = await agent.syncFromDb(db, connector, 'fsTree', {
         cleanTarget: true,
       });
       await new Promise((r) => setTimeout(r, 300));
-      const myRef = (agent as unknown as { _currentRef?: string })._currentRef;
 
-      // The deleter built on the state this node is in, and says so — which is
-      // what makes the absence of gone.txt a deletion rather than ignorance.
-      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
-      const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-        await new FsAgent(sourceDir, bs).extract(),
-      );
-      connector.advertise(ref, 1, myRef ? [myRef] : []);
-      await new Promise((r) => setTimeout(r, 400));
+      const peer = await announceAsPeer(db, 'fsTree', {
+        tree: await new FsAgent(sourceDir, bs).extract(),
+        removed: ['gone.txt'],
+      });
+      connector.advertise(peer.announcement, 1, []);
+      await new Promise((r) => setTimeout(r, 600));
 
-      // A current advertisement deletes exactly as before — the guard must
-      // not turn cleanTarget off in general.
+      // The pair to `is ignored outright` above: a deletion arriving as the
+      // sender's newest word is applied, one arriving behind it is not.
       expect(existsSync(join(targetDir, 'gone.txt'))).toBe(false);
 
       stopTo();
@@ -391,52 +398,19 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       agent.scanner.stopWatch();
     });
 
-    // Two names for the same state. After an apply this node records
-    // `_currentRef` from its own re-scan, which need not equal the ref the tree
-    // arrived under — mtimes do not always survive a restore byte for byte, and
-    // on Windows they regularly do not. The deleting peer declares the ref IT
-    // knows that shared state by.
+    // THE "TWO NAMES FOR ONE STATE" TEST IS GONE, and so is its premise.
     //
-    // Measured before this was allowed for: three lab runs in four converged
-    // perfectly on 1201 files and propagated an added file, and none of them
-    // could delete one.
-    it('prunes for a sender that declares the ref this node applied, not its own name for it', async () => {
-      const db = await makeDb();
-      const bs = new BsMem();
-      await writeFile(join(targetDir, 'gone.txt'), 'gone');
-      await writeFile(join(targetDir, 'shared.txt'), 'shared');
-
-      const agent = new FsAgent(targetDir, bs, {
-        timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
-      });
-      const connector = makeSeqConnector(db);
-      const stopTo = await agent.syncToDb(db, connector, 'fsTree');
-      const stop = await agent.syncFromDb(db, connector, 'fsTree', {
-        cleanTarget: true,
-      });
-      await new Promise((r) => setTimeout(r, 300));
-
-      // The node's own name for the state differs from the one it applied.
-      const inner = agent as unknown as {
-        _currentRef?: string;
-        _lastAppliedRef?: string;
-      };
-      inner._lastAppliedRef = 'the-ref-the-tree-arrived-under';
-      inner._currentRef = 'this-nodes-own-name-for-it';
-
-      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
-      const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-        await new FsAgent(sourceDir, bs).extract(),
-      );
-      connector.advertise(ref, 1, ['the-ref-the-tree-arrived-under']);
-      await new Promise((r) => setTimeout(r, 400));
-
-      expect(existsSync(join(targetDir, 'gone.txt'))).toBe(false);
-
-      stopTo();
-      stop();
-      agent.scanner.stopWatch();
-    });
+    // It asserted that a prune was honoured when the sender declared the ref
+    // the TREE ARRIVED UNDER rather than this node's own name for the same
+    // state — because *"mtimes do not always survive a restore byte for byte,
+    // and on Windows they regularly do not"*, so a receiver's re-scan of
+    // applied content produced a different ref. Measured at the time: with
+    // `_currentRef` alone, three lab runs in four converged perfectly on
+    // 1 201 files and none of them could delete one.
+    //
+    // Since mtime left the content identity there is ONE name. That is what
+    // makes a receiver able to adopt the sender's chain entry at all, and it
+    // is why the rule this test covered no longer exists.
 
     // Refusing to PRUNE from an old tree is not enough: applying one
     // additively is what puts a deleted file back. A peer that has not yet

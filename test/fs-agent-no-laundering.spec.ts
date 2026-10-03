@@ -252,38 +252,39 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   // Measured on four machines with 1200 files converged — a file was created
   // and vanished from every node including the one that created it, one run in
   // four. After convergence each peer's state descends from the writer's
-  // current ref, so a peer pushing a fraction of a second later is a sender the
-  // writer must honour, and its tree cannot contain a file that did not exist
-  // when it scanned.
+  // THE "COULD PEERS KNOW ABOUT THIS FILE?" GUARD IS GONE, and its test with
+  // it. What it protected is now protected by there being nothing to protect
+  // against.
   //
-  // Driven through `restore` directly. Staged as a live race it passed on one
-  // machine and failed on another, which tests the scheduler rather than the
-  // rule.
-  it('prunes what it announced and keeps what it has not', async () => {
+  // It kept a prune from deleting a file written after this node's last
+  // announcement — invisible to every sender, so a tree lacking it was not
+  // deleting it. Measured on four machines: with 1 200 files converged, a file
+  // was created and vanished from EVERY node including the one that created
+  // it, one run in four.
+  //
+  // That prune ran on the peer-apply path, and the peer-apply path no longer
+  // prunes: an absence is not a deletion, and a real one arrives stated in the
+  // chain. The only caller left is a deliberate `restore({ cleanTarget: true })`
+  // — somebody saying "make this folder be exactly this tree" — and
+  // second-guessing that with a guard about what peers know would be answering
+  // a question nobody asked. The test below covers what that caller gets.
+  it('prunes exactly what the tree lacks, for a caller who asked for that', async () => {
     const bs = new BsMem();
     await writeFile(join(dir, 'announced.txt'), 'peers know about this');
+    await writeFile(join(dir, 'just-written.txt'), 'written a moment ago');
     await writeFile(join(peerDir, 'only-theirs.txt'), 'theirs');
 
     const agent = new FsAgent(dir, bs, {
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
 
-    // What this node has told the network about: announced.txt only.
-    (
-      agent as unknown as { _announcedFiles: Set<string> }
-    )._announcedFiles.add(join(dir, 'announced.txt'));
-
-    // Written after that announcement, so no sender can know it exists.
-    await writeFile(join(dir, 'just-written.txt'), 'not announced yet');
-
-    // A peer's tree that has neither of them.
     const incoming = await new FsAgent(peerDir, bs).extract();
     await agent.restore(incoming, undefined, { cleanTarget: true });
 
-    // The announced one is a real deletion; the unannounced one predates
-    // nothing and is kept.
+    // Both go. Neither is in the tree, and the caller asked for the tree.
     expect(existsSync(join(dir, 'announced.txt'))).toBe(false);
-    expect(existsSync(join(dir, 'just-written.txt'))).toBe(true);
+    expect(existsSync(join(dir, 'just-written.txt'))).toBe(false);
+    expect(existsSync(join(dir, 'only-theirs.txt'))).toBe(true);
 
     agent.scanner.stopWatch();
   });

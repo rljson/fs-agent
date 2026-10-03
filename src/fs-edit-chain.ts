@@ -228,7 +228,37 @@ export class FsEditChain {
       'MultiEdits',
     );
 
-    const stamp = timeId();
+    // A ROOT ENTRY IS IDENTIFIED BY ITS CONTENT, NOT BY WHO BOOTED FIRST.
+    //
+    // An entry with no parents and nothing stated is not an edit — it is the
+    // name a node gives the state it starts in. Every node authors one, and
+    // those states are usually IDENTICAL, because peers already in sync hold
+    // the same bytes and derive the same tree ref. With a minted `timeId` each
+    // node's root is a different row, so the fleet has one lineage per node
+    // from the first second — and then nothing is ever `behind` or `ahead`:
+    // `classify` finds neither head reachable from the other and answers
+    // `fork` to every announcement there has ever been.
+    //
+    // Measured on `a document never goes backwards while one person edits it`,
+    // 6 runs in 8, and a control run confirms it predates the audit: one
+    // writer saving v0…v8, two receivers cut and healed underneath. Each
+    // node's root listed `changed=[]` and was still its own lineage. A healed
+    // receiver's announcement was a FORK of the writer's, the writer merged
+    // it, a conflicted copy appeared on a file one person had edited, and the
+    // writer's own folder went from v8 back to v5.
+    //
+    // DERIVED rather than agreed. Every other field of this row is already a
+    // function of the content, so fixing the stamp makes the whole row — and
+    // therefore its hash — identical on every node that starts from the same
+    // folder. No replication has to have happened, no node has to have spoken
+    // first, and there is nothing to race: the two nodes write the same row
+    // and it IS the same entry.
+    //
+    // `0:` orders before every minted id, which is what the beginning of a
+    // history should do.
+    const isRoot =
+      previous.length === 0 && changed.length === 0 && removed.length === 0;
+    const stamp = isRoot ? `0:${opts.treeRef}` : timeId();
     const head = this._refOf(
       await this._db.addEditHistory(this._treeKey, {
         timeId: stamp,
@@ -314,6 +344,41 @@ export class FsEditChain {
    * @param treeRef - The state announced.
    * @returns The newest entry producing it, or `undefined` if none is found.
    */
+  /**
+   * The OLDEST entry that produced a given tree ref.
+   *
+   * **How a fleet agrees on one name for one state.** Every node authors an
+   * entry for the state it starts in, and those states are usually identical —
+   * peers already in sync hold the same bytes, so they derive the same tree
+   * ref. Each node then sits on its own lineage root and `classify` answers
+   * `fork` to every announcement forever.
+   *
+   * The oldest entry is the one to converge on because the choice is the same
+   * for everybody who can see the rows, and because adoption that only ever
+   * moves BACKWARDS in time is monotone: it cannot oscillate as rows arrive.
+   * Whoever reached this content first described it first.
+   *
+   * The counterpart of {@link entryForTreeRef}, which answers the opposite
+   * question — *"how did this folder get here NOW"* — and therefore wants the
+   * newest.
+   * @param treeRef - The state to name.
+   * @returns The oldest entry producing it, or `undefined` if none is found.
+   */
+  async oldestEntryForTreeRef(
+    treeRef: string,
+  ): Promise<FsChainEntry | undefined> {
+    const rows = await this._db.getEditHistories(this._treeKey, {
+      dataRef: treeRef,
+    });
+    let oldest: (EditHistory & { _hash: string }) | undefined;
+    for (const row of rows as Array<EditHistory & { _hash: string }>) {
+      if (!oldest || compareTimeId(row.timeId, oldest.timeId) < 0) {
+        oldest = row;
+      }
+    }
+    return oldest ? this.entry(oldest._hash) : undefined;
+  }
+
   async entryForTreeRef(treeRef: string): Promise<FsChainEntry | undefined> {
     const rows = await this._db.getEditHistories(this._treeKey, {
       dataRef: treeRef,

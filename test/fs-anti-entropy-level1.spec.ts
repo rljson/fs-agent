@@ -35,7 +35,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   antiEntropyDecision,
-  senderSawMyState,
   type AntiEntropyDecision,
   type AntiEntropyView,
 } from '../src/fs-anti-entropy.ts';
@@ -331,171 +330,23 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
   });
 
   // ...........................................................................
-  // D5 — the SECOND decision site (§7.3.1).
+  // D5 — the SECOND decision site — IS GONE, rule and enumeration together.
   //
-  // `antiEntropyDecision` chooses a repair; `senderSawMyState` authorises
-  // DELETIONS. They are not duplicates — which is why narrowing the first in
-  // 0.0.84 correctly left this one alone — but they ask the same underlying
-  // question from the same insufficient inputs, so §2.2's ambiguity exists at
-  // both. A chain consulted for repairs but not for pruning leaves the deletion
-  // path guessing exactly as it does today.
+  // It asked *"may this sender PRUNE my files?"*, enumerated over every
+  // (node, sender) pair this space can describe, and its own RED case was the
+  // mirror of D3: `statesIAmIn` cannot tell "a state I am in" from "a state I
+  // have left". Two GUARD cases existed only to keep the rule from refusing
+  // every deletion — a transport that carries no ancestry, and a push that
+  // declares none — and a third because a node needed two names for one state
+  // while mtime was in the content identity.
   //
-  // Enumerated over the same space: for every (node, sender) pair, may that
-  // sender delete this node's files?
+  // Nothing prunes on absence any more, so there is no authority to grant.
+  // The guarantee the GUARD cases protected — *a sender that has not seen my
+  // state may add, never delete* — is now structural rather than enforced:
+  // deletions arrive STATED in the chain, from the node that performed them.
+  // Its tests live where that happens, in `fs-collect-removals.spec.ts` and
+  // `fs-plan-removals.spec.ts`.
   // ...........................................................................
-  describe('D5 — may this sender prune my files?', () => {
-    /** Every (node, sender) pair in the space, with the verdict. */
-    const prunePairs = (history: History) => {
-      const out: Array<{ me: Node; sender: Node; mayPrune: boolean }> = [];
-      for (const me of nodesFor('A')) {
-        for (const sender of nodesFor('B')) {
-          if (me.currentRef === sender.currentRef) continue;
-          out.push({
-            me,
-            sender,
-            mayPrune: senderSawMyState({
-              currentRef: me.currentRef,
-              lastAppliedRef: me.lastAppliedRef,
-              lastPushedRef: me.authored ? me.currentRef : 'something-else',
-              senderPredecessors: history[sender.currentRef],
-              ancestryIsCarried: true,
-            }),
-          });
-        }
-      }
-      return out;
-    };
-
-    // .........................................................................
-    // GUARD. A sender whose state descends from nothing I hold must never be
-    // allowed to delete my files.
-    //
-    // This is the rule that closed the measured failure where "a file reached
-    // all three connected nodes and was gone from all three two seconds later,
-    // as the fourth reconnected and its stale tree was applied as
-    // authoritative". It passes today and must never stop.
-    // .........................................................................
-    for (const { name, of: history } of HISTORIES) {
-      it(`GUARD: a sender sharing no state with me may not prune — ${name}`, () => {
-        const offenders = prunePairs(history).filter(
-          (p) =>
-            p.mayPrune &&
-            // A sender at a lineage ROOT declares no ancestry at all, and
-            // undeclared ancestry is handled one rule up in `syncFromDb`
-            // rather than here. Judging it here would refuse every deletion
-            // from a client whose first push predates its own `_currentRef` —
-            // which is a real client on an ordinary startup.
-            history[p.sender.currentRef].length > 0 &&
-            !history[p.sender.currentRef].includes(p.me.currentRef) &&
-            !(
-              p.me.lastAppliedRef !== undefined &&
-              history[p.sender.currentRef].includes(p.me.lastAppliedRef)
-            ),
-        );
-        expect(
-          offenders
-            .slice(0, 5)
-            .map(
-              (p) =>
-                `me(cur=${p.me.currentRef} applied=${p.me.lastAppliedRef ?? '-'}) ` +
-                `← sender(cur=${p.sender.currentRef} prev=[${history[p.sender.currentRef].join(',')}])`,
-            ),
-          'a sender that has not seen my state may add, never delete',
-        ).toEqual([]);
-      });
-    }
-
-    // .........................................................................
-    // RED. A sender that has LEFT the state it shares with me may still prune.
-    //
-    // The mirror of D3 at this site. `statesIAmIn` cannot tell "a state I am
-    // in" from "a state I have left", and neither can this rule tell "the
-    // sender built on my state" from "the sender built on a state I have since
-    // moved past". On the linear history S0 → S1 → S2, a node at S2 that once
-    // applied S0 accepts a prune from a sender still at S1 — whose tree
-    // predates everything the node has done since.
-    //
-    // That is the deletion path's half of §2.2, and it is why WP4 has to make
-    // BOTH sites chain-aware. → WP3 + WP4.
-    // .........................................................................
-    it('D5: a sender I have moved past may not prune me', () => {
-      // I am at S2, which I AUTHORED. I applied S0 long ago and have moved on.
-      // The sender is still at S1, which descends from S0 — a state that is
-      // behind me, so its tree cannot account for what I have done since and
-      // must not be allowed to delete it.
-      //
-      // Green since the prune rule narrowed `lastAppliedRef` on authorship,
-      // the same change `antiEntropyDecision` needed. The authorship is the
-      // whole condition: a node that has only ever APPLIED has no work of its
-      // own to lose, and both names for its state still count for it — see the
-      // guard below, which is the measured reason that matters.
-      expect(
-        senderSawMyState({
-          currentRef: 'S2',
-          lastPushedRef: 'S2',
-          lastAppliedRef: 'S0',
-          senderPredecessors: ['S0'],
-          ancestryIsCarried: true,
-        }),
-      ).toBe(false);
-    });
-
-    // .........................................................................
-    // GUARD — the two escape hatches, both load-bearing and both measured.
-    // .........................................................................
-    it('GUARD: a transport that carries no ancestry may still delete', () => {
-      // Every deployment without `causalOrdering` declares nothing, so judging
-      // silence as "has not seen my state" refuses every deletion. That is not
-      // hypothetical: it is what the first run of this rule did to twenty
-      // tests.
-      expect(
-        senderSawMyState({
-          currentRef: 'S2',
-          lastPushedRef: 'S2',
-          lastAppliedRef: undefined,
-          senderPredecessors: [],
-          ancestryIsCarried: false,
-        }),
-      ).toBe(true);
-    });
-
-    it('GUARD: a push declaring no ancestry is left to the rule above', () => {
-      // A genuinely fresh client's first push carries no predecessors, and
-      // undeclared ancestry has always been handled one rule up rather than
-      // here.
-      expect(
-        senderSawMyState({
-          currentRef: 'S2',
-          lastPushedRef: 'S2',
-          lastAppliedRef: undefined,
-          senderPredecessors: [],
-          ancestryIsCarried: true,
-        }),
-      ).toBe(true);
-    });
-
-    it('GUARD: lastAppliedRef counts, not only currentRef', () => {
-      // After an apply a node records `currentRef` from its OWN re-scan, which
-      // need not equal the ref the tree arrived under — mtimes do not always
-      // survive a restore, and on Windows they regularly do not. Measured:
-      // with `currentRef` alone, three lab runs in four converged on 1 201
-      // files and propagated an added file, and NONE could delete one.
-      expect(
-        senderSawMyState({
-          // NOT authored: this node applied a tree and re-scanned, so its
-          // `currentRef` is its own name for the state the tree arrived
-          // under. It has no work of its own to lose, so both names count —
-          // and with `currentRef` alone, three lab runs in four converged on
-          // 1 201 files and NONE could delete one.
-          currentRef: 'rescanned-locally',
-          lastPushedRef: undefined,
-          lastAppliedRef: 'S1',
-          senderPredecessors: ['S1'],
-          ancestryIsCarried: true,
-        }),
-      ).toBe(true);
-    });
-  });
 
   // ...........................................................................
   // The same properties, WITH the chain's answer. This is what the protocol

@@ -18,6 +18,7 @@ import {
   FsAgent,
   MASS_DELETE_MIN_FILES,
   MassDeleteRefusedError,
+  REFUSAL_ANSWER_COOLDOWN_MS,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
@@ -27,10 +28,23 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 // mounted, a bootstrap that raced its own first scan — advertises an empty
 // tree, and every other node faithfully deletes everything it has.
 describe('FsAgent — the mass-delete guard', () => {
-  const sourceDir = join(process.cwd(), 'test-temp-guard-source');
-  const targetDir = join(process.cwd(), 'test-temp-guard-target');
+  // A FOLDER PER TEST, not one folder reused.
+  //
+  // Several tests here start a live agent against the shared folder, and a
+  // `stop()` does not cancel work already in flight: an apply scheduled a
+  // moment earlier still runs, scans, and writes. With one folder for the
+  // whole file that lands in the NEXT test's folder — measured as 121 files
+  // where 120 were written (a stray `.fsagent-state.json`) and as 117 of 120
+  // restored, because a leftover agent pruned what the test had just put
+  // there. Both read as defects in the code under test and were neither.
+  let nth = 0;
+  let sourceDir = '';
+  let targetDir = '';
 
   beforeEach(async () => {
+    nth++;
+    sourceDir = join(process.cwd(), `test-temp-guard-source-${nth}`);
+    targetDir = join(process.cwd(), `test-temp-guard-target-${nth}`);
     for (const d of [sourceDir, targetDir]) {
       await rm(d, { recursive: true, force: true });
       await mkdir(d, { recursive: true });
@@ -334,7 +348,7 @@ describe('FsAgent — the mass-delete guard', () => {
   // 3642 files with no refusal logged at all, while a FRESH client — whose
   // empty ref this node had never seen — was refused, answered, and converged
   // in eleven seconds.
-  it('refuses the same tree again when it comes back', async () => {
+  it('answers the same tree again when it comes back', async () => {
     const io = new IoMem();
     await io.init();
     const db = new Db(io);
@@ -365,19 +379,24 @@ describe('FsAgent — the mass-delete guard', () => {
       cleanTarget: true,
     });
 
-    const refusals = (): number =>
-      errSpy.mock.calls.filter((c) =>
-        String(c[0]).includes('MASS DELETE REFUSED'),
+    // ANSWERS, not refusals. There is nothing left to refuse — an absence
+    // never prunes — so what has to survive the dedup is the ANSWER: this
+    // node telling the emptied peer what it holds. The cooldown is the reason
+    // the two waits are longer than it.
+    const answers = (): number =>
+      warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('re-announcing'),
       ).length;
 
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
     await new Promise((r) => setTimeout(r, 400));
-    expect(refusals()).toBe(1);
+    expect(answers()).toBe(1);
 
     // The very same ref, exactly as an emptied peer re-derives it.
+    await new Promise((r) => setTimeout(r, REFUSAL_ANSWER_COOLDOWN_MS));
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
     await new Promise((r) => setTimeout(r, 400));
-    expect(refusals()).toBe(2);
+    expect(answers()).toBe(2);
 
     expect(
       (await targetFiles()).filter((f) => f.startsWith('f')),
