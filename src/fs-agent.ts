@@ -392,6 +392,17 @@ export const RESTORE_FETCH_CONCURRENCY = 16;
 export const STATE_HISTORY_MAX = 1_000;
 
 /**
+ * How many heard-but-not-yet-applied peer heads a node parks.
+ *
+ * A head arrives when an announcement is resolved and is used when the apply
+ * for that state runs, which is a debounce later, so the two have to be
+ * bridged. Announcements that never reach an apply — superseded by a newer
+ * one, dropped by a guard — leave their head behind, so the map is bounded and
+ * the oldest is forgotten. Forgetting costs a lineage join, never a file.
+ */
+export const ANNOUNCED_HEAD_MAX = 200;
+
+/**
  * How many deletions the tombstone log remembers.
  *
  * The log is the one structure in this agent that grows without bound. Measured
@@ -702,6 +713,25 @@ export class FsAgent {
     string,
     { removed: string[]; timeId: string }
   >();
+
+  /**
+   * `treeRef → chain head`, for announcements heard but not yet applied.
+   *
+   * **Hearing a head is not holding its state.** The resolve happens when the
+   * ref arrives and the apply happens after a debounce, and plenty of
+   * announcements never get that far: a newer ref supersedes them, a guard
+   * refuses them, the node is already there. Parking the head here and only
+   * promoting it at the apply keeps `_adoptedChainHead` to its documented
+   * meaning.
+   *
+   * Measured before this existed: two nodes each saving one file at the same
+   * instant. A merely HEARD B's head, recorded it as a parent of its own next
+   * entry, and so claimed a lineage descending from a state it never held —
+   * whereupon its own `ahead` guard correctly refused B's file as "a state
+   * this node has already left". The file never arrived. A false parent is not
+   * a cosmetic inaccuracy: reachability is what the whole protocol decides on.
+   */
+  private readonly _announcedHeads = new Map<string, string>();
 
   /**
    * A peer head this node has applied, waiting to become a chain parent.
@@ -3515,6 +3545,24 @@ export class FsAgent {
     );
   }
 
+  /**
+   * Parks the chain head an announcement resolved to, for its apply to find.
+   *
+   * Bounded by {@link ANNOUNCED_HEAD_MAX}, oldest first — insertion order is
+   * arrival order, so the oldest parked head is the one whose apply is least
+   * likely to still be coming.
+   * @param treeRef - The state announced.
+   * @param head - The sender's chain head that produced it.
+   */
+  private _rememberAnnouncedHead(treeRef: string, head: string): void {
+    this._announcedHeads.delete(treeRef);
+    this._announcedHeads.set(treeRef, head);
+    while (this._announcedHeads.size > ANNOUNCED_HEAD_MAX) {
+      const oldest = this._announcedHeads.keys().next().value as string;
+      this._announcedHeads.delete(oldest);
+    }
+  }
+
   private _rememberAnnounced(tree: FsTree): FsTreeDelta {
     const content = this._getFileContentMap(tree);
     const previous = this._announcedContent;
@@ -4511,6 +4559,70 @@ export class FsAgent {
           // edits) is resolved inline — a 3-way merge into a merge revision D —
           // *before* the destructive restore could clobber local changes, all
           // while the watcher is paused; `behind` falls through to fast-forward.
+          // THE CHAIN DECIDES FIRST, and unconditionally.
+          //
+          // An incoming state whose entry is an ANCESTOR of this node's head
+          // is a state this node has already left. Applying it is a rollback,
+          // and it is the defect `_inboundRefVerdict` documents as its own
+          // known limit: that check recognises only the LAST ref this node
+          // sent as its own echo, so *"an echo of an OLDER self-originated ref
+          // still gets through"*. Measured: a writer at v20 had its own v19
+          // delivered back and applied, and the whole fleet settled one
+          // revision behind the last save — about one run in five.
+          //
+          // The chain answers this exactly and without heuristics: v19 is
+          // reachable from v20 by walking `previous`, so it is an ancestor and
+          // there is nothing to do. No clock, no origin, no content
+          // comparison, no guessing from how many predecessors a payload
+          // happened to carry.
+          //
+          // UNCONDITIONAL, unlike the branch below it, which asks only when
+          // `resolveConflicts` is on AND the payload brought predecessors.
+          // Rolling backwards is not a conflict-resolution concern and not
+          // something to opt into — a node must never move to a state it has
+          // already left, whatever else is configured.
+          if (this._chain && this._chainHead) {
+            // `classify` compares chain HEADS, and what arrived is a TREE ref.
+            //
+            // The head the ANNOUNCEMENT carried is the right one: it is what
+            // the sender said about itself. The lookup by tree ref is only the
+            // fallback, for a ref that came without one — the hub's own
+            // advertisements, an older peer — and it is ambiguous by nature,
+            // because a tree ref is a content hash and two nodes holding the
+            // same bytes produce the same one. Two freshly started nodes both
+            // have an entry for the EMPTY tree, so asking by hash there can
+            // return either node's.
+            //
+            // Neither available means no entry covers this state, which leaves
+            // the decision to the branches below rather than guessing.
+            const theirHead =
+              this._announcedHeads.get(treeRef) ??
+              (
+                await this._chain
+                  .entryForTreeRef(treeRef)
+                  .catch(() => undefined)
+              )?.head;
+            const relation = theirHead
+              ? await this._chain
+                  .classify(this._chainHead.head, theirHead)
+                  .catch(() => 'incomplete' as const)
+              : 'incomplete';
+            if (relation === 'ahead') {
+              // A state this node REFUSES is never a parent of anything it
+              // records later. Dropping the parked head is what keeps the
+              // claim and the refusal from contradicting each other.
+              this._announcedHeads.delete(treeRef);
+              // `warn`, not `log`: a peer pushing a state this node has left
+              // means that peer is behind and does not know it. The node
+              // protects itself here, but somebody still has to catch up.
+              console.warn(
+                `[FsAgent] ref=${treeRef.slice(0, 8)}… is a state this node ` +
+                  `has already left — ignoring it.`,
+              );
+              return;
+            }
+          }
+
           if (
             this._resolveConflicts &&
             this._currentRef &&
@@ -4843,6 +4955,69 @@ export class FsAgent {
           // set exists.
           this._currentRef = postRestoreRef;
           this._persistCurrentRef(postRestoreRef);
+
+          // ADOPT THE SENDER'S ENTRY. Do not author one.
+          //
+          // An edit exists where a change was MADE. A node that applies a
+          // peer's state changed nothing, so it has nothing to say — and
+          // saying it anyway is what broke the model: the receiver
+          // re-announced the state it had just applied as its OWN edit,
+          // because the echo guard on the push path compares `_lastSentRef`,
+          // which an apply never updates. The result was one LINEAGE PER NODE
+          // stitched at adoption points instead of one shared history, so a
+          // receiver's head was never inside the sender's ancestry,
+          // `classify` answered `fork` where the truth was `behind`, and
+          // "I am behind" became unobservable.
+          //
+          // THE THREE FACTS THIS KEEPS APART, because conflating them is what
+          // made the first attempt at this unsafe:
+          //
+          //   where the folder IS      `_currentRef` + `_chainHead`
+          //   what I TOLD the network  `_lastSentRef`, `_lastSentContentKey`
+          //   what I last RECEIVED     `_lastAppliedRef`
+          //
+          // Adoption changes the first and must not touch the second.
+          // Writing the adopted ref into `_lastSentRef` as well seems
+          // equivalent and is not: `_inboundRefVerdict` reads that field to
+          // recognise this node's own echo, so overloading it with "a state I
+          // hold but never announced" weakens the echo check. Only the CONTENT
+          // KEY is set, which is what stops the watcher's re-scan pushing the
+          // state straight back out as news.
+          //
+          // ONLY WHEN THE FOLDER REALLY IS IN THAT STATE. If the re-derived
+          // ref differs, this node is NOT where the sender is — a refused
+          // tombstone, a locked file, an unfetchable blob — and claiming the
+          // sender's head would assert a state it does not hold. It then
+          // authors its own entry on the next push, which is correct: being
+          // short of what you applied IS a state of your own.
+          //
+          // This only became possible when mtime left the content identity.
+          // While a receiver's own re-scan produced a different ref for the
+          // same bytes, authoring was the only truthful option — which is how
+          // the code drifted here, and why the same symptom kept coming back
+          // under different names.
+          // Promoted HERE, at the apply, for the state that was applied — not
+          // when the announcement was heard.
+          const senderHead = this._announcedHeads.get(treeRef);
+          this._announcedHeads.delete(treeRef);
+          if (postRestoreRef === treeRef && senderHead !== undefined) {
+            this._adoptedChainHead = undefined;
+            this._chainHead = { head: senderHead, treeRef };
+            this._lastSentContentKey =
+              this._contentKeyFromTree(postRestoreTree);
+            // No claim on any path either: a claim is what makes a peer's
+            // later removal of that path look stale, and this node changed
+            // nothing.
+            for (const path of this._getFileContentMap(postRestoreTree).keys()) {
+              this._localPathTimeIds.delete(path);
+            }
+          } else if (senderHead !== undefined) {
+            // Applied, but the folder landed somewhere else: a merge, a refused
+            // tombstone, a blob that would not fetch. This node still WENT
+            // THROUGH the sender's state, so its own next entry names that head
+            // as a second parent and the lineages join there instead.
+            this._adoptedChainHead = senderHead;
+          }
 
           // NOT recording the incoming tree's files as prunable.
           //
@@ -5199,9 +5374,11 @@ export class FsAgent {
         // removals are the authorisation the ancestry rule cannot give, so
         // they have to survive the gap between hearing and acting.
         if (resolved.entry) {
-          // The peer's head becomes a parent of whatever this node records
-          // next, so the two lineages actually join. See `_adoptedChainHead`.
-          this._adoptedChainHead = resolved.entry.head;
+          // PARKED, not claimed. The peer's head becomes a parent of whatever
+          // this node records next — but only once the apply for this state has
+          // actually run, so the two lineages join on work this node did hold.
+          // See `_announcedHeads`.
+          this._rememberAnnouncedHead(resolved.treeRef, resolved.entry.head);
           void this._collectIncomingRemovals(resolved.entry).then(() =>
             schedule(resolved.treeRef),
           );

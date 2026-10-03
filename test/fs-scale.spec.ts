@@ -46,6 +46,21 @@ describe('scale and endurance', () => {
   let nth = 0;
   const stops: Array<() => void> = [];
   const agents: FsAgent[] = [];
+  // Scan caches live OUTSIDE the scanned folder — a cache file inside it is
+  // part of the next scan — so the teardown has to name them. Left behind,
+  // they turned up as untracked files in the repo.
+  const caches: string[] = [];
+
+  /**
+   * A scan-cache path beside the scanned folder, registered for cleanup.
+   * @param name - Distinguishes one test's cache from another's.
+   * @returns The absolute path to hand to `scanCachePath`.
+   */
+  const cachePath = (name: string): string => {
+    const path = join(process.cwd(), `test-temp-scale-${name}-${nth}.json`);
+    caches.push(path);
+    return path;
+  };
 
   beforeEach(async () => {
     dir = join(process.cwd(), `test-temp-scale-${++nth}`);
@@ -57,6 +72,9 @@ describe('scale and endurance', () => {
     for (const stop of stops.splice(0)) stop();
     for (const agent of agents.splice(0)) agent.scanner.stopWatch();
     await rm(dir, { recursive: true, force: true, maxRetries: 10 });
+    for (const cache of caches.splice(0)) {
+      await rm(cache, { force: true, maxRetries: 5 });
+    }
   });
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -90,7 +108,7 @@ describe('scale and endurance', () => {
     // with — and without it the reuse is unavailable, which is worth knowing
     // as its own fact (see the GUARD below).
     const agent = new FsAgent(dir, bs, {
-      scanCachePath: join(dir, '..', `scale-cache-${nth}.json`),
+      scanCachePath: cachePath('cache'),
     });
     agents.push(agent);
 
@@ -138,7 +156,7 @@ describe('scale and endurance', () => {
       return realSetBlob(content);
     };
     const agent = new FsAgent(dir, bs, {
-      scanCachePath: join(dir, '..', `scale-guard-${nth}.json`),
+      scanCachePath: cachePath('guard'),
     });
     agents.push(agent);
     await agent.extract();
