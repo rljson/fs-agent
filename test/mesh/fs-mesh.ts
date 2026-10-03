@@ -213,6 +213,24 @@ export interface FsMeshNode {
    * @returns What the node held when it gave up, so a failure reads.
    */
   settlesOn(paths: string[], timeoutMs?: number): Promise<string[]>;
+
+  /**
+   * Stops this node's agent, as a process exit does.
+   *
+   * NOT a cut. A cut breaks the network and leaves the agent watching; this
+   * stops the agent and leaves the folder reachable, so a test can change it
+   * behind the agent's back — which is what a crash, an upgrade, or a user
+   * editing while the client is closed actually produces.
+   */
+  down(): void;
+
+  /**
+   * Starts a NEW agent on the same folder, database and blob store.
+   *
+   * The chain survives, exactly as it does on disk, so the restarted agent has
+   * to reconcile its own history against whatever the folder now holds.
+   */
+  up(): Promise<void>;
 }
 
 // .............................................................................
@@ -447,7 +465,7 @@ export const buildFsMesh = async (opts: {
     // It is still a per-node store: a blob has to travel to reach a peer. A
     // SHARED `BsMem` would make every blob available everywhere for free and
     // hide the half of a rejoin that can actually fail.
-    const agent = new FsAgent(folder, client.bs, {
+    const agentOptions = {
       // Production sets this, and it is load-bearing: with it off the ancestry
       // DAG, the inline three-way merge and half the prune rule never run, so
       // a mesh without it tests a code path no client ships.
@@ -466,12 +484,37 @@ export const buildFsMesh = async (opts: {
       // the identical scenario passed 8 of 8 elsewhere, for no reason but
       // this line.
       bucketSync: opts.bucketSync,
-    });
+    };
 
-    stops.push(await agent.syncToDb(db, connector, treeKey));
-    stops.push(
-      await agent.syncFromDb(db, connector, treeKey, { cleanTarget: true }),
-    );
+    // A NODE THAT CAN BE STOPPED AND STARTED AGAIN.
+    //
+    // A cut models a broken network; this models a stopped PROCESS, and the
+    // two are not interchangeable. While an agent is down its folder can still
+    // change — the user saves, a backup tool restores, someone deletes a
+    // directory — and when it comes back its own history disagrees with its
+    // own folder. That is what every crash and every "edited while the agent
+    // was down" produces, and nothing in this suite could express it.
+    //
+    // The restart is faithful in the way that matters: a NEW `FsAgent` on the
+    // same folder, with the same database and blob store. So the chain
+    // survives exactly as it does on disk, and the new agent has to work out
+    // what the folder did behind its back.
+    let liveAgent = new FsAgent(folder, client.bs, agentOptions);
+    let liveStops: Array<() => void> = [];
+    const start = async () => {
+      liveStops = [
+        await liveAgent.syncToDb(db, connector, treeKey),
+        await liveAgent.syncFromDb(db, connector, treeKey, {
+          cleanTarget: true,
+        }),
+      ];
+    };
+    await start();
+    // Registered as a closure, so teardown stops whichever agent is live.
+    stops.push(() => {
+      for (const stop of liveStops) stop();
+      liveAgent.scanner.stopWatch();
+    });
 
     const abs = (path: string) => join(folder, ...path.split('/'));
 
@@ -481,9 +524,20 @@ export const buildFsMesh = async (opts: {
       name,
       folder,
       timeline: { samples },
-      agent,
+      get agent() {
+        return liveAgent;
+      },
       db,
       connector,
+      down: () => {
+        for (const stop of liveStops) stop();
+        liveStops = [];
+        liveAgent.scanner.stopWatch();
+      },
+      up: async () => {
+        liveAgent = new FsAgent(folder, client.bs, agentOptions);
+        await start();
+      },
       get isCut() {
         return cut;
       },

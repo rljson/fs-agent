@@ -284,10 +284,28 @@ export function formatConflictTimestamp(ms: number): string {
  *   the same name (determinism).
  * - If the candidate name is already taken, a numeric ` (n)` is appended; the
  *   chosen name is added to `taken`.
+ *
+ * **The name has to distinguish distinct losing CONTENT, and without an
+ * identity it did not.** `usableClientId` returns empty whenever the origin is
+ * the DB's own label, which is the ordinary case, and the timestamp has
+ * second granularity — so two nodes losing DIFFERENT content in the same
+ * second derived the same copy name. The copies then conflicted with each
+ * other, producing a copy of a copy:
+ *
+ *   two (conflicted copy 2026-10-03 142610) (conflicted copy 2026-10-03 142611).txt
+ *
+ * Measured on the seeded fuzz run as up to 14 nested copies, and present
+ * before this session's work as well (0–5 on the same four runs). The losing
+ * revision's content ref is carried in only when there is no identity to use:
+ * it is identical on every peer for the same losing revision and differs
+ * whenever the content does, which is exactly the property that was missing.
+ * A name that is already readable stays readable.
  * @param relativePath - The original conflicting path
  * @param clientId - The losing revision's client id
  * @param timestamp - The losing revision's InsertHistory timestamp (ms)
  * @param taken - Set of already-used paths; the chosen name is added to it
+ * @param loserRef - The losing revision's content ref, used to tell two
+ *   same-second losers apart when neither has a usable identity.
  * @returns A unique conflict-copy path
  */
 export function conflictCopyName(
@@ -295,6 +313,7 @@ export function conflictCopyName(
   clientId: string,
   timestamp: number,
   taken: Set<string>,
+  loserRef = '',
 ): string {
   const slash = relativePath.lastIndexOf('/');
   const dir = slash >= 0 ? relativePath.slice(0, slash + 1) : '';
@@ -310,7 +329,9 @@ export function conflictCopyName(
   // detail a user reports as a bug. See {@link usableClientId}.
   const marker = clientId
     ? `(conflicted copy ${clientId} ${ts})`
-    : `(conflicted copy ${ts})`;
+    : loserRef
+      ? `(conflicted copy ${ts} ${loserRef.slice(0, 6)})`
+      : `(conflicted copy ${ts})`;
 
   let candidate = `${dir}${stem} ${marker}${ext}`;
   let n = 1;
@@ -463,6 +484,7 @@ export function threeWayMerge(
         loserClientId,
         loserTimestamp,
         taken,
+        loserVal,
       );
       copies.push({ path: copyPath, blobId: loserVal, originalPath: path });
     }

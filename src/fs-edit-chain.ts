@@ -367,16 +367,22 @@ export class FsEditChain {
   async oldestEntryForTreeRef(
     treeRef: string,
   ): Promise<FsChainEntry | undefined> {
-    const rows = await this._db.getEditHistories(this._treeKey, {
+    const rows = (await this._db.getEditHistories(this._treeKey, {
       dataRef: treeRef,
-    });
-    let oldest: (EditHistory & { _hash: string }) | undefined;
-    for (const row of rows as Array<EditHistory & { _hash: string }>) {
-      if (!oldest || compareTimeId(row.timeId, oldest.timeId) < 0) {
-        oldest = row;
-      }
-    }
-    return oldest ? this.entry(oldest._hash) : undefined;
+    })) as Array<EditHistory & { _hash: string }>;
+    // SORTED rather than scanned for a minimum, and the reason is coverage
+    // rather than taste. A running-minimum loop takes its "this one is older"
+    // branch only when the rows arrive in an order that has an older row after
+    // a newer one — so whether that branch is exercised depends on what the
+    // database happened to return. Measured: the same test covered it standalone
+    // and left it uncovered in the full suite, which is the 98.22 %/99.11 %
+    // pattern this repository has been bitten by before.
+    //
+    // `compareTimeId` is a total order, so the first element is the oldest
+    // whatever order the rows come in, and there is no branch left to be lucky
+    // about.
+    const sorted = [...rows].sort((a, b) => compareTimeId(a.timeId, b.timeId));
+    return sorted.length > 0 ? this.entry(sorted[0]._hash) : undefined;
   }
 
   async entryForTreeRef(treeRef: string): Promise<FsChainEntry | undefined> {
@@ -852,4 +858,131 @@ export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
   return blocked
     ? { apply: [], staler, blocked: true }
     : { apply, staler, blocked: false };
+};
+
+// .............................................................................
+/** What {@link planJoin} is asked. */
+export interface JoinQuestion {
+  /**
+   * The hub head's tree, `path → content hash`.
+   *
+   * Materialised VIRTUALLY — nothing is written until the plan says so. The
+   * point of the whole exercise is to decide before touching the folder.
+   */
+  head: ReadonlyMap<string, string>;
+
+  /** This folder as it stands, `path → content hash`. */
+  folder: ReadonlyMap<string, string>;
+
+  /**
+   * Paths the history states were REMOVED and never re-added.
+   *
+   * The net removals over the WHOLE history — `collectRemovals` with no stop
+   * state, which walks to the root and lets a re-add cancel a removal in
+   * order. This is the one fact that separates a stale copy from new work, and
+   * no filesystem can supply it.
+   */
+  removedEver: ReadonlySet<string>;
+
+  /**
+   * Whether a head was found at all.
+   *
+   * No head means no history exists anywhere, so this folder IS the origin and
+   * its contents are its first state. Absence of a head is NOT the same as an
+   * empty head: an empty head is a fleet that has agreed the folder is empty,
+   * and its emptiness is a fact to be applied.
+   */
+  haveHead: boolean;
+}
+
+/** What {@link planJoin} concluded, per path. */
+export interface JoinPlan {
+  /** In the head and missing or differing here — write the head's bytes. */
+  write: string[];
+
+  /**
+   * Here, unknown to the history — new local work. Announce it.
+   *
+   * A file nobody has ever mentioned cannot be a deletion anybody made, and
+   * dropping it is how a node loses its own work on joining.
+   */
+  announce: string[];
+
+  /**
+   * Here, and REMOVED by the history — a stale copy. Rename aside; do NOT
+   * announce.
+   *
+   * The restored-backup case. Announcing these would push content the fleet
+   * deliberately deleted back to every node, one file at a time, under names
+   * nobody deleted — for a folder restored from last month's backup that is
+   * thousands of files. So the bytes are kept where their owner can see them
+   * and nothing is said about them. **That is a deliberate, visible local
+   * divergence**, chosen over resurrecting a deletion or destroying a file.
+   */
+  recover: string[];
+
+  /**
+   * In the head AND here with different bytes — a real conflict.
+   *
+   * The case the stated algorithm does not name, because it is neither
+   * "missing here" nor "additional here": the path is live on both sides and
+   * was edited while this node was away. The head's bytes are written (the
+   * chain wins on what it states) and the local bytes are kept aside as an
+   * ordinary conflict copy, which IS announced — an edit to a live path is
+   * exactly what conflict copies exist for.
+   */
+  conflict: string[];
+}
+
+/**
+ * Decides what joining a network does to a folder, before anything is written.
+ *
+ * **The chain applies first; the filesystem only then.** A joining node used to
+ * author a lineage root from whatever it happened to hold and push it as the
+ * network's newest claim. That is one defect wearing two faces: every node got
+ * its own lineage root, so `classify` answered `fork` to every announcement
+ * ever made; and a node restored from a backup pushed deleted files back to the
+ * whole fleet.
+ *
+ * Every question here is answered against the chain. The folder is consulted
+ * only for what it holds — never for what that means.
+ * @param q - The head, the folder, and what the history says was removed.
+ * @returns The per-path plan; every path appears in at most one bucket.
+ */
+export const planJoin = (q: JoinQuestion): JoinPlan => {
+  const write: string[] = [];
+  const announce: string[] = [];
+  const recover: string[] = [];
+  const conflict: string[] = [];
+
+  // No history anywhere: this folder is the origin and everything in it is its
+  // first state, which the ordinary first push states as a root.
+  if (!q.haveHead) {
+    return { write: [], announce: [], recover: [], conflict: [] };
+  }
+
+  for (const [path, hash] of q.head) {
+    const here = q.folder.get(path);
+    if (here === undefined) {
+      write.push(path);
+    } else if (here !== hash) {
+      conflict.push(path);
+    }
+  }
+
+  for (const path of q.folder.keys()) {
+    if (q.head.has(path)) continue;
+    if (q.removedEver.has(path)) {
+      recover.push(path);
+    } else {
+      announce.push(path);
+    }
+  }
+
+  return {
+    write: write.sort(),
+    announce: announce.sort(),
+    recover: recover.sort(),
+    conflict: conflict.sort(),
+  };
 };

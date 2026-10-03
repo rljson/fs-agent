@@ -156,49 +156,42 @@ describe('invariants over the route, not the destination', () => {
   }, 180_000);
 
   // ...........................................................................
-  // OPEN, ROOT-CAUSED, AND REPRODUCIBLE OFF-LAB IN 30 SECONDS.
+  // OPEN, ROOT-CAUSED, AND PINNED SOMEWHERE CHEAPER.
   //
   // The test above guards this invariant under full-suite load and passes
-  // there. Run ALONE on a fast machine it fails 6 of 8 — and a control run at
-  // the commit before the chain audit fails 6 of 8 too, so this predates that
-  // work rather than being caused by it. The timeline is identical with and
-  // without it:
+  // there. Run ALONE it fails most of the time, with high variance — a control
+  // at the commit before the chain audit fails 6 of 8, and the same code state
+  // measured 3 of 8 and 7 of 8 on different eight-run samples. **It is not a
+  // usable instrument for judging a fix**, which is worth more than the
+  // reproduction: two attempted fixes were measured against it and one was
+  // credited with halving the failure rate on a sample that could not support
+  // the claim.
   //
   //   WRITER: v0 v1 v2 v3 v4 v5 v6 v7 v8 → v5
   //
-  // The writer's OWN folder goes back three versions, and a conflicted copy
-  // appears on a file one person edited.
+  // THE DETERMINISTIC REPRODUCTION IS `compareTips` — see `orders a BRANCH,
+  // not a path` in `fs-conflict-resolver.spec.ts`, which pins the wrong answer
+  // in 3 ms. `compareTips` orders a BRANCH, and the caller applies that one
+  // verdict to every path the branches disagree about, so a tip wins paths it
+  // never touched: a receiver that authored an entry for its conflict copy at
+  // 9000 also wins `doc.txt`, resolved to the v5 bytes it happens to hold,
+  // over the writer's own v8 edit authored at 8000.
   //
-  // **Two layers, and the first is fixed.** Every node used to author its own
-  // root entry for the identical seed state, so the three lineages were
-  // disjoint from the first second and every announcement was a `fork`. A root
-  // entry is now identified by its content (`FsEditChain.append`), which took
-  // the forks in this scenario from 4 to 2.
+  // **Not a timestamp problem.** mtime is out of the content identity and a
+  // received file gets no date applied, so the only times in the system come
+  // from edits, and 9000 is the honest moment that edit was authored. The
+  // error is applying one branch's verdict to a path that branch never edited.
   //
-  // **What is left is the `changed` list.** A receiver that applies and lands
-  // SHORT authors an entry of its own — correctly, being short of what you
-  // applied is a state of your own — but it computes `changed` by diffing its
-  // folder against its last announcement. That conflates *"I changed this
-  // path"* with *"I did not manage to update this path"*. So a node holding
-  // v5 while v8 arrived stamps doc.txt as its own change at heal time: OLD
-  // content with a NEW `timeId`. The writer then merges against it, orders by
-  // `timeId`, and the receiver's v5 beats the writer's v8. Measured directly:
-  //
-  //   [C] head=rPKdH2 changed=[doc (conflicted copy …).txt, doc.txt]
-  //
-  // on a node that had edited neither. The conflict copy in that list IS its
-  // own work; `doc.txt` is not. Receiving a path is not editing it, and the
-  // partial fix for the case where the apply LANDS is already in
-  // `syncFromDb` — every path whose bytes now equal the bytes that arrived is
-  // recorded as received and claimed by nobody. The landed-short case needs
-  // `changed` to come from what a local actor did, not from a content diff.
-  //
-  // **The shape of the real fix is per-path ancestry.** "Who is ahead on
-  // doc.txt" is a question the chain can answer exactly — the entry that
-  // introduced these bytes for this path is in MY ancestry and is not my
-  // latest, therefore I am ahead on it — and it needs no clock at all. That is
-  // a mechanism, not a patch, so it is written down here rather than
-  // improvised.
+  // What IS fixed, because the design rule says so rather than because this
+  // test said so: a node no longer claims a path it merely received — at the
+  // apply, at the merge, and when it applies a peer's stated removal
+  // (`_recordReceived`). Two further attempts to infer authorship from BYTES —
+  // a `path+hash` ledger, and recording fetches in the bucket round — each
+  // measured worse and were reverted, both for the same reason: a node's own
+  // bytes come back from a peer and get classified as received, so the node
+  // stops asserting its own work. Authorship cannot be recovered from bytes.
+  // It has to be read from the chain, which is what the per-path question
+  // above is.
   it.skip('OPEN: a writer is not rolled back by a receiver that is catching up', async () => {
     // The reproduction is the test above, run alone. Kept as a pointer so the
     // defect has a name in the suite rather than only in a document.

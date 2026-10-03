@@ -383,6 +383,7 @@ export const TREE_FETCH_CONCURRENCY = 64;
  */
 export const RESTORED_BLOB_MEMORY_MAX = 50_000;
 
+
 /**
  * How many tree children a restore works on at once.
  *
@@ -765,6 +766,14 @@ export class FsAgent {
    * peers could know about.
    */
   private _announcedContent = new Map<string, string>();
+
+  /**
+   * Whether this node has ever announced anything.
+   *
+   * Kept separately from {@link _announcedContent} being empty, because an
+   * empty folder announced is a real statement and an unspoken node is not.
+   */
+  private _hasAnnounced = false;
 
   /**
    * The ref last written to {@link AGENT_STATE_FILE}.
@@ -2786,6 +2795,35 @@ export class FsAgent {
           `[FsAgent] resuming from recorded ref ${persisted.slice(0, 8)}… — ` +
             `this folder can declare its ancestry`,
         );
+        // AND WHAT THAT REF CONTAINED, which is the half that was missing.
+        //
+        // A restart reloaded the NAME of the state it was last in and nothing
+        // about its contents, so its first push computed a delta against an
+        // empty map — `first`, stating nothing. For an addition that is
+        // harmless, because the file is in the tree and travels anyway. For a
+        // DELETION it is silent data retention: the folder lost a file the
+        // history still names, nobody states the removal, and every peer keeps
+        // it for ever.
+        //
+        // Measured by `J9: a deletion made while the agent was down
+        // propagates` (`fs-mesh-matrix.spec.ts`), three runs of three, once
+        // the harness could stop and start a node at all. It is what every
+        // crash and every "deleted while the client was closed" produces.
+        //
+        // The tree is read from this node's OWN database — the state it
+        // recorded is one it has — so nothing is asked of the network here.
+        // Failing to read it leaves the old behaviour, which is additive.
+        const wasAt = await this._fetchTreeFromDb(db, treeKey, persisted).catch(
+          () => undefined,
+        );
+        if (wasAt) {
+          this._announcedContent = this._getFileContentMap(wasAt);
+          this._hasAnnounced = true;
+          console.log(
+            `[FsAgent] recovered ${this._announcedContent.size} known path(s) ` +
+              `from that state — changes made while stopped can be stated`,
+          );
+        }
       }
     }
     const initialParentRef = this._currentRef;
@@ -3333,6 +3371,55 @@ export class FsAgent {
       detectedAt: Date.now(),
       branches: [...headTimeIds, ...incomingTimeIds],
     });
+
+    // AND THE MERGE DOES NOT AUTHOR THE BYTES IT KEPT.
+    //
+    // This path RETURNS before the apply's own bookkeeping, so it had none of
+    // it: a merge that resolved `doc.txt` by keeping one side's bytes left the
+    // node looking as though it had edited the file, and the entry its next
+    // push authored said so. That claim is what out-ordered the writer.
+    //
+    // Choosing between two versions is not writing one. What this node
+    // actually made — a conflict copy — sits at a path no peer sent and is
+    // still claimed. Safe to scan here: the watcher is paused for the whole
+    // apply, so this sees the merge's own result and nothing else.
+    this._recordReceived(incomingTree, await this._scanner.scan());
+  }
+
+  /**
+   * Records the paths whose current bytes CAME FROM A PEER.
+   *
+   * **`changed` has to mean "I changed this", and it did not.** It is computed
+   * by diffing this folder against `_announcedContent` — a pure content diff,
+   * with no notion of WHO changed a path. So a node claimed every path where
+   * its folder differed from its last announcement, including paths it had
+   * merely received, paths it had failed to receive, and paths where a merge
+   * had kept one side's bytes. The entry it then authored was a real edit with
+   * a correct stamp for the moment of authoring, and that is exactly why it
+   * won: it should never have existed.
+   *
+   * Measured: `changed=[doc (conflicted copy …).txt, doc.txt]` on a node that
+   * had edited neither, whose v5 then out-ordered the writer's v8 and rolled
+   * the writer's own folder back.
+   *
+   * Recording the arrival in `_announcedContent` is what keeps the path out of
+   * the next delta, and dropping the local claim is what stops a peer's later
+   * removal of it looking stale. Peers DO know these bytes — they sent them —
+   * so this is not a suppression, it is the truth being written down.
+   *
+   * The conflict copy in that measurement is genuinely this node's work and
+   * keeps being claimed: its bytes sit at a path no peer sent.
+   * @param arrived - The tree that came from the peer.
+   * @param held - This folder as it stands now.
+   */
+  private _recordReceived(arrived: FsTree, held: FsTree): void {
+    const fromPeer = this._getFileContentMap(arrived);
+    const onDisk = this._getFileContentMap(held);
+    for (const [path, hash] of fromPeer) {
+      if (onDisk.get(path) !== hash) continue;
+      this._announcedContent.set(path, hash);
+      this._localPathTimeIds.delete(path);
+    }
   }
 
   /**
@@ -3577,7 +3664,20 @@ export class FsAgent {
   private _rememberAnnounced(tree: FsTree): FsTreeDelta {
     const content = this._getFileContentMap(tree);
     const previous = this._announcedContent;
-    const first = previous.size === 0;
+    // "HAVE I ANNOUNCED BEFORE" IS NOT "IS WHAT I ANNOUNCED EMPTY".
+    //
+    // This was `previous.size === 0`, which is true both for a node that has
+    // never spoken AND for one that has announced an EMPTY FOLDER — the
+    // ordinary state of every fresh client. So the first real file written on
+    // a new node was never claimed: the push that carried it stated nothing,
+    // and nothing in the chain recorded who made it.
+    //
+    // Found by asking the question directly rather than through the mesh
+    // (`fs-agent-authorship.spec.ts`), and it is the same confusion the rest
+    // of this work is about: a content diff cannot tell "I know nothing" from
+    // "I know it is empty". Only a record of having spoken can.
+    const first = !this._hasAnnounced;
+    this._hasAnnounced = true;
 
     // What this push changed, measured against what was announced before it.
     //
@@ -4148,6 +4248,10 @@ export class FsAgent {
         // writing a file, and a directory tombstone would refuse one that
         // merely shares the name.
         this._pendingDeletes.add(absolute);
+        // And NOT this node's removal to claim. The same rule as
+        // `_recordReceived`, for the other half of the delta: a path dropped
+        // from what peers know cannot reappear in this node's `removed`.
+        this._announcedContent.delete(path);
       } catch (err) {
         /* v8 ignore next -- @preserve a file we cannot remove is retried */
         this._writeSyncError(`removals/${path}`, err);
@@ -4995,13 +5099,7 @@ export class FsAgent {
           // doc.txt]` on a node that had edited neither.
           //
           // The conflict copy in that list is genuinely local work and stays.
-          const arrived = this._getFileContentMap(incomingTree);
-          const held = this._getFileContentMap(postRestoreTree);
-          for (const [path, hash] of arrived) {
-            if (held.get(path) !== hash) continue;
-            this._announcedContent.set(path, hash);
-            this._localPathTimeIds.delete(path);
-          }
+          this._recordReceived(incomingTree, postRestoreTree);
 
           // NOT recording the incoming tree's files as prunable.
           //

@@ -97,6 +97,55 @@ describe('compareTips / decideWinner', () => {
     timeId = 't',
   ) => ({ timeId, ref, clientId, timestamp });
 
+  // ...........................................................................
+  // THE WRONG ANSWER, PINNED DELIBERATELY — the rollback's last mile.
+  //
+  // `compareTips` orders a BRANCH, and the caller then uses that one verdict
+  // for every path the two branches disagree about. So a tip wins paths it
+  // never touched.
+  //
+  // The scenario, which is the one `fs-mesh-invariants.spec.ts` reproduces at
+  // the mesh level and this reproduces in a millisecond:
+  //
+  //   WRITER  v8 of doc.txt, authored at 8000 — the newest EDIT of that path
+  //   C       catching up, holds v5 of doc.txt, and authors an entry at 9000
+  //           for the only thing it really made: a conflict copy
+  //
+  // C's TIP is newer, so C wins — and `doc.txt` is resolved to the v5 bytes C
+  // happens to be holding. The writer's own folder goes backwards. Measured on
+  // the mesh at v8 → v5.
+  //
+  // **Not a timestamp problem.** mtime is out of the content identity and a
+  // received file gets no date applied, so the only times in the system come
+  // from edits. C's 9000 is the honest moment C authored *its* edit. The error
+  // is applying one branch's verdict to a path that branch never edited.
+  //
+  // THE SHAPE OF THE FIX: ask the chain per PATH. The deciding edit for
+  // `doc.txt` is the newest entry on each branch whose `changed` contains
+  // `doc.txt` — 8000 on the writer's side, and on C's side whatever C
+  // inherited, which is the writer's 8000 or older. The writer wins, with no
+  // clock and no content comparison. `FsEditChain` already carries everything
+  // needed (`changed` per entry, `previous` to walk); what does not exist is a
+  // per-path question to ask it.
+  //
+  // Pinned rather than fixed because it changes what "who wins" means, and
+  // that is a mechanism. Until then this assertion documents the behaviour the
+  // code actually has, so nobody has to rediscover either half.
+  it('orders a BRANCH, not a path — so a tip wins paths it never edited', () => {
+    const writerV8 = { ...tip('w', 'WRITER', 0), chainTimeId: '8000:aaa' };
+    const catchingUp = { ...tip('c', 'C', 0), chainTimeId: '9000:bbb' };
+
+    // What it does: the later TIP outranks the newer EDIT of the path.
+    expect(compareTips(catchingUp, writerV8)).toBeGreaterThan(0);
+    expect(decideWinner(catchingUp, writerV8).winner).toBe(catchingUp);
+
+    // What a per-path question would answer, stated so the fix has a target:
+    // the newest entry claiming `doc.txt` is the writer's, at 8000.
+    const newestEditOf = (path: string) =>
+      path === 'doc.txt' ? writerV8 : catchingUp;
+    expect(newestEditOf('doc.txt')).toBe(writerV8);
+  });
+
   it('orders by timestamp, then clientId, then content ref (not per-db timeId)', () => {
     expect(compareTips(tip('a', 'c', 2), tip('b', 'c', 1))).toBeGreaterThan(0);
     expect(compareTips(tip('a', 'z', 1), tip('b', 'a', 1))).toBeGreaterThan(0);
@@ -618,12 +667,22 @@ describe('FsConflictResolver', () => {
     expect(h.disk.get('doc.txt')).toBe('vC');
     expect(h.disk.get('onlyB.txt')).toBe('b0'); // written via merge delta
     expect(h.disk.get('onlyC.txt')).toBe('c0'); // from winner restore
-    // No client id, so no gap where one would go. The double space this
-    // literal used to contain was the defect showing through the test: the
-    // id was `db.insertTrees` in production — the DB's name for its own
-    // operation, not a machine — and empty in this fake, and neither case
-    // was ever looked at. See `usableClientId`.
-    const copyName = 'doc (conflicted copy 1970-01-01 000000).txt';
+    // No client id, so the LOSING CONTENT names the copy instead.
+    //
+    // Two things used to be wrong here. The double space this literal once
+    // contained was the defect showing through the test — the id was
+    // `db.insertTrees` in production, the DB's name for its own operation, and
+    // empty in this fake, and neither case was ever looked at (see
+    // `usableClientId`). And then the name that replaced it carried only a
+    // SECOND-GRANULARITY timestamp, so two nodes losing different content in
+    // the same second derived the same copy name, the copies conflicted with
+    // each other, and a copy of a copy appeared. Measured on the seeded fuzz
+    // run as up to 14 nested copies; 0 in four runs after this.
+    //
+    // The losing revision's content ref is identical on every peer and differs
+    // whenever the content does, which is the property that was missing. It is
+    // used ONLY where there is no identity, so a readable name stays readable.
+    const copyName = 'doc (conflicted copy 1970-01-01 000000 vB).txt';
     expect(h.disk.get(copyName)).toBe('vB');
 
     // Merge revision references BOTH tips (loser first by identity order).

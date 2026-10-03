@@ -466,6 +466,13 @@ describe('FsEditChain.collectRemovals', () => {
       expect(winner).toBeTruthy();
     });
 
+    it('answers undefined when no entry produced the content', async () => {
+      // The empty arm of the oldest-entry lookup, which is reached whenever a
+      // node hears about content whose history has not replicated to it yet.
+      await chain.append({ treeRef: 'KNOWN' });
+      expect(await chain.oldestEntryForTreeRef('NEVER-STORED')).toBeUndefined();
+    });
+
     it('answers undefined for a tree ref no entry produced', async () => {
       await chain.append({ treeRef: 'T1' });
       expect(await chain.entryForTreeRef('never-stored')).toBeUndefined();
