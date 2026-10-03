@@ -3630,7 +3630,23 @@ export class FsAgent {
     // coverage ignore is what hid it for a whole red run. An agent whose chain
     // could not be created still hears its peers, and it must say "I cannot
     // read this" rather than pretend the head is a tree ref.
-    if (!this._chain) return undefined;
+    if (!this._chain) {
+      // SILENT UNTIL NOW, and that silence cost three wrong diagnoses of the
+      // same defect.
+      //
+      // Every `~H~` announcement is discarded here when the chain is not
+      // available, with no log, no counter and no error — so a node can be
+      // told the hub's state thirty-seven times, ignore every one of them, and
+      // report perfect health. The sibling branch below says "the sender will
+      // re-announce" out loud for an unresolvable head; this one said nothing
+      // for the case where nothing can be resolved at all.
+      console.warn(
+        `[FsAgent] ${this._rootPath}: head=${head.slice(0, 8)}… arrived ` +
+          `before this agent has a chain — DISCARDED. Nothing will repair ` +
+          `from it; the node is relying entirely on being pushed to.`,
+      );
+      return undefined;
+    }
     try {
       const entry = await this._chain.entry(head);
       if (!entry) {

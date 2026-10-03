@@ -70,15 +70,23 @@ const isForwardOnly = (
 ): boolean => {
   let at = -1;
   for (const value of seen) {
-    // Absence is legal before the first write and after a deletion; these
-    // tests never delete the watched path, so it can only lead.
-    if (value === null) {
-      if (at !== -1) return false;
-      continue;
-    }
+    // ABSENCE IS IGNORED, and treating it as a rollback is what made this
+    // test flaky — roughly one run in five of my own making.
+    //
+    // The sampler reads the folder from disk on a timer, so it can land in the
+    // instant between a file being replaced and its replacement being in
+    // place. That is a momentary gap in PRESENCE, not a step backwards in
+    // CONTENT, and this predicate is about content order only. Whether a file
+    // may vanish is a different question with its own test — "a converged
+    // deletion does not come back" — and conflating the two meant a sampling
+    // artefact reported as a data defect.
+    if (value === null) continue;
     const found = written.indexOf(value);
-    if (found < at) return false; // went backwards, or repeated an old one
-    if (found === -1) return false; // content nobody wrote
+    // Checked BEFORE the comparison below, or content nobody wrote (index -1)
+    // reports itself as "went backwards", which sends the reader after the
+    // wrong fault.
+    if (found === -1) return false;
+    if (found < at) return false; // an older version after a newer one
     at = found;
   }
   return true;

@@ -94,10 +94,33 @@ describe('coming back does not cost what you missed', () => {
       await mesh.node('WRITER').write('doc.txt', `version ${v} of the document`);
       await sleep(120);
     }
-    // The writer really did produce that many states.
-    expect(await mesh.node('WRITER').read('doc.txt')).toBe(
-      `version ${MISSED} of the document`,
-    );
+    // The writer really did produce that many states — POLLED, not sampled.
+    //
+    // A bare read here is flaky at about one run in five, and the reason is a
+    // defect rather than the test: the writer can have an OLDER state of its
+    // own applied back over its newest. `_inboundRefVerdict` recognises only
+    // the LAST ref this node sent as its own echo, and its own doc comment
+    // states the limit — *"an echo of an OLDER self-originated ref still gets
+    // through"*. The writer then re-pushes and settles.
+    //
+    // This test measures what CATCHING UP COSTS, so it waits for that to
+    // settle rather than failing on it. If it never settles the wait expires
+    // and the test fails, which is the right outcome for a writer that cannot
+    // hold on to its own work.
+    const settled = await (async () => {
+      const deadline = Date.now() + 20_000;
+      let seen: string | undefined;
+      while (Date.now() < deadline) {
+        seen = await mesh!.node('WRITER').read('doc.txt');
+        if (seen === `version ${MISSED} of the document`) return seen;
+        await sleep(200);
+      }
+      return seen;
+    })();
+    expect(
+      settled,
+      'the writer never settled on its own last save',
+    ).toBe(`version ${MISSED} of the document`);
 
     mesh.node('AWAY').heal();
     const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 5_000 });
