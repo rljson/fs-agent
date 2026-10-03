@@ -344,6 +344,51 @@ export function conflictCopyName(
 }
 
 /**
+ * Derives the name a file is set aside under when the history DELETED its path.
+ *
+ * `document.txt` → `document (recovered).txt`.
+ *
+ * **Not a conflict copy, and the difference is who is told.** A conflict copy
+ * is live work on a live path and is announced, because the network needs it.
+ * A recovered file is content the fleet deliberately removed — a folder
+ * restored from last month's backup, or a client that was away while a
+ * directory was deleted — and announcing it would push every one of those
+ * deletions back to every node, under names nobody deleted. So it is kept
+ * where its owner can see it and nothing is said about it.
+ *
+ * That is a deliberate, visible local divergence, chosen over the two
+ * alternatives: resurrecting a deletion, or destroying a file somebody may
+ * still want. No timestamp and no identity, because unlike a conflict there is
+ * nothing to tell apart — the path is simply gone from the history, and one
+ * name per path is what a user can act on.
+ * @param relativePath - The path the history removed
+ * @param taken - Paths already used; the chosen name is added to it
+ * @returns A unique set-aside path
+ */
+export function recoveredName(
+  relativePath: string,
+  taken: Set<string>,
+): string {
+  const slash = relativePath.lastIndexOf('/');
+  const dir = slash >= 0 ? relativePath.slice(0, slash + 1) : '';
+  const base = slash >= 0 ? relativePath.slice(slash + 1) : relativePath;
+  const dot = base.lastIndexOf('.');
+  // dot > 0 → a leading-dot name (".gitignore") is treated as extensionless,
+  // the same rule `conflictCopyName` uses.
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : '';
+
+  let candidate = `${dir}${stem} (recovered)${ext}`;
+  let n = 1;
+  while (taken.has(candidate)) {
+    candidate = `${dir}${stem} (recovered) (${n})${ext}`;
+    n++;
+  }
+  taken.add(candidate);
+  return candidate;
+}
+
+/**
  * One same-file conflict, in the terms a user needs to see it in.
  *
  * WHY THIS EXISTS. A fork on two DIFFERENT files is merged as a union and

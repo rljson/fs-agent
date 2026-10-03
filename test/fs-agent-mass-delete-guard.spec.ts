@@ -21,6 +21,7 @@ import {
   REFUSAL_ANSWER_COOLDOWN_MS,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // The dangerous direction of sync is a POPULATED node receiving a tree that
@@ -65,7 +66,7 @@ describe('FsAgent — the mass-delete guard', () => {
   };
 
   /** The tree of `sourceDir` as it currently stands. */
-  const sourceTree = (bs: BsMem) => new FsAgent(sourceDir, bs).extract();
+  const sourceTree = (bs: BsMem) => new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract();
 
   /** Files currently in the target. */
   const targetFiles = async () =>
@@ -80,7 +81,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(
-      new FsAgent(targetDir, bs).restore(tree, targetDir, {
+      new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
         cleanTarget: true,
       }),
     ).rejects.toBeInstanceOf(MassDeleteRefusedError);
@@ -101,7 +102,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const tree = await sourceTree(bs);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await new FsAgent(targetDir, bs)
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
       .restore(tree, targetDir, { cleanTarget: true })
       .catch(() => undefined);
 
@@ -115,7 +116,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const tree = await sourceTree(bs);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    const err = (await new FsAgent(targetDir, bs)
+    const err = (await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
       .restore(tree, targetDir, { cleanTarget: true })
       .catch((e: unknown) => e)) as MassDeleteRefusedError;
 
@@ -135,7 +136,7 @@ describe('FsAgent — the mass-delete guard', () => {
     for (const i of [0, 1, 2]) await rm(join(sourceDir, `f${i}.txt`));
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 
@@ -151,7 +152,7 @@ describe('FsAgent — the mass-delete guard', () => {
     for (let i = 0; i < 120; i++) await rm(join(sourceDir, `f${i}.txt`));
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 
@@ -168,7 +169,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(
-      new FsAgent(targetDir, bs).restore(tree, targetDir, {
+      new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
         cleanTarget: true,
       }),
     ).rejects.toBeInstanceOf(MassDeleteRefusedError);
@@ -183,7 +184,7 @@ describe('FsAgent — the mass-delete guard', () => {
     await fill(targetDir, 5);
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 
@@ -222,6 +223,7 @@ describe('FsAgent — the mass-delete guard', () => {
       return realSend(ref);
     };
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -297,6 +299,7 @@ describe('FsAgent — the mass-delete guard', () => {
     };
 
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -364,6 +367,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -433,6 +437,7 @@ describe('FsAgent — the mass-delete guard', () => {
 
     // The first agent consumes the ref…
     const first = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
     const stopFirst = await first.syncFromDb(db, connector, treeKey, {
@@ -449,6 +454,7 @@ describe('FsAgent — the mass-delete guard', () => {
       await rm(join(targetDir, f), { recursive: true, force: true });
     }
     const second = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
     const stopSecond = await second.syncFromDb(db, connector, treeKey, {
@@ -485,6 +491,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -536,6 +543,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -572,7 +580,7 @@ describe('FsAgent — the mass-delete guard', () => {
     await fill(targetDir, POPULATED);
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir);
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir);
 
     expect(await targetFiles()).toHaveLength(POPULATED);
   });
@@ -584,7 +592,7 @@ describe('FsAgent — the mass-delete guard', () => {
     await fill(sourceDir, POPULATED);
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 

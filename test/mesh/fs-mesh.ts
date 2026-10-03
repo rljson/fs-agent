@@ -94,6 +94,7 @@ import {
   ATOMIC_TMP_PREFIX,
   CONFLICT_LOG_FILE,
   FsAgent,
+  RECOVERED_DIR,
   SYNC_ERROR_FILE,
 } from '../../src/fs-agent.ts';
 
@@ -122,11 +123,17 @@ export const MESH_ANTI_ENTROPY: AntiEntropyOptions = {
 };
 
 /** Files the agent keeps beside the content, which are nobody else's business. */
+// What the agent keeps in the folder and never syncs. A test comparing folders
+// has to see the same thing a peer does, or its own bookkeeping reads as a
+// divergence — which `RECOVERED_DIR` produced the moment it existed: a joiner
+// correctly kept a file outside the synced tree and `converged()` called the
+// fleet divided over it.
 const BOOKKEEPING = [
   SYNC_ERROR_FILE,
   ATOMIC_TMP_PREFIX,
   AGENT_STATE_FILE,
   CONFLICT_LOG_FILE,
+  RECOVERED_DIR,
 ];
 
 const isBookkeeping = (name: string): boolean =>
@@ -319,6 +326,21 @@ export interface FsMesh {
   node(name: string): FsMeshNode;
 
   /**
+   * Adds a node to the running network, optionally with a folder of its own.
+   *
+   * A client arriving at a network that already has a history, which is what
+   * every real deployment does after the first machine. `seed` writes the
+   * folder BEFORE the agent starts — the faithful order, because a backup
+   * restore or a copied-in folder happened before the client was launched.
+   * @param name - The new node's name.
+   * @param seed - Writes its folder before its agent starts.
+   */
+  join(
+    name: string,
+    seed?: (folder: string) => Promise<void>,
+  ): Promise<FsMeshNode>;
+
+  /**
    * Every node's file set right now.
    * @returns Sorted paths keyed by node name.
    */
@@ -372,6 +394,15 @@ export const buildFsMesh = async (opts: {
    * replacing a folder. `FsAgentOptions.bucketSync` on every node.
    */
   bucketSync?: boolean;
+
+  /**
+   * `FsAgentOptions.joinWaitMs` on every node.
+   *
+   * Set it for a scenario where a node arrives at a network that already has a
+   * history, and its own folder has to be judged against that history rather
+   * than announced over it.
+   */
+  joinWaitMs?: number;
   /**
    * Sample every node's folder on an interval and keep the series, so a test
    * can assert over the ROUTE a fleet took and not only its destination. See
@@ -414,7 +445,15 @@ export const buildFsMesh = async (opts: {
   const stops: Array<() => void> = [];
   const clients: Client[] = [];
 
-  for (const name of names) {
+  // A NODE, BUILT ON DEMAND.
+  //
+  // Extracted from the start-up loop so a node can also arrive LATER, at a
+  // network that is already running and already has a history. That is the
+  // whole J section of `doc/scenario-matrix.md` — a client joining with files
+  // of its own, some of them new work and some of them a stale copy — and it
+  // could not be expressed at all while every node had to exist before the
+  // first byte was written.
+  const addNode = async (name: string): Promise<FsMeshNode> => {
     const folder = folders[name];
     const localIo = new IoMem();
     await localIo.init();
@@ -484,6 +523,11 @@ export const buildFsMesh = async (opts: {
       // the identical scenario passed 8 of 8 elsewhere, for no reason but
       // this line.
       bucketSync: opts.bucketSync,
+      // ZERO unless a test asks. A mesh is built from scratch, so every node
+      // in it IS the origin of its own history and has nothing to join — the
+      // wait could only expire. The scenario that needs it is a node arriving
+      // at a network that already HAS a history, which is `mesh.join`.
+      joinWaitMs: opts.joinWaitMs ?? 0,
     };
 
     // A NODE THAT CAN BE STOPPED AND STARTED AGAIN.
@@ -582,7 +626,34 @@ export const buildFsMesh = async (opts: {
         return seen;
       },
     });
+    return nodes[nodes.length - 1];
+  };
+
+  for (const name of names) {
+    await addNode(name);
   }
+
+  /**
+   * Adds a node to a network that is ALREADY RUNNING.
+   *
+   * The J section of `doc/scenario-matrix.md`: a client arrives with a folder
+   * of its own and no history, and what happens to its files has to be decided
+   * against the chain. `seed` writes that folder BEFORE the agent starts, which
+   * is the only faithful order — a backup restore, or a user who copied a
+   * folder in, happened before the client was launched.
+   * @param name - The new node's name.
+   * @param seed - Writes its folder before its agent starts.
+   * @returns The node, already syncing.
+   */
+  const joinNode = async (
+    name: string,
+    seed?: (folder: string) => Promise<void>,
+  ): Promise<FsMeshNode> => {
+    folders[name] = join(opts.root, name);
+    await mkdir(folders[name], { recursive: true });
+    if (seed) await seed(folders[name]);
+    return addNode(name);
+  };
 
   const node = (name: string) => {
     const found = nodes.find((n) => n.name === name);
@@ -734,6 +805,7 @@ export const buildFsMesh = async (opts: {
     treeKey,
     route,
     node,
+    join: joinNode,
     snapshot,
     converged,
     stop: stopAll,

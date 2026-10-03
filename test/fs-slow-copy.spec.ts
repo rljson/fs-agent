@@ -34,6 +34,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 const TREE = 'fsTree';
 
@@ -85,6 +86,7 @@ describe('V2/D3 — a file being written is not distributed half-done', () => {
       includeClientIdentity: true,
     });
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       // A short debounce, so the agent is as eager as it can be — which is the
       // condition the defect needs. Slowing it down would hide the fault
       // rather than test it.

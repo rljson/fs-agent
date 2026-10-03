@@ -20,6 +20,7 @@ import {
   findCommonAncestor,
   formatConflictTimestamp,
   FsConflictResolver,
+  recoveredName,
   fsTreeToContentMap,
   threeWayMerge,
   tipTimestamp,
@@ -89,6 +90,41 @@ describe('fsTreeToContentMap', () => {
 });
 
 // ...........................................................................
+describe('recoveredName', () => {
+  // Set aside, not announced. The naming is the user-facing half of the
+  // decision `planJoin` makes: content the fleet deliberately deleted is kept
+  // where its owner can see it and nothing is said about it.
+  it('names a set-aside file, before the extension', () => {
+    const taken = new Set<string>();
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered).txt');
+    expect(recoveredName('deep/dir/notes.md', taken)).toBe(
+      'deep/dir/notes (recovered).md',
+    );
+  });
+
+  it('treats a dotfile and an extensionless name as extensionless', () => {
+    const taken = new Set<string>();
+    expect(recoveredName('.gitignore', taken)).toBe('.gitignore (recovered)');
+    expect(recoveredName('Makefile', taken)).toBe('Makefile (recovered)');
+  });
+
+  it('never collides with a name already set aside', () => {
+    // A folder restored twice, or two deleted paths whose set-aside names
+    // would meet. Losing one to the other is losing a file.
+    const taken = new Set<string>();
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered).txt');
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered) (1).txt');
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered) (2).txt');
+  });
+
+  it('carries no timestamp and no identity', () => {
+    // Unlike a conflict copy there is nothing to tell apart: the path is gone
+    // from the history, and one name per path is what a user can act on.
+    const taken = new Set<string>();
+    expect(recoveredName('doc.txt', taken)).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+});
+
 describe('compareTips / decideWinner', () => {
   const tip = (
     ref: string,

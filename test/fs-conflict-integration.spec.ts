@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FsAgent } from '../src/fs-agent.ts';
 import { FsConflictResolver } from '../src/fs-conflict-resolver.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 /**
  * End-to-end conflict resolution against a real Db + real filesystem. Exercises
@@ -39,7 +40,10 @@ describe('FsAgent conflict resolution (integration)', () => {
     db = new Db(io);
     await db.core.createTableWithInsertHistory(createTreesTableCfg(TREE));
 
-    agent = new FsAgent(testDir, undefined, { resolveConflicts: true });
+    agent = new FsAgent(testDir, undefined, {
+    ...ORIGIN_FIXTURE,
+    resolveConflicts: true,
+  });
   });
 
   afterEach(async () => {

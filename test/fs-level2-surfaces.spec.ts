@@ -28,6 +28,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
 import {
   reconcile,
@@ -85,6 +86,7 @@ describe('level 2 — surfaces', () => {
     await writeFile(join(dir, 'keeper.txt'), 'keeper');
 
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20 },
     });
     agents.push(agent);
@@ -107,7 +109,7 @@ describe('level 2 — surfaces', () => {
     agent.scanner.stopWatch();
 
     // The restart: a brand-new agent over the same folder.
-    const restarted = new FsAgent(dir, new BsMem());
+    const restarted = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
     agents.push(restarted);
     expect(restarted['_pendingDeletes'].has(join(dir, 'doomed.txt'))).toBe(
       true,
@@ -194,6 +196,7 @@ describe('level 2 — surfaces', () => {
     await writeFile(join(dir, 'keeper.txt'), 'keeper');
 
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20 },
     });
     agents.push(agent);
@@ -252,6 +255,7 @@ describe('level 2 — surfaces', () => {
     await writeFile(join(dir, 'keeper.txt'), 'keeper');
 
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20 },
     });
     agents.push(agent);

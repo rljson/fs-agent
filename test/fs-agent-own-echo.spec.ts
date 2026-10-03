@@ -15,6 +15,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // A client destroyed its OWN edit by applying its OWN last advertisement back
@@ -65,10 +66,11 @@ describe('FsAgent — its own advertisement echoed back', () => {
     // excludes mtime, so recomputing it here yields the same string the agent
     // derives from the same bytes.
     const ownRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(dir, bs).extract(),
+      await new FsAgent(dir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const socket = new SocketMock();

@@ -187,6 +187,19 @@ export class FsEditChain {
   }
 
   /**
+   * Re-reads the tip, for a node waiting to learn the network's state.
+   *
+   * `init` reads it once. A joining node has none of its own and is waiting
+   * for the fleet's to replicate, so it has to be able to look again — the
+   * rows arrive after the connection, not before it.
+   * @returns The tip now, or `undefined` while nothing has arrived.
+   */
+  async refreshHead(): Promise<string | undefined> {
+    this._head = await this._tip();
+    return this._head;
+  }
+
+  /**
    * Appends one entry.
    * @param opts - What the change was; see {@link FsAppendOptions}.
    * @returns The entry that was written.

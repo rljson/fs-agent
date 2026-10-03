@@ -48,6 +48,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 import type { FsTree } from '../src/fs-scanner.ts';
 
@@ -88,6 +89,7 @@ describe('a divergence is a difference in CONTENT', () => {
       includeClientIdentity: true,
     });
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -208,7 +210,7 @@ describe('a divergence is a difference in CONTENT', () => {
     await mkdir(other, { recursive: true });
     await writeFile(join(other, 'a.txt'), 'a');
     await writeFile(join(other, 'only-theirs.txt'), 'theirs');
-    const theirTree = await new FsAgent(other, new BsMem()).extract();
+    const theirTree = await new FsAgent(other, new BsMem(), ORIGIN_FIXTURE).extract();
     const theirs = await new FsDbAdapter(db, TREE).storeFsTree(theirTree, {
       skipNotification: true,
     });
@@ -248,7 +250,7 @@ describe('a divergence is a difference in CONTENT', () => {
     await writeFile(join(other, 'shared.txt'), 'same');
     await writeFile(join(other, 'differs.txt'), 'theirs');
     await new Promise((r) => setTimeout(r, 400));
-    const theirTree = await new FsAgent(other, new BsMem()).extract();
+    const theirTree = await new FsAgent(other, new BsMem(), ORIGIN_FIXTURE).extract();
     const theirs = await new FsDbAdapter(db, TREE).storeFsTree(theirTree, {
       skipNotification: true,
     });

@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // A push that names ITSELF as its own parent.
@@ -88,7 +89,7 @@ describe('FsAgent — a push that parents itself', () => {
     await mkdir(sourceDir, { recursive: true });
     await writeFile(join(sourceDir, 'from-peer.txt'), 'peer');
     const peerRef = await adapter.storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
+      await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     // ...and a file of OUR OWN that the peer's tree does not know about. This
@@ -96,6 +97,7 @@ describe('FsAgent — a push that parents itself', () => {
     await writeFile(join(dir, 'ours.txt'), 'ours');
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const socket = new SocketMock();
@@ -140,10 +142,11 @@ describe('FsAgent — a push that parents itself', () => {
     await mkdir(sourceDir, { recursive: true });
     await writeFile(join(sourceDir, 'from-peer.txt'), 'peer');
     const peerRef = await adapter.storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
+      await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const socket = new SocketMock();

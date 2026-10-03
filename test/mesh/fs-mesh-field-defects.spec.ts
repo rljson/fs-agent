@@ -685,9 +685,17 @@ describe('field defects, reduced off-lab', () => {
     expect(copyName).not.toContain('db.insertTrees');
     expect(copyName).not.toContain('1970');
     expect(copyName).not.toContain('copy  ');
+    // An IDENTITY where there is one, and the losing CONTENT where there is
+    // not — never a bare second-granularity timestamp. Two nodes losing
+    // different content in the same second used to derive the same name, so
+    // the copies conflicted with each other and a copy of a copy appeared.
     expect(copyName).toMatch(
-      /^shared \(conflicted copy (.+ )?\d{4}-\d{2}-\d{2} \d{6}\)\.txt$/,
+      /^shared \(conflicted copy (.+ )?\d{4}-\d{2}-\d{2} \d{6}( \S+)?\)\.txt$/,
     );
+    expect(
+      copyName,
+      'the name carries nothing but a timestamp, so two losers can collide',
+    ).not.toMatch(/^shared \(conflicted copy \d{4}-\d{2}-\d{2} \d{6}\)\.txt$/);
 
     // 5. Somebody was told — in both channels, because they serve different
     //    readers: the callback a UI that is running, the file one that starts

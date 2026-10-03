@@ -37,6 +37,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 const TREE = 'fsTree';
 
@@ -78,7 +79,7 @@ describe('FsAgent — a transport with no ancestry', () => {
         ? undefined
         : { causalOrdering, includeClientIdentity: true },
     );
-    const agent = new FsAgent(dir, new BsMem());
+    const agent = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
     agents.push(agent);
     stops.push(await agent.syncFromDb(db, connector, TREE));
   };

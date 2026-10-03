@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // Reported from a live pair, on a real 3 702-file folder:
@@ -63,6 +64,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
       return realSend(ref);
     };
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     return { db, connector, agent, sent, socket };
@@ -156,7 +158,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
       );
     }
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, new BsMem()).extract(),
+      await new FsAgent(peerDir, new BsMem(), ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 3_000));
@@ -185,6 +187,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
     };
 
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const stop = await agent.syncToDb(db, connector, 'fsTree');

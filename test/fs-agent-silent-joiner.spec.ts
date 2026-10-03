@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 // A machine joining an idle network made EMPTINESS the current state.
 //
@@ -54,6 +55,7 @@ describe('FsAgent — an agent with nothing to say does not speak', () => {
 
   const agentFor = (bs: BsMem) =>
     new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
 

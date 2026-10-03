@@ -34,6 +34,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 const TREE = 'fsTree';
@@ -62,7 +63,7 @@ describe('F5 — per-stage timings', () => {
   it('reports nothing before anything has run', async () => {
     // A stage absent means it has not happened, which is information. A stage
     // reported as 0 would read as "instant".
-    const agent = new FsAgent(dir, new BsMem());
+    const agent = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
     agents.push(agent);
     expect(agent.stageTimings).toEqual({});
   });
@@ -81,6 +82,7 @@ describe('F5 — per-stage timings', () => {
       { causalOrdering: true, includeClientIdentity: true },
     );
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20 },
     });
     agents.push(agent);
@@ -116,7 +118,7 @@ describe('F5 — per-stage timings', () => {
     for (let i = 0; i < 20; i++) {
       await writeFile(join(source, `f-${i}.txt`), `c-${i}`.repeat(500));
     }
-    const sender = new FsAgent(source, bs);
+    const sender = new FsAgent(source, bs, ORIGIN_FIXTURE);
     agents.push(sender);
     const ref = await new FsDbAdapter(db, TREE).storeFsTree(
       await sender.extract(),
@@ -125,7 +127,7 @@ describe('F5 — per-stage timings', () => {
 
     const target = join(dir, 'target');
     await mkdir(target, { recursive: true });
-    const receiver = new FsAgent(target, bs);
+    const receiver = new FsAgent(target, bs, ORIGIN_FIXTURE);
     agents.push(receiver);
     const connector = new Connector(
       db,
@@ -158,7 +160,7 @@ describe('F5 — per-stage timings', () => {
     // needs is "what did the slow one cost", and that means the figure has to
     // be replaced each cycle rather than accumulated.
     await writeFile(join(dir, 'big.txt'), 'x'.repeat(2_000_000));
-    const agent = new FsAgent(dir, new BsMem());
+    const agent = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
     agents.push(agent);
     await agent.extract();
     const afterBig = agent.stageTimings['push.scan'];

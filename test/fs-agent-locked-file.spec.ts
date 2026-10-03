@@ -12,6 +12,7 @@ import { BsMem } from '@rljson/bs';
 import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 // CARAT holds .dbf and .PRJZ open for as long as a user has the document. One
 // of those aborted the entire restore, so a single open document stopped every
@@ -130,7 +131,7 @@ describe('FsAgent — a file held open by another process', () => {
     for (const [name, content] of Object.entries(files)) {
       await writeFile(join(sourceDir, name), content);
     }
-    return new FsAgent(sourceDir, bs).extract();
+    return new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract();
   };
 
   it('still delivers every other file in the same restore', async () => {
@@ -144,7 +145,7 @@ describe('FsAgent — a file held open by another process', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await expect(
-      new FsAgent(targetDir, bs).restore(tree, targetDir),
+      new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir),
     ).rejects.toBeInstanceOf(PartialRestoreError);
 
     // The whole point: one locked document must not hold up the rest.
@@ -159,7 +160,7 @@ describe('FsAgent — a file held open by another process', () => {
     lockedPaths.add('open.dbf');
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const err = await new FsAgent(targetDir, bs)
+    const err = await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
       .restore(tree, targetDir)
       .catch((e: unknown) => e);
 
@@ -185,7 +186,7 @@ describe('FsAgent — a file held open by another process', () => {
     lockedPaths.add('two.PRJZ');
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const err = await new FsAgent(targetDir, bs)
+    const err = await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
       .restore(tree, targetDir)
       .catch((e: unknown) => e);
 
@@ -205,7 +206,7 @@ describe('FsAgent — a file held open by another process', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       await expect(
-        new FsAgent(targetDir, bs).restore(tree, targetDir),
+        new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir),
       ).rejects.toBeInstanceOf(PartialRestoreError);
       expect(await readFile(join(targetDir, 'a.txt'), 'utf-8')).toBe('alpha');
       warnSpy.mockRestore();
@@ -221,7 +222,7 @@ describe('FsAgent — a file held open by another process', () => {
     const tree = await seed(bs, { 'bad.txt': 'x', 'a.txt': 'alpha' });
     lockedPaths.add('bad.txt');
 
-    const err = await new FsAgent(targetDir, bs)
+    const err = await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
       .restore(tree, targetDir)
       .catch((e: unknown) => e);
 
@@ -254,6 +255,7 @@ describe('FsAgent — a file held open by another process', () => {
     const ref = await new FsDbAdapter(db, treeKey).storeFsTree(incoming);
 
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -294,7 +296,7 @@ describe('FsAgent — a file held open by another process', () => {
     const tree = await seed(bs, { 'open.dbf': 'locked content', 'a.txt': 'alpha' });
     lockedPaths.add('open.dbf');
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const target = new FsAgent(targetDir, bs);
+    const target = new FsAgent(targetDir, bs, ORIGIN_FIXTURE);
 
     await expect(target.restore(tree, targetDir)).rejects.toBeInstanceOf(
       PartialRestoreError,

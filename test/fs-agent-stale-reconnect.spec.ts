@@ -19,6 +19,7 @@ import {
   CHAIN_HEAD_PREFIX,
   FsAgent,
 } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 import { announceAsPeer } from './chain-announce.ts';
 
@@ -86,13 +87,14 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     // A stale peer's tree: shared.txt only.
     await writeFile(join(sourceDir, 'shared.txt'), 'shared');
     const staleRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
+      await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     // resolveConflicts on: it is the only mode in which a sender transmits
     // ancestry at all, so it is the only mode in which its ABSENCE means
     // anything. See the gate in processRef.
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       resolveConflicts: true,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
@@ -142,12 +144,13 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     // What the rest of the branch still held: the folder without those files.
     await writeFile(join(sourceDir, 'shared.txt'), 'shared');
     const staleRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
+      await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     // A One Client's fs-client, exactly: conflict resolution OFF, causal
     // ordering ON.
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       resolveConflicts: false,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
@@ -189,6 +192,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     await writeFile(join(sourceDir, 'shared.txt'), 'shared');
 
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
     const connector = makeConnector(db);
@@ -197,7 +201,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     });
 
     const peer = await announceAsPeer(db, 'fsTree', {
-      tree: await new FsAgent(sourceDir, bs).extract(),
+      tree: await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
       removed: ['gone.txt'],
     });
     connector.simulateIncoming(peer.announcement);
@@ -229,6 +233,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     await writeFile(join(sourceDir, 'shared.txt'), 'shared');
 
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
     const connector = makeConnector(db);
@@ -237,7 +242,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     });
 
     const peer = await announceAsPeer(db, 'fsTree', {
-      tree: await new FsAgent(sourceDir, bs).extract(),
+      tree: await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
       removed: ['gone.txt'],
     });
     connector.simulateIncoming(peer.announcement);
@@ -323,15 +328,16 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       await writeFile(join(sourceDir, 'deleted-later.txt'), 'doomed');
       const adapter = new FsDbAdapter(db, 'fsTree');
       const oldRef = await adapter.storeFsTree(
-        await new FsAgent(sourceDir, bs).extract(),
+        await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
       );
       await rm(join(sourceDir, 'deleted-later.txt'));
       await writeFile(join(sourceDir, 'survivor.txt'), 'survivor');
       const newRef = await adapter.storeFsTree(
-        await new FsAgent(sourceDir, bs).extract(),
+        await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
       );
 
       const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
         timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
       });
       const connector = makeSeqConnector(db);
@@ -371,6 +377,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       await writeFile(join(sourceDir, 'shared.txt'), 'shared');
 
       const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
         timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
       });
       const connector = makeSeqConnector(db);
@@ -383,7 +390,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       await new Promise((r) => setTimeout(r, 300));
 
       const peer = await announceAsPeer(db, 'fsTree', {
-        tree: await new FsAgent(sourceDir, bs).extract(),
+        tree: await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
         removed: ['gone.txt'],
       });
       connector.advertise(peer.announcement, 1, []);
@@ -425,6 +432,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       await writeFile(join(targetDir, 'shared.txt'), 'shared');
 
       const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
         timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
       });
       const connector = makeSeqConnector(db);
@@ -484,6 +492,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       await writeFile(join(targetDir, 'shared.txt'), 'shared');
 
       const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
         timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
       });
       const connector = makeSeqConnector(db);
@@ -495,7 +504,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
 
       await writeFile(join(sourceDir, 'shared.txt'), 'shared');
       const ref = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-        await new FsAgent(sourceDir, bs).extract(),
+        await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
       );
       // Declares a state this node has never been in.
       connector.advertise(ref, 1, ['some-other-state-entirely']);
@@ -518,6 +527,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     await writeFile(join(targetDir, 'a.txt'), 'a');
 
     const first = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1 },
     });
     const c1 = makeConnector(db);
@@ -530,6 +540,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
 
     // A brand-new agent over the same folder — the restart.
     const restarted = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1 },
     });
     const c2 = makeConnector(db);
@@ -595,7 +606,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       JSON.stringify({ currentRef: 'abc' }),
     );
 
-    const tree = await new FsAgent(targetDir, bs).extract();
+    const tree = await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).extract();
     const paths = Array.from(tree.trees.values())
       .map((t) => (t.meta as { relativePath?: string } | null)?.relativePath)
       .filter(Boolean);

@@ -29,6 +29,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 const TREE = 'sharedTree';
 
@@ -91,6 +92,7 @@ describe('KNOWN-WEAKNESSES reproductions, verbatim', () => {
           : undefined,
       );
       const agent = new FsAgent(folder, client.bs, {
+      ...ORIGIN_FIXTURE,
         resolveConflicts: production,
       });
       agents.push(agent);

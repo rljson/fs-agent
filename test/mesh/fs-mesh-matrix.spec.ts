@@ -26,10 +26,12 @@
 //   J9  a chain that disagrees with its folder  (was: no test at any tier)
 // .............................................................................
 
-import { rm } from 'fs/promises';
+import { existsSync } from 'fs';
+import { readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { RECOVERED_DIR } from '../../src/fs-agent.ts';
 import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -236,6 +238,92 @@ describe('the scenario matrix, at the mesh tier', () => {
       await mesh.node('A').read('shared.txt'),
       'the restart lost what the chain already knew',
     ).toBe('shared');
+  }, 180_000);
+
+  // ...........................................................................
+  // J4 + J5 — joining with files of your own, some of them stale.
+  //
+  // The case the chain exists for. A node arrives holding files and no
+  // history: one the fleet has never heard of, and one the fleet DELETED last
+  // week. The filesystem cannot tell those apart; the chain can.
+  //
+  // It used to author a lineage root from whatever it held and announce it as
+  // the network's newest claim, which is how a restored backup drags a fleet
+  // back. Now the chain applies first and the folder is judged against it.
+  // ...........................................................................
+  it('J4+J5: a joiner keeps its new work and does not resurrect a deletion', async () => {
+    mesh = await buildFsMesh({
+      root: root('j45'),
+      names: ['A', 'B'],
+      // The default now, stated here because this scenario is what it is for:
+      // C arrives with files at a network that already has a history. A and B
+      // start empty, so neither of them defers at all.
+      joinWaitMs: 4_000,
+    });
+
+    // The fleet's history: a file created, and then deliberately deleted.
+    await mesh.node('A').write('live.txt', 'live');
+    await mesh.node('A').write('deleted-by-the-fleet.txt', 'old content');
+    expect((await mesh.converged({ timeoutMs: 30_000 })).converged).toBe(true);
+    await mesh.node('A').del('deleted-by-the-fleet.txt');
+    expect(await mesh.node('B').settlesOn(['live.txt'])).toEqual(['live.txt']);
+
+    // C arrives with a folder of its own: the deleted file still in it, as a
+    // backup restore would leave it, plus genuinely new work.
+    const joiner = await mesh.join('C', async (folder) => {
+      await writeFile(
+        join(folder, 'deleted-by-the-fleet.txt'),
+        'old content',
+      );
+      await writeFile(join(folder, 'brand-new.txt'), 'nobody has seen this');
+    });
+
+    const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 4_000 });
+    expect(result.converged, whyNot(result)).toBe(true);
+
+    // The new work reached the fleet — nobody ever said anything about it.
+    expect(
+      await mesh.node('A').read('brand-new.txt'),
+      'the joiner lost its own new work',
+    ).toBe('nobody has seen this');
+
+    // The deletion was NOT undone anywhere.
+    for (const name of ['A', 'B', 'C']) {
+      expect(
+        (await mesh.node(name).files()).includes('deleted-by-the-fleet.txt'),
+        `${name} has the deleted file back — the joiner dragged the fleet back`,
+      ).toBe(false);
+    }
+
+    // And the joiner's copy was not destroyed either.
+    //
+    // It is OUTSIDE the synced tree, in an ignored directory, which is the
+    // only way to keep a file without announcing it: a tree ref carries
+    // content, so a file left in the folder travels whatever the chain entry
+    // says about it. Read from disk rather than through `files()` for exactly
+    // that reason — `files()` is the synced view, and this is deliberately not
+    // in it.
+    const kept = join(
+      joiner.folder,
+      RECOVERED_DIR,
+      'deleted-by-the-fleet (recovered).txt',
+    );
+    expect(
+      existsSync(kept),
+      'the stale copy was destroyed instead of being set aside',
+    ).toBe(true);
+    expect(await readFile(kept, 'utf8')).toBe('old content');
+
+    // And nobody else heard about it, under any name.
+    for (const name of ['A', 'B']) {
+      expect(
+        (await mesh.node(name).files()).some((f) => f.includes('recovered')),
+        `${name} was told about a file that was deliberately kept quiet`,
+      ).toBe(false);
+    }
+
+    // The fleet's own state arrived too.
+    expect(await joiner.read('live.txt')).toBe('live');
   }, 180_000);
 
   // ...........................................................................

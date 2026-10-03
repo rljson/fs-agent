@@ -15,6 +15,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 
 /**
  * Three clients, one file, written at the SAME INSTANT.
@@ -112,6 +113,7 @@ describe.each([
       await new Db(localIo).core.createTableWithInsertHistory(treeCfg);
 
       const agent = new FsAgent(folder, sharedBs, {
+      ...ORIGIN_FIXTURE,
         resolveConflicts: merge,
         timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
         // On by default; two seconds rather than the shipped ten so five

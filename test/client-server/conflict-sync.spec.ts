@@ -15,6 +15,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 
 const TREE = 'sharedTree';
 const SYNC: SyncConfig = { causalOrdering: true, includeClientIdentity: true };
@@ -98,6 +99,7 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
       // Both peers are clients → both resolve conflicts (the server/hub never
       // runs an FsAgent resolver).
       const agent = new FsAgent(folder, sharedBs, {
+      ...ORIGIN_FIXTURE,
         resolveConflicts: true,
         timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
       });

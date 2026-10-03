@@ -31,8 +31,10 @@ import {
 } from './fs-anti-entropy.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
+  conflictCopyName,
   ConflictResolverDeps,
   FsConflictResolver,
+  recoveredName,
   type FsConflictReport,
 } from './fs-conflict-resolver.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
@@ -44,6 +46,7 @@ import {
 import {
   compareTimeId,
   FsEditChain,
+  planJoin,
   planRemovals,
   type FsChainEntry,
 } from './fs-edit-chain.ts';
@@ -181,6 +184,37 @@ export interface FsAgentOptions {
    * fires. On by default. See `src/fs-anti-entropy.ts`.
    */
   antiEntropy?: AntiEntropyOptions;
+
+  /**
+   * How long a folder with files and NO history waits for the network's state
+   * before saying anything about its own, in milliseconds. `0` disables the
+   * wait, which is the default.
+   *
+   * **The chain applies first; the filesystem only then.** A starting agent
+   * authors a lineage root from whatever it happens to hold and announces it
+   * as the network's newest claim, and that is one defect wearing two faces:
+   * every node gets its own lineage root, so `classify` answers `fork` to
+   * every announcement ever made; and a node restored from a backup pushes
+   * deleted files back to the whole fleet. With a wait set, such a node defers
+   * instead, reconciles against the first head it hears (`planJoin` — write
+   * what the head has, keep what the history never named, set aside what it
+   * REMOVED, treat a path live on both sides as a conflict) and speaks
+   * afterwards.
+   *
+   * **Bounded, and that is not a detail.** If no head arrives this folder IS
+   * the origin and its contents are the first state — a brand-new network has
+   * to be startable, so the wait is a deferral and never a refusal. It also
+   * cannot deadlock a fleet whose nodes all start with files: they all time
+   * out, they all announce, and their roots agree by content.
+   *
+   * **Off by default, deliberately.** It changes what a node says in its first
+   * seconds, which is the class of change this package has reverted four times
+   * for being shipped on reasoning. It is proven at the mesh tier
+   * (`fs-mesh-matrix.spec.ts`, `J4+J5`) and belongs on after a lab run, in the
+   * same way `bucketSync` did — see §13.17 and §13.20 of
+   * `PLAN-fs-edit-chain.md`.
+   */
+  joinWaitMs?: number;
 }
 
 /** Restore options */
@@ -292,6 +326,44 @@ export const SYNC_ERROR_FILE = '.sync-errors.log';
  * is meant to be READ by a UI, not grepped by a person.
  */
 export const CONFLICT_LOG_FILE = '.fsagent-conflicts.json';
+
+/**
+ * Where a file the history had DELETED is kept when this node joins.
+ *
+ * **Outside the synced tree, and that is the whole point.** A recovered file
+ * must not be announced — it is content the fleet deliberately removed, and a
+ * folder restored from last month's backup would otherwise push every one of
+ * those deletions back to every node. But leaving it in the folder cannot
+ * achieve that: a tree ref carries CONTENT, so the file travels whatever the
+ * entry claims about it. Measured exactly that way — the set-aside copy
+ * arrived on a peer while the chain entry said nothing about it.
+ *
+ * So it goes in an ignored directory, which is local by construction, and the
+ * user can see it and move it back if they want it. Visible, keepable, and
+ * silent.
+ */
+export const RECOVERED_DIR = '.fsagent-recovered';
+
+/**
+ * How often a joining node asks for the network's state, in milliseconds.
+ *
+ * The hub volunteers it — the connector has a bootstrap channel and a
+ * bootstrap heartbeat — but a node that misses those cannot tell "I heard
+ * nothing" from "there is nothing", and that is the difference between joining
+ * a fleet and announcing a stale folder over it. So it keeps asking, which
+ * costs a read of its own database and puts nothing on the wire.
+ */
+export const JOIN_ASK_INTERVAL_MS = 150;
+
+/**
+ * How long a joining node asks before concluding it is the origin.
+ *
+ * The default for every route. Long enough for a hub's bootstrap to arrive on
+ * a real connection, short enough that the first client of a brand-new network
+ * is not kept waiting — and it is a deferral, never a refusal: when it expires
+ * the folder IS the origin and its contents are the first state.
+ */
+export const DEFAULT_JOIN_WAIT_MS = 1_500;
 
 /**
  * How many resolved conflicts the log keeps.
@@ -768,6 +840,42 @@ export class FsAgent {
   private _announcedContent = new Map<string, string>();
 
   /**
+   * Set while a folder with files and no history waits for a head.
+   *
+   * The deferral in `syncToDb`: until a head has been seen, nothing in this
+   * folder has been established, so the node says nothing about it. Cleared by
+   * the reconcile, or by the first push once it turns out this node is the
+   * origin.
+   */
+  private _joinPending: { db: Db; treeKey: string } | undefined;
+
+  /** See {@link FsAgentOptions.joinWaitMs}. */
+  private readonly _joinWaitMs: number;
+
+  /** Ends the wait, so a node that is the origin is never silent for good. */
+  private _joinWaitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Asks for the network's state, repeatedly, while a join is pending. */
+  private _joinAskTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * The reconcile that is running, so only ONE ever does.
+   *
+   * Announcements arrive in bursts and the reconcile awaits a query, a tree
+   * read and a restore. A second announcement landing in that window used to
+   * take the ordinary path, schedule an apply, and act on the peer's stated
+   * removal — which deleted the very file the reconcile was about to set
+   * aside. Measured: the joiner's stale copy destroyed instead of recovered,
+   * with "set aside 1 file" in the log, because the rename had nothing left to
+   * move.
+   *
+   * `_joinPending` therefore stays set until the reconcile FINISHES, so every
+   * announcement in that window funnels into this one promise and none of them
+   * schedules anything.
+   */
+  private _joinInFlight: Promise<void> | undefined;
+
+  /**
    * Whether this node has ever announced anything.
    *
    * Kept separately from {@link _announcedContent} being empty, because an
@@ -932,6 +1040,7 @@ export class FsAgent {
     this._bucketSyncOn =
       options.bucketSync ?? !(options.announceTreeRef ?? false);
     this._antiEntropyOptions = options.antiEntropy;
+    this._joinWaitMs = options.joinWaitMs ?? DEFAULT_JOIN_WAIT_MS;
     this._scanner = new FsScanner(rootPath, {
       ...options,
       ignore: [
@@ -943,6 +1052,10 @@ export class FsAgent {
         // file inside the synced folder, which is a change, which propagates,
         // which every peer then rewrites with its own copy of the log.
         CONFLICT_LOG_FILE,
+        // And the set-aside copies, for the same reason one level up: they are
+        // deliberately NOT announced, which a tree ref cannot express about a
+        // file inside the folder it describes. See `RECOVERED_DIR`.
+        RECOVERED_DIR,
       ],
       bs: this._bs,
     });
@@ -2855,6 +2968,83 @@ export class FsAgent {
     const isSilentJoiner =
       initialParentRef === undefined && this._treeIsEmpty(initialTree);
 
+    // A FOLDER WITH FILES AND NO HISTORY DOES NOT SPEAK FIRST EITHER.
+    //
+    // It used to: a starting agent authored a lineage root from whatever it
+    // happened to hold and announced it as the network's newest claim. That is
+    // one defect wearing two faces — every node got its own lineage root, so
+    // `classify` answered `fork` to every announcement ever made; and a node
+    // restored from a backup pushed deleted files back to the whole fleet.
+    //
+    // The chain applies FIRST and the filesystem only then. So a node in this
+    // state waits for a head, reconciles against it (`_reconcileJoin`), and
+    // announces afterwards. If no head arrives it IS the origin, and the
+    // ordinary first push states its folder as the first state — which is why
+    // this is a deferral and never a refusal: a brand-new network has to be
+    // startable.
+    const joinsWithUnknownFiles =
+      this._joinWaitMs > 0 &&
+      initialParentRef === undefined &&
+      !this._treeIsEmpty(initialTree);
+    if (joinsWithUnknownFiles) {
+      this._joinPending = { db, treeKey };
+      console.warn(
+        `[FsAgent] ${this._rootPath} holds files and no history — waiting up ` +
+          `to ${this._joinWaitMs} ms for the network's state before saying ` +
+          `anything about its own.`,
+      );
+      // AND IT KEEPS LOOKING, rather than waiting to be told once.
+      //
+      // The hub does volunteer its state — the connector has a bootstrap
+      // channel, which is *"the server ANNOUNCING current state"*, and a
+      // bootstrap heartbeat that re-sends it. But a joining node that misses
+      // those has no way to go and find out, and "I heard nothing" is
+      // indistinguishable from "there is nothing" at the moment it has to
+      // decide whether to announce its own folder over the fleet's.
+      //
+      // So it asks until it has an answer: the fleet's entries replicate into
+      // this node's own database after the connection, and the tip is the
+      // question. Nothing new goes on the wire for it.
+      const ask = async (): Promise<void> => {
+        if (this._joinPending === undefined || !this._chain) return;
+        const head = await this._chain.refreshHead().catch(() => undefined);
+        if (head === undefined) return;
+        const entry = await this._chain.entry(head).catch(() => undefined);
+        if (!entry || this._joinPending === undefined) return;
+        console.warn(
+          `[FsAgent] asked for the network's state and found ` +
+            `head=${head.slice(0, 8)}… — reconciling before saying anything`,
+        );
+        await this._reconcileJoin(db, treeKey, entry);
+      };
+      this._joinAskTimer = setInterval(() => {
+        void ask().catch((err) => {
+          /* v8 ignore next -- @preserve a failed ask is retried by the next
+             tick; the bounded wait is what ends it */
+          this._writeSyncError('join/ask', err);
+        });
+      }, JOIN_ASK_INTERVAL_MS);
+      this._joinAskTimer.unref?.();
+
+      // BOUNDED. No head means no history anywhere, so this folder is the
+      // origin and the ordinary push states it. A fleet whose nodes all start
+      // with files all reach here, all time out, and all announce — and their
+      // roots agree by content, so nothing is lost by every one of them
+      // waiting.
+      this._joinWaitTimer = setTimeout(() => {
+        this._joinWaitTimer = null;
+        if (this._joinPending === undefined) return;
+        this._joinPending = undefined;
+        this._stopAsking();
+        console.warn(
+          `[FsAgent] no network state arrived in ${this._joinWaitMs} ms — ` +
+            `this folder is the origin of its own history.`,
+        );
+        void this._pushCurrentState(db, connector, treeKey);
+      }, this._joinWaitMs);
+      this._joinWaitTimer.unref?.();
+    }
+
     // A node that comes back UNCHANGED has nothing to announce.
     //
     // Its scan reproduces the ref it recorded before it stopped, so
@@ -2890,7 +3080,7 @@ export class FsAgent {
         ...options,
         previous: initialPrevious,
         skipNotification:
-          isSilentJoiner || resumingUnchanged
+          isSilentJoiner || resumingUnchanged || joinsWithUnknownFiles
             ? true
             : options?.skipNotification,
       }),
@@ -2932,7 +3122,13 @@ export class FsAgent {
 
     // Send initial ref through connector (self-filtering will prevent loops)
     /* v8 ignore next -- @preserve */
-    if (initialRef && !isSilentJoiner) {
+    if (joinsWithUnknownFiles) {
+      // Recorded locally so the reconcile has something to compare, but NOT
+      // announced and NOT written to the chain: nothing here is established
+      // until a head has been seen.
+      this._currentRef = initialRef;
+      this._lastSentContentKey = this._contentKeyFromTree(initialTree);
+    } else if (initialRef && !isSilentJoiner) {
       this._lastSentRef = initialRef;
       this._lastPushedRef = initialRef;
       this._currentRef = initialRef;
@@ -3586,6 +3782,202 @@ export class FsAgent {
    * @param tree - The tree that just went out, or was adopted as ours.
    */
   /**
+   * Announces this folder as it stands, as the ordinary first push would.
+   *
+   * Used when a deferred join times out: no head arrived, so no history exists
+   * anywhere and this folder is the origin. Re-scanned rather than reusing the
+   * tree from start-up, because the wait is seconds long and the user may have
+   * carried on working through it.
+   * @param db - The route's database.
+   * @param connector - Connector to announce on.
+   * @param treeKey - The trees table key.
+   */
+  private async _pushCurrentState(
+    db: Db,
+    connector: Connector,
+    treeKey: string,
+  ): Promise<void> {
+    try {
+      const tree = await this._scanner.scan();
+      const ref = await new FsDbAdapter(db, treeKey).storeFsTree(tree, {
+        skipNotification: true,
+      });
+      this._currentRef = ref;
+      this._lastSentRef = ref;
+      this._lastPushedRef = ref;
+      this._persistCurrentRef(ref);
+      this._lastSentContentKey = this._contentKeyFromTree(tree);
+      await this._recordChainEntry(ref, this._rememberAnnounced(tree));
+      await this._sendRef(connector, ref);
+    } catch (err) {
+      /* v8 ignore next -- @preserve a failed origin push leaves the folder
+         unannounced; the next local change announces it */
+      this._writeSyncError('join/originPush', err);
+    }
+  }
+
+  /**
+   * Reconciles a folder that has files and no history against the fleet's head.
+   *
+   * **The chain applies first; the filesystem only then.** Every question here
+   * is answered by {@link planJoin} against the chain, and the folder is
+   * consulted for what it holds — never for what that means.
+   *
+   * The four answers, and why each is what it is:
+   *
+   * - **write** — the head has it and this folder does not. The fleet's state
+   *   is the starting point, not this folder's.
+   * - **announce** — this folder has it and the history has never named it. New
+   *   work, made before this node ever joined; dropping it is how a node loses
+   *   its own files on joining.
+   * - **recover** — this folder has it and the history REMOVED it. A stale
+   *   copy: a backup restore, or a folder that sat while a directory was
+   *   deleted. Set aside under `(recovered)` and NOT announced, because
+   *   announcing would push every one of those deletions back to every node.
+   * - **conflict** — live on both sides with different bytes, edited while this
+   *   node was away. The head's bytes win because the chain states them, and
+   *   the local bytes become an ordinary conflict copy, which IS announced.
+   *
+   * Returns having adopted the head's entry, so this node's first word to the
+   * network is the fleet's own state plus whatever it legitimately adds.
+   * @param db - The route's database.
+   * @param treeKey - The trees table key.
+   * @param entry - The head this node is joining onto.
+   */
+  private async _reconcileJoin(
+    db: Db,
+    treeKey: string,
+    entry: FsChainEntry,
+  ): Promise<void> {
+    // ONE reconcile, however many announcements arrive while it runs.
+    if (this._joinInFlight) return this._joinInFlight;
+    this._joinInFlight = this._reconcileJoinOnce(db, treeKey, entry).finally(
+      () => {
+        // Cleared together, and only at the end: `_joinPending` is what keeps
+        // concurrent announcements out of the ordinary path.
+        this._joinPending = undefined;
+        this._joinInFlight = undefined;
+        this._stopAsking();
+      },
+    );
+    return this._joinInFlight;
+  }
+
+  /**
+   * The body of {@link _reconcileJoin}, run once under its guard.
+   *
+   * The watcher is paused for the whole of it. The reconcile renames files and
+   * then restores over the result, and a watcher awake for that would read its
+   * own work as local edits and announce them.
+   * @param db - The route's database.
+   * @param treeKey - The trees table key.
+   * @param entry - The head this node is joining onto.
+   */
+  /** Stops asking, whichever way the join ended. */
+  private _stopAsking(): void {
+    if (this._joinAskTimer) clearInterval(this._joinAskTimer);
+    this._joinAskTimer = null;
+    if (this._joinWaitTimer) clearTimeout(this._joinWaitTimer);
+    this._joinWaitTimer = null;
+  }
+
+  private async _reconcileJoinOnce(
+    db: Db,
+    treeKey: string,
+    entry: FsChainEntry,
+  ): Promise<void> {
+    this._scanner.pauseWatch();
+    try {
+      await this._joinReconcileBody(db, treeKey, entry);
+    } finally {
+      this._scanner.resumeWatch();
+    }
+  }
+
+  /**
+   * What joining actually does to the folder.
+   * @param db - The route's database.
+   * @param treeKey - The trees table key.
+   * @param entry - The head this node is joining onto.
+   */
+  private async _joinReconcileBody(
+    db: Db,
+    treeKey: string,
+    entry: FsChainEntry,
+  ): Promise<void> {
+    const headTree = await this._fetchTreeFromDb(db, treeKey, entry.treeRef);
+    /* v8 ignore next -- @preserve a head whose tree cannot be read is not a
+       state to reconcile against; the next announcement carries another */
+    if (!headTree) return;
+
+    const folderTree = await this._scanner.scan();
+    const walk = await this._chain
+      ?.collectRemovals(entry.head, undefined)
+      .catch(() => undefined);
+    const plan = planJoin({
+      haveHead: true,
+      head: this._getFileContentMap(headTree),
+      folder: this._getFileContentMap(folderTree),
+      // An incomplete walk means the history could not be read to the root, so
+      // "was this path ever removed" is unknown. Unknown must not read as
+      // "never removed": that would announce a stale copy. Treating it as
+      // removed would destroy new work. So neither — an empty set leaves every
+      // extra file in `announce`, which is the non-destructive direction, and
+      // the node is at worst noisy about files it holds.
+      removedEver: new Set(walk?.complete ? walk.removed : []),
+    });
+
+    const taken = new Set<string>([
+      ...this._getFileContentMap(folderTree).keys(),
+      ...this._getFileContentMap(headTree).keys(),
+    ]);
+    const setAside = async (path: string, name: string): Promise<void> => {
+      const from = join(this._rootPath, ...path.split('/'));
+      const to = join(this._rootPath, ...name.split('/'));
+      await mkdir(dirname(to), { recursive: true });
+      await rename(from, to).catch((err) => {
+        /* v8 ignore next -- @preserve a file that cannot be moved is left
+           where it is; the restore then overwrites it, which loses less than
+           refusing to join */
+        this._writeSyncError(`join/setAside/${path}`, err);
+      });
+    };
+
+    for (const path of plan.recover) {
+      await setAside(path, `${RECOVERED_DIR}/${recoveredName(path, taken)}`);
+    }
+    for (const path of plan.conflict) {
+      await setAside(
+        path,
+        conflictCopyName(path, '', Date.now(), taken, 'local'),
+      );
+    }
+
+    if (plan.recover.length > 0 || plan.conflict.length > 0) {
+      console.warn(
+        `[FsAgent] joining: moved ${plan.recover.length} file(s) the history ` +
+          `had deleted into ${RECOVERED_DIR}/ and kept ` +
+          `${plan.conflict.length} edited while away as conflict copies`,
+      );
+    }
+    console.log(
+      `[FsAgent] joining onto head=${entry.head.slice(0, 8)}…: ` +
+        `writing ${plan.write.length}, keeping ${plan.announce.length} of ` +
+        `this folder's own`,
+    );
+
+    // Additively, always. The head's paths are written and nothing is pruned:
+    // what this folder legitimately adds is exactly what `announce` names, and
+    // a prune here would delete it.
+    await this.restore(headTree, undefined, { cleanTarget: false });
+
+    // Adopted, not authored. This node is now at the fleet's state plus its
+    // own additions, and the additions are stated by the push that follows.
+    this._adoptedChainHead = entry.head;
+    this._chainHead = { head: entry.head, treeRef: entry.treeRef };
+  }
+
+  /**
    * Agrees with the fleet on ONE entry for the state this folder is in.
    *
    * **This is where the fleet's single history is actually made.** Every node
@@ -3930,7 +4322,20 @@ export class FsAgent {
       ready: () =>
         // A node mid-cold-start or mid-apply has a partial manifest, and
         // advertising one makes a peer see differences that are not there.
-        this._scanner.tree !== null && !this._remoteApplyInFlight,
+        //
+        // **A PENDING JOIN IS MID-COLD-START, and this gate is where that has
+        // to be said.** A folder with files and no history has established
+        // nothing; its manifest describes files that may be new work or a
+        // stale copy, and nothing can tell which until the chain has been
+        // consulted. Worse, the round is a THIRD way the folder changes: a
+        // peer's tombstone makes the delete-wins half drop a path, and it did
+        // — measured as the joiner's stale copy being dropped by a bucket
+        // round between the reconcile's scan and its rename, so the rename
+        // found nothing to move and the file was destroyed rather than set
+        // aside, with "set aside 1 file" still in the log.
+        this._scanner.tree !== null &&
+        !this._remoteApplyInFlight &&
+        this._joinPending === undefined,
       apply: (plan) => this._applyReconcilePlan(plan, db, treeKey),
       agreed: () => {
         // The roots matched, so this folder and the hub's hold the same
@@ -5428,6 +5833,40 @@ export class FsAgent {
       //
       // Only a marked head needs a read, and only that path becomes async.
       if (!treeRef.startsWith(CHAIN_HEAD_PREFIX)) {
+        // A PENDING JOIN TAKES THE UNMARKED PATH TOO, and that is the path it
+        // actually arrives on. **The hub's own announcements are unmarked** —
+        // it advertises from the server's TREES table, not from the ref log it
+        // relayed — so the first thing a joining node hears is a bare tree ref
+        // and never a `~H~` head. Handling only the marked path meant the
+        // reconcile never ran once: measured as the joiner's stale copy being
+        // deleted by the peer's stated removal instead of set aside.
+        //
+        // Awaiting a query here is safe for exactly this case, because a
+        // pending join deliberately schedules NOTHING. The rule it would
+        // otherwise break — never await before scheduling an apply — exists to
+        // stop a late joiner's bootstrap being lost, and this is the bootstrap
+        // being used rather than queued.
+        if (this._joinPending) {
+          const pending = this._joinPending;
+          void this._chain
+            ?.entryForTreeRef(treeRef)
+            .then((entry) => {
+              if (!entry) {
+                // No entry covers this state — an older peer, or history that
+                // has not replicated yet. Nothing to reconcile against, so the
+                // ordinary path applies it and the next head tries again.
+                schedule(treeRef);
+                return;
+              }
+              return this._reconcileJoin(pending.db, pending.treeKey, entry);
+            })
+            .catch((err) => {
+              /* v8 ignore next -- @preserve a failed lookup leaves the join
+                 pending; the next announcement retries it */
+              this._writeSyncError('join/lookup', err);
+            });
+          return Promise.resolve();
+        }
         schedule(treeRef);
         // AND look its chain entry up anyway, in parallel.
         //
@@ -5456,6 +5895,29 @@ export class FsAgent {
         // removals are the authorisation the ancestry rule cannot give, so
         // they have to survive the gap between hearing and acting.
         if (resolved.entry) {
+          // THE FIRST HEAD A JOINING NODE SEES IS NOT AN ORDINARY APPLY.
+          //
+          // A folder with files and no history has established nothing, so it
+          // deferred its first word (`syncToDb`). This is the head it was
+          // waiting for, and the reconcile is what the chain applying FIRST
+          // actually means: the fleet's state is written, this folder's extras
+          // are judged against the history, and only then does the node speak.
+          //
+          // An ordinary apply here would do the opposite — restore the head
+          // over the folder and let the next push announce whatever survived,
+          // which cannot tell new work from a stale copy.
+          const pending = this._joinPending;
+          if (pending) {
+            const joining = resolved.entry;
+            void this._reconcileJoin(pending.db, pending.treeKey, joining).catch(
+              (err) => {
+                /* v8 ignore next -- @preserve a failed reconcile leaves the
+                   node silent rather than guessing; the next head retries */
+                this._writeSyncError('join/reconcile', err);
+              },
+            );
+            return;
+          }
           // PARKED, not claimed. The peer's head becomes a parent of whatever
           // this node records next — but only once the apply for this state has
           // actually run, so the two lineages join on work this node did hold.

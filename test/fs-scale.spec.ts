@@ -35,6 +35,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 const FILES = Number(process.env['FS_SCALE_FILES'] ?? 4_000);
 const SOAK_MS = Number(process.env['FS_SOAK_MS'] ?? 20_000);
@@ -108,6 +109,7 @@ describe('scale and endurance', () => {
     // with — and without it the reuse is unavailable, which is worth knowing
     // as its own fact (see the GUARD below).
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       scanCachePath: cachePath('cache'),
     });
     agents.push(agent);
@@ -156,6 +158,7 @@ describe('scale and endurance', () => {
       return realSetBlob(content);
     };
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       scanCachePath: cachePath('guard'),
     });
     agents.push(agent);
@@ -187,6 +190,7 @@ describe('scale and endurance', () => {
       { causalOrdering: true, includeClientIdentity: true },
     );
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20 },
     });
     agents.push(agent);

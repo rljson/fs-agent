@@ -15,6 +15,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 
 import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
 
@@ -170,6 +171,7 @@ describe.each([
       await new Db(localIo).core.createTableWithInsertHistory(treeCfg);
 
       const agent = new FsAgent(folder, sharedBs, {
+      ...ORIGIN_FIXTURE,
         timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
         antiEntropy,
       });

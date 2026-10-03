@@ -19,6 +19,7 @@ import {
   FsAgent,
   TOMBSTONE_LOG_MAX,
 } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 // .............................................................................
 // The tombstone log: what this node deleted, remembered past the push.
@@ -87,6 +88,7 @@ describe('FsAgent — the tombstone log', () => {
   /** A started agent over `dir`, syncing to `db`. */
   const start = async (db: Db): Promise<FsAgent> => {
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20 },
     });
     agents.push(agent);
@@ -158,7 +160,7 @@ describe('FsAgent — the tombstone log', () => {
     // A brand-new agent over the same folder: the restart. A process that came
     // back having forgotten its deletions is how the first peer that never
     // heard about one undoes it.
-    const restarted = new FsAgent(dir, new BsMem());
+    const restarted = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
     agents.push(restarted);
     expect(restarted['_pendingDeletes'].has(join(dir, 'gone.txt'))).toBe(true);
   }, 30_000);
@@ -198,7 +200,7 @@ describe('FsAgent — the tombstone log', () => {
 
     expect(state().tombstones).toEqual(['nested/deep.txt']);
 
-    const restarted = new FsAgent(dir, new BsMem());
+    const restarted = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
     agents.push(restarted);
     expect(
       restarted['_pendingDeletes'].has(join(dir, 'nested', 'deep.txt')),
@@ -219,7 +221,7 @@ describe('FsAgent — the tombstone log', () => {
   ] as const) {
     it(`treats ${label} as "nothing tombstoned"`, async () => {
       await writeFile(join(dir, AGENT_STATE_FILE), contents);
-      const agent = new FsAgent(dir, new BsMem());
+      const agent = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
       agents.push(agent);
       expect(agent['_pendingDeletes'].size).toBe(0);
     });
@@ -257,7 +259,7 @@ describe('FsAgent — the tombstone log', () => {
       // keeping it, so the eviction is oldest-first and it says so. A sighting
       // in the field means the log needs a real garbage-collection rule — one
       // that knows when every peer has seen a deletion — not a bigger number.
-      const agent = new FsAgent(dir, new BsMem());
+      const agent = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
       agents.push(agent);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -294,7 +296,7 @@ describe('FsAgent — the tombstone log', () => {
         JSON.stringify({ currentRef: 'abc', tombstones }),
       );
 
-      const agent = new FsAgent(dir, new BsMem());
+      const agent = new FsAgent(dir, new BsMem(), ORIGIN_FIXTURE);
       agents.push(agent);
       const log = agent['_pendingDeletes'] as Set<string>;
 

@@ -15,6 +15,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { CHAIN_HEAD_PREFIX, FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
 
@@ -67,6 +68,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     // blobs are reachable, which on a real network they are.
     const bs = new BsMem();
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     return { db, connector, agent, sent, socket, bs };
@@ -87,7 +89,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     // that takes the equivalent-content path.
     await writeFile(join(peerDir, 'shared.txt'), 'shared');
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 1_500));
@@ -122,7 +124,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     await writeFile(join(peerDir, 'shared.txt'), 'shared');
     await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 2_000));
@@ -160,7 +162,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
       await writeFile(join(peerDir, `theirs-${i}.txt`), `t${i}`);
     }
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     // Make the restore fall short, exactly as a timeout or a slow link does:
@@ -275,10 +277,11 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     await writeFile(join(peerDir, 'only-theirs.txt'), 'theirs');
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
 
-    const incoming = await new FsAgent(peerDir, bs).extract();
+    const incoming = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
     await agent.restore(incoming, undefined, { cleanTarget: true });
 
     // Both go. Neither is in the tree, and the caller asked for the tree.
@@ -297,10 +300,11 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     await writeFile(join(peerDir, 'only-theirs.txt'), 'theirs');
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
 
-    const incoming = await new FsAgent(peerDir, bs).extract();
+    const incoming = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
     await agent.restore(incoming, undefined, { cleanTarget: true });
 
     expect(existsSync(join(dir, 'gone.txt'))).toBe(false);

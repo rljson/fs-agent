@@ -16,6 +16,7 @@ import { Server as SocketIoServer } from 'socket.io';
 import { io as SocketIoClient } from 'socket.io-client';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 import { defineProductionSyncTests } from './shared-sync-tests.ts';
 
 // =============================================================================
@@ -84,7 +85,7 @@ defineProductionSyncTests(
       route,
       new SocketIoBridge(clientSocketA),
     );
-    const agentA = new FsAgent(folderA, clientA.bs);
+    const agentA = new FsAgent(folderA, clientA.bs, ORIGIN_FIXTURE);
 
     // --- Client B (Socket.IO) ---
     const clientSocketB = SocketIoClient(`http://localhost:${port}`, {
@@ -111,7 +112,7 @@ defineProductionSyncTests(
       route,
       new SocketIoBridge(clientSocketB),
     );
-    const agentB = new FsAgent(folderB, clientB.bs);
+    const agentB = new FsAgent(folderB, clientB.bs, ORIGIN_FIXTURE);
 
     // Wrap server tearDown to also shut down Socket.IO + HTTP
     const originalTearDown = server.tearDown.bind(server);

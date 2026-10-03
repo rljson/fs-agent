@@ -38,6 +38,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
 
@@ -74,6 +75,7 @@ describe('a node claims only what it changed', () => {
     const connector = new Connector(db, Route.fromFlat(`/${TREE}+`), socket);
     const bs = new BsMem();
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     return { db, connector, agent, socket, bs };
@@ -119,7 +121,7 @@ describe('a node claims only what it changed', () => {
     await writeFile(join(peerDir, 'mine.txt'), 'mine');
     await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
     const peerRef = await new FsDbAdapter(db, TREE).storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 1_200));
@@ -152,7 +154,7 @@ describe('a node claims only what it changed', () => {
 
     await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
     const peerRef = await new FsDbAdapter(db, TREE).storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 900));
@@ -186,7 +188,7 @@ describe('a node claims only what it changed', () => {
 
     // The peer holds only `keep.txt` and STATES that it removed the other.
     await writeFile(join(peerDir, 'keep.txt'), 'keep');
-    const peerTree = await new FsAgent(peerDir, bs).extract();
+    const peerTree = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
     const peerRef = await new FsDbAdapter(db, TREE).storeFsTree(peerTree);
     const peerChain = new FsEditChain(db, TREE);
     await peerChain.init();

@@ -15,6 +15,7 @@ import { createTreesTableCfg, Route } from '@rljson/rljson';
 import { Client, Server } from '@rljson/server';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 import { removeTree } from '../setup/remove-tree';
 
 // =============================================================================
@@ -78,7 +79,7 @@ async function createMultiClientSetup(
     await client.init();
     const db = new Db(client.io!);
     const connector = new Connector(db, route, clientSocket);
-    const agent = new FsAgent(folder, client.bs);
+    const agent = new FsAgent(folder, client.bs, ORIGIN_FIXTURE);
 
     clients.push({ client, db, connector, agent, folder });
   }
@@ -413,7 +414,7 @@ describe('Advanced Sync Tests', () => {
         await clientC.init();
         const dbC = new Db(clientC.io!);
         const connectorC = new Connector(dbC, setup.route, clientSocketC);
-        const agentC = new FsAgent(folderC, clientC.bs);
+        const agentC = new FsAgent(folderC, clientC.bs, ORIGIN_FIXTURE);
 
         // Start only syncFromDb — do NOT start syncToDb,
         // because C's folder is empty and scanning it would push an
@@ -498,7 +499,7 @@ describe('Advanced Sync Tests', () => {
         const clientA = new Client(cliSockA1, ioA, bsA);
         await clientA.init();
         const dbA = new Db(clientA.io!);
-        const agentA = new FsAgent(folderA, clientA.bs);
+        const agentA = new FsAgent(folderA, clientA.bs, ORIGIN_FIXTURE);
 
         // Sync a file via A on server1
         const ref = await agentA.storeInDb(dbA, treeKey);
@@ -528,7 +529,7 @@ describe('Advanced Sync Tests', () => {
         const clientA2 = new Client(cliSockA2, ioA2, bsA2);
         await clientA2.init();
         const dbA2 = new Db(clientA2.io!);
-        const agentA2 = new FsAgent(folderA, clientA2.bs);
+        const agentA2 = new FsAgent(folderA, clientA2.bs, ORIGIN_FIXTURE);
 
         const [srvSockB, cliSockB] = createSocketPair();
         srvSockB.connect();
@@ -541,7 +542,7 @@ describe('Advanced Sync Tests', () => {
         const clientB = new Client(cliSockB, ioB, bsB);
         await clientB.init();
         const dbB = new Db(clientB.io!);
-        const agentB = new FsAgent(folderB, clientB.bs);
+        const agentB = new FsAgent(folderB, clientB.bs, ORIGIN_FIXTURE);
 
         // A stores again on server2, B loads
         const ref2 = await agentA2.storeInDb(dbA2, treeKey);
@@ -735,7 +736,7 @@ describe('Advanced Sync Tests', () => {
         const clientA = new Client(cliSockA, ioA, bsA);
         await clientA.init();
         const dbA = new Db(clientA.io!);
-        const agentA = new FsAgent(folderA, clientA.bs);
+        const agentA = new FsAgent(folderA, clientA.bs, ORIGIN_FIXTURE);
 
         // Client B
         const [srvSockB, cliSockB] = createSocketPair();
@@ -749,7 +750,7 @@ describe('Advanced Sync Tests', () => {
         const clientB = new Client(cliSockB, ioB, bsB);
         await clientB.init();
         const dbB = new Db(clientB.io!);
-        const agentB = new FsAgent(folderB, clientB.bs);
+        const agentB = new FsAgent(folderB, clientB.bs, ORIGIN_FIXTURE);
 
         // Store from A, B loads — baseline sync works
         const ref1 = await agentA.storeInDb(dbA, treeKey);
@@ -771,7 +772,7 @@ describe('Advanced Sync Tests', () => {
         const clientA2 = new Client(cliSockA2, ioA, bsA);
         await clientA2.init();
         const dbA2 = new Db(clientA2.io!);
-        const agentA2 = new FsAgent(folderA, clientA2.bs);
+        const agentA2 = new FsAgent(folderA, clientA2.bs, ORIGIN_FIXTURE);
 
         // A re-stores, B loads again
         const ref2 = await agentA2.storeInDb(dbA2, treeKey);

@@ -21,6 +21,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter';
 import { announceAsPeer } from './chain-announce.ts';
 import { removeTree } from './setup/remove-tree';
@@ -64,7 +65,7 @@ describe('FsAgent', () => {
 
   describe('constructor', () => {
     it('should create instance with default BsMem', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       expect(agent).toBeDefined();
       expect(agent.rootPath).toBe(testDir);
       expect(agent.bs).toBeDefined();
@@ -72,12 +73,13 @@ describe('FsAgent', () => {
 
     it('should create instance with custom Bs', () => {
       const customBs = new BsMem();
-      const agent = new FsAgent(testDir, customBs);
+      const agent = new FsAgent(testDir, customBs, ORIGIN_FIXTURE);
       expect(agent.bs).toBe(customBs);
     });
 
     it('should create instance with options', () => {
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         ignore: ['node_modules'],
         maxDepth: 5,
       });
@@ -97,6 +99,7 @@ describe('FsAgent', () => {
       // Constructor with db and treeKey triggers deprecated auto-sync pattern
       // This will fail internally but is silently ignored
       new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         db,
         treeKey: 'testTree',
       });
@@ -120,6 +123,7 @@ describe('FsAgent', () => {
       // Constructor with db, treeKey, and bidirectional triggers deprecated pattern
       // This will fail internally but is silently ignored
       new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         db,
         treeKey: 'testTree',
         bidirectional: true,
@@ -134,7 +138,7 @@ describe('FsAgent', () => {
 
   describe('extract', () => {
     it('should extract empty directory', async () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       expect(tree).toBeDefined();
@@ -147,7 +151,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'file1.txt'), 'content1');
       await writeFile(join(testDir, 'file2.txt'), 'content2');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       expect(tree).toBeDefined();
@@ -161,7 +165,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'root.txt'), 'root content');
       await writeFile(join(testDir, 'subdir', 'nested.txt'), 'nested content');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       expect(tree).toBeDefined();
@@ -174,6 +178,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'keep.txt'), 'keep');
 
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         ignore: ['node_modules'],
       });
       const tree = await agent.extract();
@@ -186,7 +191,7 @@ describe('FsAgent', () => {
       const content = 'test file content';
       await writeFile(join(testDir, 'test.txt'), content);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       // Verify we can access the tree and file is referenced
@@ -224,7 +229,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'file1.txt'), 'content1');
       await writeFile(join(testDir, 'file2.txt'), 'content2');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       // Clear directory
@@ -244,7 +249,7 @@ describe('FsAgent', () => {
     it('should restore to different target path', async () => {
       await writeFile(join(testDir, 'source.txt'), 'source content');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       const targetDir = join(testDir, 'target');
@@ -259,7 +264,7 @@ describe('FsAgent', () => {
     it('should restore to same location without target path', async () => {
       await writeFile(join(testDir, 'test.txt'), 'test content');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       // Clear and restore to same location (no targetPath parameter)
@@ -276,7 +281,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'dir1', 'file1.txt'), 'content1');
       await writeFile(join(testDir, 'dir1', 'dir2', 'file2.txt'), 'content2');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       // Clear and restore
@@ -300,7 +305,7 @@ describe('FsAgent', () => {
     it('preserves content and size, but not the author\'s timestamp', async () => {
       await writeFile(join(testDir, 'test.txt'), 'test content');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       // Get original mtime
       const originalStats = await stat(join(testDir, 'test.txt'));
@@ -346,7 +351,7 @@ describe('FsAgent', () => {
     });
 
     it('should ignore unknown node types when cleaning target', async () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const strayPath = join(testDir, 'stray.txt');
       await writeFile(strayPath, 'stray');
 
@@ -401,7 +406,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'wanted.txt'), 'keep me');
       await writeFile(join(expectedDir, 'nested_wanted.txt'), 'keep me too');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       // Now add unwanted directory with nested files (should be removed entirely)
@@ -476,7 +481,7 @@ describe('FsAgent', () => {
         await writeFile(join(testDir, name), content);
       }
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       // Clear directory
@@ -497,7 +502,7 @@ describe('FsAgent', () => {
       const binaryData = Buffer.from([0, 1, 2, 3, 4, 255, 254, 253]);
       await writeFile(join(testDir, 'binary.dat'), binaryData);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       await removeTree(testDir);
@@ -512,14 +517,14 @@ describe('FsAgent', () => {
 
   describe('getTree', () => {
     it('should return null before scanning', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       expect(agent.getTree()).toBeNull();
     });
 
     it('should return tree after extract', async () => {
       await writeFile(join(testDir, 'test.txt'), 'content');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       await agent.extract();
 
       const tree = agent.getTree();
@@ -530,13 +535,13 @@ describe('FsAgent', () => {
 
   describe('accessors', () => {
     it('should provide access to scanner', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       expect(agent.scanner).toBeDefined();
       expect(agent.scanner.rootPath).toBe(testDir);
     });
 
     it('should provide access to adapter', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       expect(agent.adapter).toBeDefined();
     });
   });
@@ -563,7 +568,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Verify tree was stored
@@ -597,7 +602,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Create a new empty target directory
@@ -605,7 +610,7 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
 
       // Load from database to new location
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // Verify file was restored
@@ -635,7 +640,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database - this stores TREE STRUCTURE in DB and BLOB CONTENT in Bs
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const rootRef = await agent.storeInDb(db, treeKey);
 
       // Create completely empty target directory
@@ -646,7 +651,7 @@ describe('FsAgent', () => {
       // This proves that loadFromDb reconstructs everything from:
       // 1. Tree structure from DB (using rootRef)
       // 2. File content from Bs (using blobIds in tree metadata)
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, rootRef);
 
       // VERIFY: Complete directory structure was created
@@ -697,7 +702,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store empty tree
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Create target directory
@@ -705,7 +710,7 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
 
       // Load from database
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // Verify directory exists
@@ -729,7 +734,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Create target directory
@@ -737,7 +742,7 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
 
       // Load from database
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // Verify all files restored
@@ -766,7 +771,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Create target directory
@@ -774,7 +779,7 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
 
       // Load from database
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // Verify binary content
@@ -791,7 +796,7 @@ describe('FsAgent', () => {
       const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       // Store version 1
       await writeFile(join(testDir, 'file.txt'), 'version 1');
@@ -804,13 +809,13 @@ describe('FsAgent', () => {
       // Restore version 1
       const targetDir1 = join(testDir, 'restored-v1');
       await mkdir(targetDir1, { recursive: true });
-      const agent1 = new FsAgent(targetDir1, agent.bs);
+      const agent1 = new FsAgent(targetDir1, agent.bs, ORIGIN_FIXTURE);
       await agent1.loadFromDb(db, treeKey, ref1);
 
       // Restore version 2
       const targetDir2 = join(testDir, 'restored-v2');
       await mkdir(targetDir2, { recursive: true });
-      const agent2 = new FsAgent(targetDir2, agent.bs);
+      const agent2 = new FsAgent(targetDir2, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, ref2);
 
       // Verify both versions restored correctly
@@ -831,7 +836,7 @@ describe('FsAgent', () => {
       const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       // Try to load non-existent reference
       await expect(
@@ -856,7 +861,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Create target directory
@@ -864,7 +869,7 @@ describe('FsAgent', () => {
       await mkdir(targetDir, { recursive: true });
 
       // Load from database
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // The bytes arrive; the author's timestamp does not. See the §1 note on
@@ -896,7 +901,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Start syncing
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const connector = createMockConnector(db, treeKey);
       const stopSync = await agent.syncToDb(db, connector, treeKey);
 
@@ -948,7 +953,7 @@ describe('FsAgent', () => {
       // Spy on sendWithAck
       const sendWithAckSpy = vi.spyOn(connector, 'sendWithAck');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const stopSync = await agent.syncToDb(db, connector, treeKey);
 
       // Wait for initial sync cycle
@@ -974,7 +979,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Start syncing
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const connector = createMockConnector(db, treeKey);
       const stopSync = await agent.syncToDb(db, connector, treeKey);
 
@@ -1014,7 +1019,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Start syncing
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const connector = createMockConnector(db, treeKey);
       const stopSync = await agent.syncToDb(db, connector, treeKey);
 
@@ -1051,7 +1056,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store initial state WITHOUT notification
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       await agent.storeInDb(db, treeKey);
 
       // Get initial version count
@@ -1206,7 +1211,7 @@ describe('FsAgent', () => {
 
     it('should handle dispose being called when no sync is active', () => {
       // Create agent without db/treeKey
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       // Should not throw when dispose is called with no active sync
       expect(() => agent.dispose()).not.toThrow();
@@ -1225,7 +1230,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'initial.txt'), 'initial content');
 
       // Setup agent
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       // Store initial state
       await agent.storeInDb(db, treeKey);
@@ -1243,7 +1248,7 @@ describe('FsAgent', () => {
       await writeFile(join(sourceDir, 'from-db.txt'), 'db content');
 
       // Extract and store new tree from source
-      const sourceAgent = new FsAgent(sourceDir, agent.bs);
+      const sourceAgent = new FsAgent(sourceDir, agent.bs, ORIGIN_FIXTURE);
       const newTree = await sourceAgent.extract();
       const dbAdapter = new FsDbAdapter(db, treeKey);
       const treeRef = await dbAdapter.storeFsTree(newTree);
@@ -1284,6 +1289,7 @@ describe('FsAgent', () => {
 
       // Create agent with bidirectional sync
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         db,
         treeKey,
         bidirectional: true,
@@ -1322,7 +1328,7 @@ describe('FsAgent', () => {
       // Setup initial file
       await writeFile(join(testDir, 'watch-test.txt'), 'initial');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       await agent.scanner.watch();
 
       // Register callback
@@ -1383,7 +1389,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       expect(treeRootRef).toBeDefined();
@@ -1391,7 +1397,7 @@ describe('FsAgent', () => {
       // Verify can restore
       const targetDir = join(testDir, 'restored-large');
       await mkdir(targetDir, { recursive: true });
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       const restoredContent = await readFile(join(targetDir, 'large.bin'));
@@ -1414,13 +1420,13 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Restore and verify
       const targetDir = join(testDir, 'restored-special');
       await mkdir(targetDir, { recursive: true });
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // Verify all files restored
@@ -1451,13 +1457,13 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Restore and verify
       const targetDir = join(testDir, 'restored-empty-file');
       await mkdir(targetDir, { recursive: true });
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // Verify empty file exists
@@ -1483,13 +1489,13 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Restore and verify
       const targetDir = join(testDir, 'restored-deep');
       await mkdir(targetDir, { recursive: true });
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       // Verify deeply nested file
@@ -1517,13 +1523,13 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Restore and verify all files
       const targetDir = join(testDir, 'restored-dedup');
       await mkdir(targetDir, { recursive: true });
-      const agent2 = new FsAgent(targetDir, agent.bs);
+      const agent2 = new FsAgent(targetDir, agent.bs, ORIGIN_FIXTURE);
       await agent2.loadFromDb(db, treeKey, treeRootRef);
 
       expect(await readFile(join(targetDir, 'file1.txt'), 'utf-8')).toBe(
@@ -1547,7 +1553,7 @@ describe('FsAgent', () => {
       const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       await expect(
         agent.loadFromDb(db, treeKey, 'nonExistentRef'),
@@ -1579,7 +1585,7 @@ describe('FsAgent', () => {
       const db = new Db(io);
       const treeKey = 'fsTree';
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       await expect(agent.loadFromDb(db, treeKey, '')).rejects.toThrow(
         /rootRef cannot be empty/,
@@ -1598,13 +1604,13 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       // Store in database
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const treeRootRef = await agent.storeInDb(db, treeKey);
 
       // Create new agent with DIFFERENT blob storage (missing the blob)
       const targetDir = join(testDir, 'restored-missing-blob');
       await mkdir(targetDir, { recursive: true });
-      const agent2 = new FsAgent(targetDir, new BsMem());
+      const agent2 = new FsAgent(targetDir, new BsMem(), ORIGIN_FIXTURE);
 
       // Still reported — a folder that does not match the tree must never look
       // like a success — but now as BlobUnavailableError, raised after the
@@ -1633,7 +1639,7 @@ describe('FsAgent', () => {
       await writeFile(join(sourceDir, 'unfetchable.txt'), 'cannot travel');
 
       const sharedBs = new BsMem();
-      const source = new FsAgent(sourceDir, sharedBs);
+      const source = new FsAgent(sourceDir, sharedBs, ORIGIN_FIXTURE);
       const rootRef = await source.storeInDb(db, treeKey);
 
       // Target already holds a file the tree does NOT contain. It must be
@@ -1659,7 +1665,7 @@ describe('FsAgent', () => {
         return sharedBs.getBlobStream(id);
       };
 
-      const target = new FsAgent(targetDir, holed);
+      const target = new FsAgent(targetDir, holed, ORIGIN_FIXTURE);
       await expect(
         target.loadFromDb(db, treeKey, rootRef, undefined, {
           cleanTarget: true,
@@ -1674,7 +1680,7 @@ describe('FsAgent', () => {
 
     it('should throw error when scanning non-existent directory', async () => {
       const nonExistentDir = join(testDir, 'does-not-exist');
-      const agent = new FsAgent(nonExistentDir);
+      const agent = new FsAgent(nonExistentDir, undefined, ORIGIN_FIXTURE);
 
       await expect(agent.extract()).rejects.toThrow(/does not exist/);
     });
@@ -1763,7 +1769,7 @@ describe('FsAgent', () => {
       const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       await agent.scanner.watch();
 
       // Register syncFromDb
@@ -1791,7 +1797,7 @@ describe('FsAgent', () => {
       const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       await agent.scanner.watch();
 
       // Register syncFromDb
@@ -1814,7 +1820,7 @@ describe('FsAgent', () => {
       const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       await agent.scanner.watch();
 
       // Register syncFromDb
@@ -1847,6 +1853,7 @@ describe('FsAgent', () => {
       // 1 inner retry (exercises the retry-warn path) and 1 recovery re-queue,
       // after which the ref is given up and a sync error recorded.
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: {
           debounceMs: 1,
           processRefRetries: 1,
@@ -1890,6 +1897,7 @@ describe('FsAgent', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: {
           debounceMs: 1,
           processRefRetries: 0,
@@ -1943,6 +1951,7 @@ describe('FsAgent', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: { debounceMs: 1 },
       });
       await agent.scanner.watch();
@@ -1988,7 +1997,7 @@ describe('FsAgent', () => {
 
       await writeFile(join(testDir, 'seed.txt'), 'seed');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const dbAdapter = new FsDbAdapter(db, treeKey);
 
       // refSeed describes the folder exactly as it stands → adopted without
@@ -2000,7 +2009,7 @@ describe('FsAgent', () => {
       await mkdir(sourceDir, { recursive: true });
       await writeFile(join(sourceDir, 'seed.txt'), 'seed');
       await writeFile(join(sourceDir, 'temp.txt'), 'temporary');
-      const sourceAgent = new FsAgent(sourceDir, agent.bs);
+      const sourceAgent = new FsAgent(sourceDir, agent.bs, ORIGIN_FIXTURE);
       const refBoth = await dbAdapter.storeFsTree(await sourceAgent.extract());
 
       const connector = createMockConnector(db, treeKey);
@@ -2054,6 +2063,7 @@ describe('FsAgent', () => {
 
       // recoveryRetries: 0 restores the old drop-on-exhaustion behaviour.
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: {
           debounceMs: 1,
           processRefRetries: 0,
@@ -2086,7 +2096,7 @@ describe('FsAgent', () => {
       const filePath = join(testDir, 'not-a-dir');
       await writeFile(filePath, 'content');
 
-      const agent = new FsAgent(filePath);
+      const agent = new FsAgent(filePath, undefined, ORIGIN_FIXTURE);
       await expect(agent.extract()).rejects.toThrow(
         /exists but is not a directory/,
       );
@@ -2102,7 +2112,7 @@ describe('FsAgent', () => {
 
       // Create a file to get a valid tree
       await writeFile(join(testDir, 'test.txt'), 'content');
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       await agent.storeInDb(db, treeKey);
 
       // Now try to load with a different (non-existent) rootRef
@@ -2119,7 +2129,7 @@ describe('FsAgent', () => {
 
       // Create a file and verify normal operation works
       await writeFile(join(testDir, 'readable.txt'), 'content');
-      const testAgent = new FsAgent(testDir);
+      const testAgent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await testAgent.extract();
       expect(tree).toBeDefined();
     });
@@ -2371,7 +2381,7 @@ describe('FsAgent', () => {
   // =========================================================================
   describe('timeout detection', () => {
     it('should use default timeout values', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       expect(agent.timeouts.dbQuery).toBe(10_000);
       expect(agent.timeouts.fetchTree).toBe(20_000);
       expect(agent.timeouts.extract).toBe(15_000);
@@ -2382,6 +2392,7 @@ describe('FsAgent', () => {
 
     it('should accept custom timeout values', () => {
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: {
           dbQuery: 1_000,
           fetchTree: 2_000,
@@ -2401,6 +2412,7 @@ describe('FsAgent', () => {
 
     it('should allow partial timeout overrides', () => {
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: { dbQuery: 500 },
       });
       expect(agent.timeouts.dbQuery).toBe(500);
@@ -2424,6 +2436,7 @@ describe('FsAgent', () => {
 
       // Create agent with very short timeouts
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: { dbQuery: 50, fetchTree: 100 },
       });
 
@@ -2447,6 +2460,7 @@ describe('FsAgent', () => {
       await db.core.createTableWithInsertHistory(treeTableCfg);
 
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: { fetchTree: 50 },
       });
 
@@ -2477,6 +2491,7 @@ describe('FsAgent', () => {
 
       // Agent with very short fetch timeout
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: { fetchTree: 50, dbQuery: 25 },
       });
 
@@ -2517,6 +2532,7 @@ describe('FsAgent', () => {
 
       // Start syncToDb with real DB (initial store succeeds)
       const agent = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
         timeouts: { fetchTree: 50 },
       });
       const connector = createMockConnector(db, treeKey);
@@ -2542,7 +2558,7 @@ describe('FsAgent', () => {
 
   describe('_writeSyncError', () => {
     it('should write error to .sync-errors.log file', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const error = new Error('blob not found: abc123');
 
       agent._writeSyncError('syncFromDb/processRef', error);
@@ -2556,7 +2572,7 @@ describe('FsAgent', () => {
     });
 
     it('should append multiple errors', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       agent._writeSyncError('syncToDb', new Error('first'));
       agent._writeSyncError('syncFromDb', new Error('second'));
@@ -2567,7 +2583,7 @@ describe('FsAgent', () => {
     });
 
     it('should handle non-Error values', () => {
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
 
       agent._writeSyncError('test', 'plain string error');
 
@@ -2586,7 +2602,7 @@ describe('FsAgent', () => {
       await writeFile(join(testDir, 'real-file.txt'), 'content');
       writeFileSync(join(testDir, SYNC_ERROR_FILE), 'some error\n');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       const tree = await agent.extract();
 
       // Collect all meta.name values from tree nodes
@@ -2653,7 +2669,7 @@ describe('FsAgent', () => {
       await mkdir(join(testDir, 'dirWithFresh'));
       await writeFile(join(testDir, 'dirWithFresh', 'fresh.txt'), 'f');
 
-      const agent = new FsAgent(testDir);
+      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
       // Baseline captured before the (simulated) restore: only old.txt existed.
       const preRestore = new Set([join(testDir, 'old.txt')]);
       await (
