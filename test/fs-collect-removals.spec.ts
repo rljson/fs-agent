@@ -366,6 +366,136 @@ describe('FsEditChain.collectRemovals', () => {
   });
 
   // ...........................................................................
+  // WHO LAST CHANGED THIS PATH — the per-path question.
+  // ...........................................................................
+  describe('lastEditOf', () => {
+    it('finds the newest edit naming the path, not the newest edit', async () => {
+      // The measured rollback in one assertion. `doc.txt` was last changed by
+      // the middle entry; the tip changed something else entirely and must not
+      // count for it.
+      await chain.append({ treeRef: 'T0', changed: ['doc.txt'] });
+      const real = await chain.append({ treeRef: 'T1', changed: ['doc.txt'] });
+      await chain.append({ treeRef: 'T2', changed: ['unrelated.txt'] });
+
+      const found = await chain.lastEditOf(chain.head as string, 'doc.txt');
+      expect(found?.head).toBe(real.head);
+      expect(found?.timeId).toBe(real.timeId);
+    });
+
+    it('counts a REMOVAL as touching the path', async () => {
+      // An edit/delete conflict is still two people acting on one file, and
+      // the one who acted later decides it.
+      await chain.append({ treeRef: 'T0', changed: ['doc.txt'] });
+      const gone = await chain.append({ treeRef: 'T1', removed: ['doc.txt'] });
+
+      const found = await chain.lastEditOf(chain.head as string, 'doc.txt');
+      expect(found?.head).toBe(gone.head);
+    });
+
+    it('says nothing when the lineage never named the path', async () => {
+      await chain.append({ treeRef: 'T0', changed: ['other.txt'] });
+      expect(
+        await chain.lastEditOf(chain.head as string, 'doc.txt'),
+      ).toBeUndefined();
+    });
+
+    it('says nothing when the walk cannot be read to the end', async () => {
+      // A hole makes the answer unknowable rather than empty: the edit being
+      // looked for may be inside the part that cannot be read. The caller must
+      // fall back rather than conclude nobody edited it.
+      const holed = await chain.append({
+        treeRef: 'T1',
+        changed: ['other.txt'],
+        previous: ['a-ref-nobody-ever-wrote'],
+      });
+      expect(await chain.lastEditOf(holed.head, 'doc.txt')).toBeUndefined();
+    });
+
+    it('follows BOTH parents of a merge', async () => {
+      // A merge hides one branch's edits from this question unless both sides
+      // are walked, and then whoever edited the path last on either side wins
+      // a conflict they should not.
+      const base = await chain.append({ treeRef: 'B' });
+      const left = await chain.append({
+        treeRef: 'L',
+        changed: ['doc.txt'],
+        previous: [base.head],
+      });
+      const right = await chain.append({
+        treeRef: 'R',
+        changed: ['other.txt'],
+        previous: [base.head],
+      });
+      const merge = await chain.append({
+        treeRef: 'M',
+        previous: [left.head, right.head],
+      });
+
+      const found = await chain.lastEditOf(merge.head, 'doc.txt');
+      expect(found?.head).toBe(left.head);
+    });
+
+    it('breaks a same-distance tie on timeId', async () => {
+      // Two parents of a merge BOTH named the path. They are the same distance
+      // from the head, so neither descends from the other and they really are
+      // concurrent — which is the one case where a clock is the right answer,
+      // `timeId` being a total order every node computes identically.
+      //
+      // COMPUTED, not assumed from append order: two ids minted in one
+      // millisecond are separated by a random tail.
+      const base = await chain.append({ treeRef: 'B' });
+      const left = await chain.append({
+        treeRef: 'L',
+        changed: ['doc.txt'],
+        previous: [base.head],
+      });
+      const right = await chain.append({
+        treeRef: 'R',
+        changed: ['doc.txt'],
+        previous: [base.head],
+      });
+      const merge = await chain.append({
+        treeRef: 'M',
+        previous: [left.head, right.head],
+      });
+
+      const greater =
+        compareTimeId(left.timeId, right.timeId) > 0 ? left : right;
+      const found = await chain.lastEditOf(merge.head, 'doc.txt');
+      expect(found?.head).toBe(greater.head);
+    });
+
+    it('ends a walk whose whole frontier has already been seen', async () => {
+      // A DAG: `base` is reachable from `outer` directly AND through `left`, so
+      // a pass ends with a frontier whose every member has been walked. Without
+      // that check the loop cannot shrink the frontier and never terminates.
+      const base = await chain.append({ treeRef: 'B' });
+      const left = await chain.append({
+        treeRef: 'L',
+        changed: ['other.txt'],
+        previous: [base.head],
+      });
+      const outer = await chain.append({
+        treeRef: 'O',
+        changed: ['third.txt'],
+        previous: [left.head, base.head],
+      });
+
+      expect(await chain.lastEditOf(outer.head, 'absent.txt')).toBeUndefined();
+    });
+
+    it('stops at the walk bound rather than running a whole history', async () => {
+      // The same bound every other walk here has, for the same reason: a deep
+      // history is a cold replay, and left unbounded it pins a core.
+      let last = await chain.append({ treeRef: 'T0', changed: ['doc.txt'] });
+      for (let i = 1; i <= 6; i++) {
+        last = await chain.append({ treeRef: `T${i}`, changed: ['other.txt'] });
+      }
+      expect(await chain.lastEditOf(last.head, 'doc.txt', 3)).toBeUndefined();
+    });
+  });
+
+  // ...........................................................................
   describe('entryForTreeRef — the migration bridge', () => {
     it('finds the entry that produced a tree ref', async () => {
       // A build predating the `~H~` announcement sends a plain tree ref, and

@@ -532,6 +532,85 @@ export class FsEditChain {
   }
 
   /**
+   * The newest edit on this lineage that CHANGED or REMOVED a given path.
+   *
+   * **The per-path question, and the one the conflict resolver could not ask.**
+   * `compareTips` orders a BRANCH by its tip, and the caller then uses that one
+   * verdict for every path the two branches disagree about — so a tip wins
+   * paths it never touched. Measured: a node that had been offline came back,
+   * wrote one file of its own, and that newer tip took `doc.txt` as well,
+   * rolling the writer's own folder from v8 back to v5.
+   *
+   * Asking per path answers it exactly: the last edit naming `doc.txt` is the
+   * writer's, and the returning node's entry does not name it at all, so it
+   * does not count for it. No clock is involved — the answer is read out of the
+   * shared history, so every node computes the same winner on its own.
+   *
+   * **A removal counts as touching the path.** An edit/delete conflict is still
+   * two people acting on one file, and the one who acted later decides it.
+   *
+   * `undefined` means "cannot say": either nothing on this lineage ever named
+   * the path, or the walk could not be read to the end. The caller must not
+   * read that as "nobody edited it" — it falls back to the branch-level order.
+   * @param head - The lineage's tip.
+   * @param path - The relative path being decided.
+   * @param maxWalk - Give up past this many entries.
+   * @returns The newest entry naming `path`, or `undefined`.
+   */
+  async lastEditOf(
+    head: string,
+    path: string,
+    maxWalk = DEFAULT_MAX_WALK,
+  ): Promise<FsChainEntry | undefined> {
+    const seen = new Set<string>();
+    let frontier = [head];
+
+    // NEAREST TO THE HEAD WINS, and ties within one step are broken by
+    // `timeId`. **Not the greatest `timeId` overall**, which was the first
+    // version of this and is wrong on the commonest history there is: two
+    // edits a second apart are usually minted in the same millisecond, and
+    // `compareTimeId` then breaks the tie on a RANDOM tail. So the later edit
+    // of a file could compare as older than the one it replaced — the
+    // function would name an entry its own successor had superseded.
+    //
+    // Walking back generation by generation asks the causal question instead:
+    // an entry closer to the head is one the head descends FROM, so anything
+    // deeper has been built on and cannot be the latest word. Two entries the
+    // same distance away really are concurrent — two parents of a merge — and
+    // `timeId` is the right answer for those, being a total order every node
+    // computes identically.
+    while (frontier.length > 0) {
+      const wanted = frontier.filter((ref) => !seen.has(ref) && !!seen.add(ref));
+      if (wanted.length === 0) break;
+      if (seen.size > maxWalk) break;
+      const next: string[] = [];
+      const here: FsChainEntry[] = [];
+      for (const ref of wanted) {
+        const entry = await this.entry(ref);
+        // A hole makes the answer unknowable rather than empty: the edit being
+        // looked for may be inside the part that cannot be read.
+        if (!entry) return undefined;
+        if (entry.changed.includes(path) || entry.removed.includes(path)) {
+          here.push(entry);
+        }
+        for (const previous of entry.previous) next.push(previous);
+      }
+      // SORTED rather than scanned for a maximum, and for coverage rather than
+      // taste: a running maximum takes its "this one is greater" branch only
+      // when the entries arrive in one particular order, and these are ordered
+      // by a RANDOM tail whenever two were minted in the same millisecond. The
+      // branch would then be covered or not by luck — the 98 %/99 % pattern
+      // this repository has been bitten by twice.
+      if (here.length > 0) {
+        return here.sort((a, b) => compareTimeId(b.timeId, a.timeId))[0];
+      }
+      frontier = next;
+    }
+
+    return undefined;
+  }
+
+  /**
    * The NET removals between a peer's head and a state this node knows.
    *
    * **Why a walk is needed at all, and it cost a red run to see.** A removal is
@@ -864,9 +943,29 @@ export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
     apply.push(path);
   }
 
+  // EVERYTHING GONE AT ONCE HAS ITS OWN, LOWER FLOOR.
+  //
+  // The ratio rule needs `minFiles` for the reason its own test gives:
+  // *"below the floor, 'most of the folder' is not a meaningful statement"*,
+  // and a guard that fires on ordinary small-folder work gets turned off. A
+  // folder holding one file legitimately loses it; a rename in a small folder
+  // removes every path it holds and adds them back under new names.
+  //
+  // But the floor was ALSO the only thing standing between a wiped peer and
+  // every other node's copy: 40 removals against 40 held files is a ratio of
+  // 1.0 and still under 100, so it passed unchallenged. Measured as `a small
+  // folder survives a wiped peer too` — every node emptied by one peer's loss.
+  //
+  // So the two cases get two floors. "Most of it" stays at `minFiles`,
+  // because below that the ratio says nothing. "ALL of it" gets
+  // {@link ALL_GONE_MIN_FILES}, which is low enough to catch a wipe and high
+  // enough to leave the folders where emptying is ordinary work alone.
+  const allGone =
+    opts.held.size > ALL_GONE_MIN_FILES && apply.length >= opts.held.size;
   const blocked =
-    apply.length > opts.minFiles &&
-    apply.length / Math.max(opts.held.size, 1) > opts.maxRatio;
+    allGone ||
+    (apply.length > opts.minFiles &&
+      apply.length / Math.max(opts.held.size, 1) > opts.maxRatio);
 
   return blocked
     ? { apply: [], staler, blocked: true }
@@ -874,6 +973,26 @@ export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
 };
 
 // .............................................................................
+/**
+ * Above this many files, a removal covering the WHOLE folder is refused.
+ *
+ * The user's rule — *protect whenever ALL files would vanish* — against the
+ * reason the ratio guard has a floor at all: a folder of one or four files
+ * loses all of them as ordinary work, and so does a rename, which removes
+ * every path it holds and adds them back under new names.
+ *
+ * Ten is the line between those two facts. Below it, "the whole folder" is a
+ * handful of files and emptying it is an edit; above it, one peer's loss
+ * taking everybody's copy is the measured failure
+ * (`a small folder survives a wiped peer too`, 40 files).
+ *
+ * It is a refusal and not a question, because the agent has no one to ask.
+ * The decision called for *"protect, and ask"*; the asking belongs to a host
+ * that can show a user a dialogue, and until one does this errs towards
+ * keeping files.
+ */
+export const ALL_GONE_MIN_FILES = 10;
+
 /** What {@link planJoin} is asked. */
 export interface JoinQuestion {
   /**

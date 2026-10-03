@@ -44,6 +44,7 @@ import {
   type BucketSyncHost,
 } from './fs-bucket-sync.ts';
 import {
+  ALL_GONE_MIN_FILES,
   compareTimeId,
   FsEditChain,
   planJoin,
@@ -857,6 +858,10 @@ export class FsAgent {
 
   /** Asks for the network's state, repeatedly, while a join is pending. */
   private _joinAskTimer: ReturnType<typeof setInterval> | null = null;
+
+
+
+
 
   /**
    * The reconcile that is running, so only ONE ever does.
@@ -3545,6 +3550,9 @@ export class FsAgent {
     incomingTree: FsTree,
     predecessorRefs: string[],
   ): Promise<void> {
+    // The folder BEFORE the merge touches it, so `_recordReceived` can tell
+    // what was delivered from what was already here. See its doc.
+    const beforeMerge = this._scanner.tree ?? { rootHash: '', trees: new Map() };
     const dbAdapter = new FsDbAdapter(db, treeKey);
     const incomingPrevious = await this._ancestryPrevious(
       db,
@@ -3579,7 +3587,7 @@ export class FsAgent {
     // actually made — a conflict copy — sits at a path no peer sent and is
     // still claimed. Safe to scan here: the watcher is paused for the whole
     // apply, so this sees the merge's own result and nothing else.
-    this._recordReceived(incomingTree, await this._scanner.scan());
+    this._recordReceived(incomingTree, beforeMerge, await this._scanner.scan());
   }
 
   /**
@@ -3605,14 +3613,29 @@ export class FsAgent {
    *
    * The conflict copy in that measurement is genuinely this node's work and
    * keeps being claimed: its bytes sit at a path no peer sent.
+   * **Only what actually ARRIVED, which needs the before-state.** Comparing
+   * the incoming tree against the folder afterwards cannot tell "the apply
+   * delivered this" from "we already had it" — and the second case is a
+   * node's OWN work coming back to it, which happens constantly: a peer
+   * re-announces a state it adopted, and the author receives its own bytes.
+   * Treating those as received drops the author's claim to a file it wrote,
+   * and then the bucket round hands the file to whoever is holding a stale
+   * copy. Measured: the writer-rollback invariant failing 8 runs of 8, where
+   * the rule it was meant to fix fails 6.
    * @param arrived - The tree that came from the peer.
-   * @param held - This folder as it stands now.
+   * @param before - This folder as it stood before the apply.
+   * @param after - This folder as it stands now.
    */
-  private _recordReceived(arrived: FsTree, held: FsTree): void {
+  private _recordReceived(arrived: FsTree, before: FsTree, after: FsTree): void {
     const fromPeer = this._getFileContentMap(arrived);
-    const onDisk = this._getFileContentMap(held);
+    const was = this._getFileContentMap(before);
+    const now = this._getFileContentMap(after);
     for (const [path, hash] of fromPeer) {
-      if (onDisk.get(path) !== hash) continue;
+      // Not here afterwards: nothing landed.
+      if (now.get(path) !== hash) continue;
+      // Here already beforehand: nothing was delivered, so nothing changes
+      // hands. A path this node authored keeps its claim.
+      if (was.get(path) === hash) continue;
       this._announcedContent.set(path, hash);
       this._localPathTimeIds.delete(path);
     }
@@ -4312,6 +4335,10 @@ export class FsAgent {
   ): FsBucketSync {
     const host: BucketSyncHost = {
       manifest: () => this._manifest(),
+      // The chain's answer to "who changed this file", for the paths this node
+      // changed. Only a real local edit sets a claim — receiving a path does
+      // not — so a node can never claim bytes it merely holds.
+      claimed: () => new Set(this._localPathTimeIds.keys()),
       send: (ref) => {
         // Cleared first, because `Connector` dedups by ref on both sides and a
         // round is only unique by its id — the clear makes a RE-sent message
@@ -4417,9 +4444,17 @@ export class FsAgent {
       const held = this._scanner.tree
         ? this._getFileContentMap(this._scanner.tree).size
         : 0;
+      // THE SAME TWO RULES AS `planRemovals`, because this is the same
+      // decision reached by a different route — and the floor's gap was open
+      // here too. Emptying the folder is refused whatever the count: 40 drops
+      // against 40 held files is a ratio of 1.0 and still under the floor,
+      // which is how a wiped peer took every other node's copy with it
+      // (`a small folder survives a wiped peer too`).
+      const wouldEmpty = held > ALL_GONE_MIN_FILES && plan.drop.length >= held;
       const tooMany =
-        plan.drop.length > MASS_DELETE_MIN_FILES &&
-        plan.drop.length / Math.max(held, 1) > MASS_DELETE_MAX_RATIO;
+        wouldEmpty ||
+        (plan.drop.length > MASS_DELETE_MIN_FILES &&
+          plan.drop.length / Math.max(held, 1) > MASS_DELETE_MAX_RATIO);
       if (tooMany) {
         console.error(
           `[FsAgent] MASS DELETE REFUSED on ${this._rootPath}: a bucket-sync ` +
@@ -4794,6 +4829,27 @@ export class FsAgent {
         return (
           await this._chain?.entryForTreeRef(treeRef).catch((err) => {
             this._writeSyncError('chain/timeIdOfRef', err);
+            return undefined;
+          })
+        )?.timeId;
+      },
+      // WHO LAST CHANGED THIS FILE, read out of the shared history.
+      //
+      // The resolver asks it per conflicting path, so a branch can no longer
+      // win files it never touched. The answer comes from the chain and not
+      // from a clock, which is what makes every node work out the same winner
+      // on its own.
+      lastEditOfPath: async (treeRef, path) => {
+        await this._ensureChain(db, treeKey);
+        const entry = await this._chain
+          ?.entryForTreeRef(treeRef)
+          .catch(() => undefined);
+        if (!entry) return undefined;
+        return (
+          await this._chain?.lastEditOf(entry.head, path).catch((err) => {
+            /* v8 ignore next -- @preserve a failed walk leaves the branch
+               order to decide, which is the behaviour this replaces */
+            this._writeSyncError('chain/lastEditOfPath', err);
             return undefined;
           })
         )?.timeId;
@@ -5504,7 +5560,7 @@ export class FsAgent {
           // doc.txt]` on a node that had edited neither.
           //
           // The conflict copy in that list is genuinely local work and stays.
-          this._recordReceived(incomingTree, postRestoreTree);
+          this._recordReceived(incomingTree, currentTree, postRestoreTree);
 
           // NOT recording the incoming tree's files as prunable.
           //

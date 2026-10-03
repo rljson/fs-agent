@@ -464,9 +464,20 @@ export interface MergePlan {
  * @param o - Ancestor content map
  * @param ours - Our branch content map
  * @param theirs - Their branch content map
- * @param winnerSide - Which side keeps the path on a real conflict
+ * @param winnerSide - Which side keeps the path on a real conflict, when
+ *   nothing more specific is known. The BRANCH-level answer, and a fallback:
+ *   see `winnerFor`.
  * @param loserClientId - The losing revision's client id (for copy names)
  * @param loserTimestamp - The losing revision's timestamp (for copy names)
+ * @param winnerFor - Per-path verdict, asked of the edit chain: *who last
+ *   changed THIS path?* `undefined` for a path means the chain could not say
+ *   and `winnerSide` decides it.
+ *
+ *   **This is the difference between ordering a branch and ordering a file.**
+ *   Without it one verdict covers every path the two branches disagree about,
+ *   so a tip wins paths it never touched — measured as a node that came back
+ *   from being offline, wrote one unrelated file, and took `doc.txt` with it,
+ *   rolling the writer's own folder from v8 back to v5.
  * @returns The merge plan (merged set, conflict copies, conflicting paths)
  */
 export function threeWayMerge(
@@ -476,6 +487,7 @@ export function threeWayMerge(
   winnerSide: 'ours' | 'theirs',
   loserClientId: string,
   loserTimestamp: number,
+  winnerFor?: (path: string) => 'ours' | 'theirs' | undefined,
 ): MergePlan {
   const merged: ContentMap = new Map();
   const copies: ConflictCopy[] = [];
@@ -515,8 +527,9 @@ export function threeWayMerge(
 
     // Genuine conflict: both sides diverged differently (or edit/delete).
     conflictPaths.push(path);
-    const winnerVal = winnerSide === 'ours' ? b : c;
-    const loserVal = winnerSide === 'ours' ? c : b;
+    const side = winnerFor?.(path) ?? winnerSide;
+    const winnerVal = side === 'ours' ? b : c;
+    const loserVal = side === 'ours' ? c : b;
 
     if (winnerVal !== undefined) {
       merged.set(path, winnerVal);
@@ -561,6 +574,19 @@ export interface ConflictResolverDeps {
    * keys it used before. See {@link BranchTip.chainTimeId}.
    */
   chainTimeIdOfRef?: (treeRef: string) => Promise<string | undefined>;
+  /**
+   * The `timeId` of the newest edit on `treeRef`'s lineage that touched `path`.
+   *
+   * Who last changed THIS file? — the question that decides a conflict per
+   * path instead of per branch. `undefined` means the chain cannot say: the
+   * lineage never named the path, or the walk could not be read to the end.
+   * Absent entirely means an older peer, and the branch order decides
+   * everything as before.
+   */
+  lastEditOfPath?: (
+    treeRef: string,
+    path: string,
+  ) => Promise<string | undefined>;
   /** Fetch a full FsTree by its root ref. */
   fetchTree: (rootRef: string) => Promise<FsTree>;
   /** Read a blob's bytes by blobId. */
@@ -673,8 +699,10 @@ export class FsConflictResolver {
       }
     }
 
-    // Winner keeps the path; loser's content survives as a renamed copy.
-    const plan = threeWayMerge(
+    // TWO PASSES, because the per-path question can only be asked once the
+    // conflicting paths are known, and asking it is asynchronous while the
+    // merge is pure. The first pass discovers them; the second decides them.
+    const discovered = threeWayMerge(
       ancestorMap,
       loserMap,
       winnerMap,
@@ -682,6 +710,62 @@ export class FsConflictResolver {
       loserTip.clientId,
       tipTimestamp(loserTip),
     );
+
+    // WHO LAST CHANGED THIS FILE — asked of the chain, per path.
+    //
+    // The branch order (`compareTips`) answers "which side spoke last", and
+    // using it for every path lets a tip win files it never opened. Measured:
+    // a node came back from being offline, wrote one unrelated file, and that
+    // newer tip took `doc.txt` as well — the writer's own folder went from v8
+    // back to v5.
+    //
+    // A side that touched the path beats a side that did not; where both did,
+    // the later edit of THAT path wins; where the chain cannot say for either,
+    // the branch order stands, exactly as before. "Cannot say" is never read
+    // as "did not touch it".
+    const perPath = new Map<string, 'ours' | 'theirs'>();
+    const ask = this.deps.lastEditOfPath;
+    if (ask && discovered.conflictPaths.length > 0) {
+      for (const path of discovered.conflictPaths) {
+        const mine = await ask(loserTip.ref, path).catch(() => undefined);
+        const yours = await ask(winnerTip.ref, path).catch(() => undefined);
+        if (mine === undefined && yours === undefined) continue;
+        if (yours === undefined) {
+          perPath.set(path, 'ours');
+          continue;
+        }
+        if (mine === undefined) {
+          perPath.set(path, 'theirs');
+          continue;
+        }
+        perPath.set(path, compareTimeId(mine, yours) > 0 ? 'ours' : 'theirs');
+      }
+      const overridden = [...perPath].filter(([, side]) => side === 'ours');
+      if (overridden.length > 0) {
+        this._log(
+          'warn',
+          `per-path history keeps ${overridden.length} path(s) on the ` +
+            `lower-ordered branch: ${overridden
+              .slice(0, 3)
+              .map(([p]) => p)
+              .join(', ')}`,
+        );
+      }
+    }
+
+    // Winner keeps the path; loser's content survives as a renamed copy.
+    const plan =
+      perPath.size === 0
+        ? discovered
+        : threeWayMerge(
+            ancestorMap,
+            loserMap,
+            winnerMap,
+            'theirs',
+            loserTip.clientId,
+            tipTimestamp(loserTip),
+            (path) => perPath.get(path),
+          );
 
     // Materialise on disk: restore the winner tree (clean slate), then apply the
     // merge delta + conflict copies, then re-scan to a hashed tree.

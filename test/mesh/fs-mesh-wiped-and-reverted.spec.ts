@@ -172,7 +172,7 @@ describe('a node comes back empty, or holding an older copy', () => {
   // sync, then recovery. A ratio with no floor plus a question, rather than a
   // floor with no question.
   // ...........................................................................
-  it.skip('OPEN: a small folder survives a wiped peer too', async () => {
+  it('a small folder survives a wiped peer too', async () => {
     mesh = await buildFsMesh({
       root: root('smallwipe'),
       names: ['A', 'B', 'LOST'],

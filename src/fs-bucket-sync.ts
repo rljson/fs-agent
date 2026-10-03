@@ -237,6 +237,15 @@ export interface BucketSyncHost {
    * removes.
    */
   manifest(): ReadonlyMap<string, string>;
+  /**
+   * Paths this node's own history says it EDITED.
+   *
+   * Travels with each entry so a same-path conflict is settled by who wrote
+   * the file rather than by which content hash sorts higher. Optional: a host
+   * without a chain claims nothing, and the hash rule still converges.
+   */
+  claimed?(): ReadonlySet<string>;
+
   /** Puts a protocol ref on the wire. */
   send(ref: string): void;
   /**
@@ -357,7 +366,11 @@ export class FsBucketSync {
       this._host.send(
         encodeEntries(
           parsed.round,
-          entriesInBuckets(this._host.manifest(), parsed.buckets),
+          entriesInBuckets(
+            this._host.manifest(),
+            parsed.buckets,
+            this._host.claimed?.(),
+          ),
         ),
       );
       return true;
@@ -382,7 +395,11 @@ export class FsBucketSync {
         ? this._awaiting.buckets
         : [...new Set(parsed.entries.map(([path]) => bucketOf(path)))];
     const ourEntries = entriesInBuckets(this._host.manifest(), buckets);
-    const plan = reconcile(ourEntries, parsed.entries);
+    const plan = reconcile(
+      ourEntries,
+      parsed.entries,
+      this._host.claimed?.(),
+    );
     this._awaiting = null;
 
     const work =

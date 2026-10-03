@@ -180,6 +180,30 @@ describe('planRemovals', () => {
       expect(result.apply.length).toBe(4);
     });
 
+    it('refuses to empty a folder of more than a handful of files', () => {
+      // The user's rule — protect whenever ALL files would vanish — against
+      // the reason the ratio floor exists. 40 removals against 40 held files
+      // is a ratio of 1.0 and was still under `minFiles`, so it passed
+      // unchallenged: measured as every node in a small fleet emptied by one
+      // peer's loss (`a small folder survives a wiped peer too`).
+      const held = many(40);
+      const result = plan({ removed: many(40), held, minFiles: 100 });
+      expect(result.blocked).toBe(true);
+      expect(result.apply).toEqual([]);
+    });
+
+    it('still lets a handful of files go — and a rename is one', () => {
+      // The control for the rule above, and the reason it needs its own floor
+      // rather than applying at any size. A folder of four files loses all
+      // four as ordinary work; a rename removes every path a small folder
+      // holds and adds them back under new names, so a blanket "all gone"
+      // rule turns every small-folder rename into a duplicate.
+      const held = many(4);
+      const result = plan({ removed: many(4), held, minFiles: 100 });
+      expect(result.blocked).toBe(false);
+      expect(result.apply.length).toBe(4);
+    });
+
     it('judges the ratio on what would ACTUALLY be deleted', () => {
       // Paths this node does not hold, and paths refused as stale, are not
       // deletions — counting them would trip the breaker on a message that

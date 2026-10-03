@@ -561,6 +561,10 @@ describe('FsConflictResolver', () => {
     trees: Record<string, Record<string, string>>;
     rows: InsertHistoryRow<string>[];
     withOnStored?: boolean;
+    /** `treeRef → path → timeId of the last edit naming it`, if any. */
+    lastEditOfPath?: Record<string, Record<string, string>>;
+    /** Makes the per-path lookup REJECT, as an unreadable chain does. */
+    lastEditThrows?: boolean;
   }): Harness {
     const disk: Disk = new Map();
     const stored: Harness['stored'] = [];
@@ -580,6 +584,13 @@ describe('FsConflictResolver', () => {
       treeKey: TREE,
       getInsertHistory: async () => opts.rows,
       getRefOfTimeId: async (_t, timeId) => opts.refOf[timeId] ?? null,
+      lastEditOfPath:
+        opts.lastEditOfPath || opts.lastEditThrows
+          ? async (treeRef, path) => {
+              if (opts.lastEditThrows) throw new Error('chain unreadable');
+              return opts.lastEditOfPath?.[treeRef]?.[path];
+            }
+          : undefined,
       fetchTree: async (ref) => mkTree(opts.trees[ref]),
       getBlobContent: async (blobId) => Buffer.from(blobId),
       restoreTree: async (tree) => {
@@ -663,6 +674,125 @@ describe('FsConflictResolver', () => {
       await new FsConflictResolver(h.deps).resolve(conflict(['tA', 'tB'])),
     ).toBeNull();
     expect(h.log).toHaveBeenCalledWith('warn', expect.stringContaining('missing tree ref'));
+  });
+
+  // ...........................................................................
+  // WHO LAST CHANGED THIS FILE — the per-path verdict, overriding the branch.
+  //
+  // `compareTips` orders a BRANCH, and using that one verdict for every path
+  // the branches disagree about lets a tip win files it never opened. Measured
+  // as a writer's own folder going from v8 back to v5 after a returning node
+  // wrote one unrelated file.
+  //
+  // Here the LOWER-ordered branch is the one that actually edited `doc.txt`,
+  // so it keeps it — against the branch order, which is the whole point.
+  // ...........................................................................
+  it('keeps a path on the side whose history actually changed it', async () => {
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [
+        row('O', []),
+        // B loses the BRANCH order (no identity, epoch timestamp)…
+        row('B', ['O']),
+        row('C', ['O'], 'NB-CCCC', 1000),
+      ],
+      // …but B's history is the only one that names `doc.txt`. C never
+      // touched it, so it does not get to decide it.
+      lastEditOfPath: { refB: { 'doc.txt': '5000:bbb' } },
+      withOnStored: true,
+    });
+
+    await new FsConflictResolver(h.deps).resolve(conflict(['C', 'B']));
+
+    expect(
+      h.disk.get('doc.txt'),
+      'the branch order overruled the only side that edited the file',
+    ).toBe('vB');
+    // And the side that did NOT edit it is the one kept as a copy.
+    const copy = [...h.disk.keys()].find((p) => p.includes('conflicted copy'));
+    expect(copy).toBeTruthy();
+    expect(h.disk.get(copy as string)).toBe('vC');
+  });
+
+  it('falls back to the branch order when the chain cannot be read', async () => {
+    // A chain read that THROWS must not break the merge. "Cannot say" is never
+    // read as a verdict: the branch order decides, which is exactly the
+    // behaviour the per-path question replaced, so an unreadable history is no
+    // worse than not having one.
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [row('O', []), row('B', ['O']), row('C', ['O'], 'NB-CCCC', 1000)],
+      lastEditThrows: true,
+      withOnStored: true,
+    });
+
+    const ref = await new FsConflictResolver(h.deps).resolve(
+      conflict(['C', 'B']),
+    );
+
+    expect(ref, 'an unreadable chain aborted the merge').toBeTruthy();
+    // C outranks B on the branch order, so C keeps the path.
+    expect(h.disk.get('doc.txt')).toBe('vC');
+  });
+
+  it('gives a path to the side that edited it when the other never did', async () => {
+    // The mirror of the test above: here the side that touched `doc.txt` is
+    // also the higher-ordered branch, so the verdict agrees — but it has to be
+    // reached by the per-path question rather than by the branch order, which
+    // is why both directions are asserted.
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [row('O', []), row('B', ['O']), row('C', ['O'], 'NB-CCCC', 1000)],
+      // Only C's history names it. B holds bytes it never claimed.
+      lastEditOfPath: { refC: { 'doc.txt': '5000:ccc' } },
+      withOnStored: true,
+    });
+
+    await new FsConflictResolver(h.deps).resolve(conflict(['C', 'B']));
+
+    expect(h.disk.get('doc.txt')).toBe('vC');
+  });
+
+  it('gives a path to whichever side edited it LAST when both did', async () => {
+    // Both histories name `doc.txt`, so the later edit of THAT path decides
+    // it — not the later branch. Here the branch order and the per-path answer
+    // agree; the test exists because they can disagree, and the comparison has
+    // to be made rather than assumed either way.
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [row('O', []), row('B', ['O']), row('C', ['O'], 'NB-CCCC', 1000)],
+      lastEditOfPath: {
+        refB: { 'doc.txt': '1000:bbb' },
+        refC: { 'doc.txt': '9000:ccc' },
+      },
+      withOnStored: true,
+    });
+
+    await new FsConflictResolver(h.deps).resolve(conflict(['C', 'B']));
+
+    expect(h.disk.get('doc.txt')).toBe('vC');
+    const copy = [...h.disk.keys()].find((p) => p.includes('conflicted copy'));
+    expect(h.disk.get(copy as string)).toBe('vB');
   });
 
   it('merges a fork: winner keeps the path, loser is renamed, fork collapses', async () => {

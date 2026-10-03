@@ -220,6 +220,72 @@ describe('reconcile', () => {
     expect(plan.conflict).toEqual([]);
   });
 
+  // ...........................................................................
+  // WHOEVER EDITED IT KEEPS IT — and the hash decides only what nobody claims.
+  //
+  // The hash comparison is a total order every node computes identically, so it
+  // CONVERGES; it just converges on whichever blob id sorts higher, which has
+  // nothing to do with who edited last. Measured on the fleet as a writer at
+  // version 8 and a peer still holding version 5 ending up on version 5 about
+  // half the time — the writer's own folder going backwards.
+  //
+  // Each side's claim travels with its entry, so both are known here and the
+  // two rules are mirror images: whichever node runs them reaches the same
+  // verdict, which is what convergence requires. A ONE-SIDED version was tried
+  // and measured worse — a peer claiming nothing kept its stale copy and the
+  // fleet stayed split.
+  // ...........................................................................
+  describe('a same-path conflict', () => {
+    const C = (path: string, blob: string): ManifestEntry => [path, blob, 1];
+
+    it('is decided by the side whose history claims the path', () => {
+      // Ours is claimed, theirs is not: we keep ours and fetch nothing, even
+      // though their blob id sorts higher and the hash rule would take it.
+      const plan = reconcile(
+        [['doc.txt', 'aaa']],
+        [['doc.txt', 'zzz']],
+        new Set(['doc.txt']),
+      );
+      expect(plan.conflict).toEqual(['doc.txt']);
+      expect(plan.fetch, 'a hash overruled the side that edited the file').toEqual(
+        [],
+      );
+    });
+
+    it('is decided the same way seen from the other side', () => {
+      // The mirror, which is what makes it converge: they claim it, we do not,
+      // so we fetch theirs even though OUR blob id sorts higher.
+      const plan = reconcile([['doc.txt', 'zzz']], [C('doc.txt', 'aaa')]);
+      expect(plan.fetch).toEqual([['doc.txt', 'aaa']]);
+    });
+
+    it('falls back to the hash when both sides claim it', () => {
+      // Two people really did edit the same file. Nothing here distinguishes
+      // them, and converging on an arbitrary-but-identical answer beats
+      // sitting on two versions for ever.
+      const higher = reconcile(
+        [['doc.txt', 'aaa']],
+        [C('doc.txt', 'zzz')],
+        new Set(['doc.txt']),
+      );
+      expect(higher.fetch).toEqual([['doc.txt', 'zzz']]);
+      const lower = reconcile(
+        [['doc.txt', 'zzz']],
+        [C('doc.txt', 'aaa')],
+        new Set(['doc.txt']),
+      );
+      expect(lower.fetch).toEqual([]);
+    });
+
+    it('falls back to the hash when neither side claims it', () => {
+      // Two nodes each holding bytes they received and neither authored — an
+      // older peer that sends no claims at all looks exactly like this, which
+      // is why the fallback has to stay.
+      const plan = reconcile([['doc.txt', 'aaa']], [['doc.txt', 'zzz']]);
+      expect(plan.fetch).toEqual([['doc.txt', 'zzz']]);
+    });
+  });
+
   it('does nothing where the two agree', () => {
     const plan = reconcile([E('a.txt', '1')], [E('a.txt', '1')]);
     expect(plan).toEqual({
