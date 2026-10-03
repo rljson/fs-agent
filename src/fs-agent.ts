@@ -3689,6 +3689,28 @@ export class FsAgent {
         return undefined;
       }));
     if (!entry) return { treeRef: resolved.treeRef };
+
+    // SAME CONTENT IS NOT A FORK, whatever the two chains call themselves.
+    //
+    // A tree ref is the content. Two nodes that hold the same one hold the
+    // same folder — and they still arrive at DIFFERENT chain heads, because
+    // each records its own entry for the state it reached. `classify` has no
+    // way to see that: it compares heads, finds neither is an ancestor of the
+    // other, and answers `fork`.
+    //
+    // Measured on the freeze scenario: 24 announcements classified as `fork`
+    // where both sides held tree `K0xA_ig0`, the seed. A fork of identical
+    // content sends the decision to a MERGE, the merge of two identical
+    // folders changes nothing, and the node does it again on the next
+    // announcement — forever, while reporting no divergence.
+    //
+    // This is the same mistake twice over: it is why mtime had to leave the
+    // content identity, and it is what `FsAntiEntropy.agreedOn` exists to
+    // record. The answer is the same one — ask the content, not the name.
+    if (resolved.treeRef === this._currentRef) {
+      return { treeRef: resolved.treeRef, reachability: 'ahead' };
+    }
+
     try {
       return {
         treeRef: resolved.treeRef,
