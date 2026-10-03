@@ -14,7 +14,11 @@ import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
-import { AGENT_STATE_FILE, FsAgent } from '../src/fs-agent.ts';
+import {
+  AGENT_STATE_FILE,
+  CHAIN_HEAD_PREFIX,
+  FsAgent,
+} from '../src/fs-agent.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // A node that is offline while a file is created used to DELETE that file from
@@ -456,33 +460,37 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       });
       await new Promise((r) => setTimeout(r, 300));
 
+      // The state the node is about to leave, by the name the CHAIN knows it
+      // by. Not `_currentRef`: a content hash cannot say whether this node was
+      // ever in that state, only that some folder somewhere held those bytes.
       const inner = agent as unknown as {
-        _currentRef?: string;
-        _stateHistory: string[];
+        _chainHead?: { head: string; treeRef: string };
       };
-      const left = inner._currentRef as string;
+      const leftHead = inner._chainHead?.head as string;
+      expect(leftHead, 'the node recorded no entry for its own state').toBe(
+        inner._chainHead?.head,
+      );
 
       // The node moves on: it deletes the file and is now somewhere new.
       await rm(join(targetDir, 'shared.txt'), { force: true });
       await new Promise((r) => setTimeout(r, 600));
-      expect(inner._currentRef).not.toBe(left);
-      expect(inner._stateHistory).toContain(left);
+      expect(inner._chainHead?.head).not.toBe(leftHead);
 
-      // A peer that never saw the deletion pushes the old state back.
-      await writeFile(join(sourceDir, 'shared.txt'), 'shared');
-      const staleRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-        await new FsAgent(sourceDir, bs).extract(),
-      );
+      // A PEER THAT NEVER SAW THE DELETION RE-ANNOUNCES THE SHARED ENTRY.
+      // That is the whole announcement: a receiver adopts the sender's entry
+      // rather than authoring one, so the state both nodes were in has ONE
+      // name, and a peer still in it says exactly that name. No synthetic
+      // tree, no hand-declared ancestry — the earlier version of this test
+      // stored a tree with no entry behind it and put the ancestry in the
+      // advertisement, which no build has done since the chain landed.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      connector.advertise(staleRef, 1, [left]);
+      connector.advertise(`${CHAIN_HEAD_PREFIX}${leftHead}`, 1, []);
       await new Promise((r) => setTimeout(r, 600));
 
       // The deletion stands. Ignored outright, not applied additively.
       expect(existsSync(join(targetDir, 'shared.txt'))).toBe(false);
       expect(
-        warnSpy.mock.calls.some((c) =>
-          String(c[0]).includes('already left'),
-        ),
+        warnSpy.mock.calls.some((c) => String(c[0]).includes('already left')),
       ).toBe(true);
 
       stopTo();

@@ -32,7 +32,7 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
+import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 const root = (name: string) => join(process.cwd(), `test-temp-cost-${name}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -124,7 +124,7 @@ describe('coming back does not cost what you missed', () => {
 
     mesh.node('AWAY').heal();
     const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 5_000 });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(await mesh.node('AWAY').read('doc.txt')).toBe(
       `version ${MISSED} of the document`,
     );
@@ -178,7 +178,7 @@ describe('coming back does not cost what you missed', () => {
 
     mesh.node('AWAY').heal();
     const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 5_000 });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(await mesh.node('AWAY').read('stable-3.txt')).toBe('changed 10');
     expect(await mesh.node('AWAY').read('stable-7.txt')).toBe('also changed 10');
 

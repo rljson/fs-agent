@@ -29,7 +29,7 @@ import { rename, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildFsMesh, type FsMesh } from './mesh/fs-mesh.ts';
+import { buildFsMesh, whyNot, type FsMesh } from './mesh/fs-mesh.ts';
 
 describe('how real programs save', () => {
   let mesh: FsMesh | undefined;
@@ -72,7 +72,7 @@ describe('how real programs save', () => {
       timeoutMs: 60_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     // The temp files must not survive anywhere.
     for (const name of ['A', 'B']) {
       expect(
@@ -115,7 +115,7 @@ describe('how real programs save', () => {
       timeoutMs: 60_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     for (const name of ['A', 'B', 'C']) {
       expect(
         result.snapshot[name],
@@ -152,7 +152,7 @@ describe('how real programs save', () => {
       timeoutMs: 90_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(result.snapshot['A']).toEqual(result.snapshot['B']);
     for (const file of result.snapshot['A']) {
       const content = await mesh.node('A').read(file);
@@ -196,7 +196,7 @@ describe('how real programs save', () => {
       timeoutMs: 90_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(result.snapshot['A']).toEqual(result.snapshot['B']);
     expect(
       result.snapshot['A'].length,

@@ -48,11 +48,11 @@ describe('FsEditChain.collectRemovals', () => {
   it('finds a removal stated several entries back', async () => {
     // The measured failure, reduced: the delete is in an entry nobody
     // received, and the head that follows it says nothing about it.
-    await chain.append({ treeRef: 'T0', changed: ['seed.txt'] });
+    const seed = await chain.append({ treeRef: 'T0', changed: ['seed.txt'] });
     await chain.append({ treeRef: 'T1', removed: ['doomed.txt'] });
     const head = await chain.append({ treeRef: 'T2', changed: ['later.txt'] });
 
-    const walk = await chain.collectRemovals(head.head, new Set(['T0']));
+    const walk = await chain.collectRemovals(head.head, seed.head);
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual(['doomed.txt']);
   });
@@ -62,22 +62,22 @@ describe('FsEditChain.collectRemovals', () => {
     // Order is the whole correctness of this function. A path deleted and then
     // created again inside the walked range is not a removal at all, and
     // taking the union of `removed` would delete a live file.
-    await chain.append({ treeRef: 'T0' });
+    const seed = await chain.append({ treeRef: 'T0' });
     await chain.append({ treeRef: 'T1', removed: ['flip.txt'] });
     const head = await chain.append({ treeRef: 'T2', changed: ['flip.txt'] });
 
-    const walk = await chain.collectRemovals(head.head, new Set(['T0']));
+    const walk = await chain.collectRemovals(head.head, seed.head);
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual([]);
   });
 
   // ...........................................................................
   it('keeps a removal that comes AFTER a re-add', async () => {
-    await chain.append({ treeRef: 'T0' });
+    const seed = await chain.append({ treeRef: 'T0' });
     await chain.append({ treeRef: 'T1', changed: ['flip.txt'] });
     const head = await chain.append({ treeRef: 'T2', removed: ['flip.txt'] });
 
-    const walk = await chain.collectRemovals(head.head, new Set(['T0']));
+    const walk = await chain.collectRemovals(head.head, seed.head);
     expect(walk.removed).toEqual(['flip.txt']);
   });
 
@@ -93,10 +93,13 @@ describe('FsEditChain.collectRemovals', () => {
     // a state the receiver already had, which weakens the recency guard: an
     // old removal would out-order the receiver's newer work on that path.
     await chain.append({ treeRef: 'T0', removed: ['ancient.txt'] });
-    await chain.append({ treeRef: 'T1', removed: ['already-reflected.txt'] });
+    const known = await chain.append({
+      treeRef: 'T1',
+      removed: ['already-reflected.txt'],
+    });
     const head = await chain.append({ treeRef: 'T2', removed: ['news.txt'] });
 
-    const walk = await chain.collectRemovals(head.head, new Set(['T1']));
+    const walk = await chain.collectRemovals(head.head, known.head);
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual(['news.txt']);
     expect(walk.timeId).toBe(head.timeId);
@@ -108,7 +111,7 @@ describe('FsEditChain.collectRemovals', () => {
     const middle = await chain.append({ treeRef: 'T1', removed: ['x.txt'] });
     const head = await chain.append({ treeRef: 'T2' });
 
-    const walk = await chain.collectRemovals(head.head, new Set(['T0']));
+    const walk = await chain.collectRemovals(head.head, root.head);
 
     // COMPUTED, not assumed to be the last one appended. A `timeId` is
     // `<millis>:<nanoid>`, so three entries minted inside one millisecond are
@@ -134,7 +137,7 @@ describe('FsEditChain.collectRemovals', () => {
       previous: ['a-ref-nobody-ever-wrote'],
     });
 
-    const walk = await chain.collectRemovals(head.head, new Set(['T0']));
+    const walk = await chain.collectRemovals(head.head, undefined);
     expect(walk.complete).toBe(false);
   });
 
@@ -142,7 +145,7 @@ describe('FsEditChain.collectRemovals', () => {
   it('T6: reports INCOMPLETE when the head itself is unresolvable', async () => {
     const walk = await chain.collectRemovals(
       'not-a-head-we-hold',
-      new Set(['T0']),
+      undefined,
     );
     expect(walk.complete).toBe(false);
     expect(walk.removed).toEqual([]);
@@ -159,7 +162,7 @@ describe('FsEditChain.collectRemovals', () => {
       last = await chain.append({ treeRef: `T${i}`, removed: [`f${i}.txt`] });
     }
 
-    const walk = await chain.collectRemovals(last.head, new Set(['stop']), 3);
+    const walk = await chain.collectRemovals(last.head, undefined, 3);
     expect(walk.complete).toBe(false);
     // What it did resolve is still reported, so a caller that can act on a
     // partial answer has one — but `complete: false` says it must not.
@@ -186,7 +189,7 @@ describe('FsEditChain.collectRemovals', () => {
       previous: [left.head, right.head],
     });
 
-    const walk = await chain.collectRemovals(merge.head, new Set(['T0']));
+    const walk = await chain.collectRemovals(merge.head, base.head);
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual(['left.txt', 'right.txt']);
   });
@@ -212,21 +215,154 @@ describe('FsEditChain.collectRemovals', () => {
       previous: [left.head, base.head],
     });
 
-    const walk = await chain.collectRemovals(outer.head, new Set());
+    const walk = await chain.collectRemovals(outer.head, undefined);
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual(['base.txt', 'left.txt']);
   });
 
   // ...........................................................................
   it('terminates on a chain that reaches its own root', async () => {
-    // No `stopAt` match anywhere: a fresh receiver with nothing in common.
+    // No lineage of our own: a fresh receiver with nothing in common.
     // It must end at the root rather than loop.
     await chain.append({ treeRef: 'T0', removed: ['a.txt'] });
     const head = await chain.append({ treeRef: 'T1', removed: ['b.txt'] });
 
-    const walk = await chain.collectRemovals(head.head, new Set());
+    const walk = await chain.collectRemovals(head.head, undefined);
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual(['a.txt', 'b.txt']);
+  });
+
+  // ...........................................................................
+  // Where the walk stops, now that the chain answers it.
+  // ...........................................................................
+  it('walks THROUGH a sibling entry that merely shares our content', async () => {
+    // Two entries, same `treeRef`, different lineages — the ordinary case now
+    // that mtime is out of the content identity: two nodes holding the same
+    // bytes derive the same ref. The old stop set was content refs, so the
+    // peer's `sibling` ended the walk although this node was never on that
+    // lineage, and the removal behind it was never collected.
+    const ours = await chain.append({ treeRef: 'SHARED', changed: ['a.txt'] });
+
+    const sibling = await chain.append({
+      treeRef: 'SHARED',
+      removed: ['older.txt'],
+      previous: [],
+    });
+    const peer = await chain.append({
+      treeRef: 'PEER',
+      removed: ['newer.txt'],
+      previous: [sibling.head],
+    });
+
+    const walk = await chain.collectRemovals(peer.head, ours.head);
+    expect(walk.complete).toBe(true);
+    // BOTH. Our lineage never passed through `sibling`, so nothing it states
+    // can be assumed already reflected here.
+    expect(walk.removed).toEqual(['newer.txt', 'older.txt']);
+  });
+
+  // ...........................................................................
+  it('stops at an entry in our lineage however its content compares', async () => {
+    // The other half: the stop is reachability, so it holds for an entry whose
+    // content this node cannot recognise at all.
+    const here = await chain.append({ treeRef: 'HERE', removed: ['mine.txt'] });
+    const peer = await chain.append({
+      treeRef: 'THERE',
+      removed: ['theirs.txt'],
+      previous: [here.head],
+    });
+
+    const walk = await chain.collectRemovals(peer.head, here.head);
+    expect(walk.complete).toBe(true);
+    expect(walk.removed).toEqual(['theirs.txt']);
+  });
+
+  // ...........................................................................
+  it('concludes NOTHING when our own lineage is unreadable', async () => {
+    // Our own history holed is not a licence to walk past it: the entry that
+    // would have stopped the walk may be inside the part we cannot read, and
+    // continuing collects removals from a lineage we have already left.
+    const peer = await chain.append({ treeRef: 'P', removed: ['x.txt'] });
+    const ourBrokenHead = await chain.append({
+      treeRef: 'OURS',
+      previous: ['a-ref-nobody-ever-wrote'],
+    });
+
+    const walk = await chain.collectRemovals(peer.head, ourBrokenHead.head);
+    expect(walk.complete).toBe(false);
+    expect(walk.removed).toEqual([]);
+  });
+
+  // ...........................................................................
+  it('walks our lineage once per state, not once per announcement', async () => {
+    // Announcements arrive in bursts. Walking our whole history for each one
+    // would cost a read per entry per announcement, which on a long chain is
+    // the kind of regression that only shows up on a real folder.
+    const ours = await chain.append({ treeRef: 'O0' });
+    const peer = await chain.append({
+      treeRef: 'P0',
+      removed: ['x.txt'],
+      previous: [ours.head],
+    });
+
+    let reads = 0;
+    const real = db.getEditHistories.bind(db);
+    db.getEditHistories = (async (...args: Parameters<typeof real>) => {
+      reads++;
+      return real(...args);
+    }) as typeof real;
+
+    await chain.collectRemovals(peer.head, ours.head);
+    const first = reads;
+    await chain.collectRemovals(peer.head, ours.head);
+    const second = reads - first;
+    expect(second).toBeLessThan(first);
+
+    // And appending onto our own head EXTENDS the cached lineage rather than
+    // discarding it, so the steady state stays cheap.
+    const next = await chain.append({ treeRef: 'O1', previous: [ours.head] });
+    const before = reads;
+    await chain.collectRemovals(peer.head, next.head);
+    expect(reads - before).toBe(second);
+
+    db.getEditHistories = real;
+  });
+
+  // ...........................................................................
+  // The other half of the delta, which is what lifts a tombstone.
+  // ...........................................................................
+  it('states what was CHANGED, not only what was removed', async () => {
+    // A receiver tombstones every path it deletes, including the ones a peer
+    // told it to delete, and that tombstone refuses the path if anyone writes
+    // it again. The watcher lifts one on a LOCAL re-creation; a peer's
+    // re-creation can only arrive through the restore the tombstone refuses.
+    // So the peer has to say it.
+    const ours = await chain.append({ treeRef: 'T0', changed: ['seed.txt'] });
+    await chain.append({ treeRef: 'T1', removed: ['cycle.txt'] });
+    const head = await chain.append({
+      treeRef: 'T2',
+      changed: ['cycle.txt'],
+    });
+
+    const walk = await chain.collectRemovals(head.head, ours.head);
+    expect(walk.complete).toBe(true);
+    // Deleted and re-created inside the walked range: nothing to remove, and
+    // a statement that the path is back.
+    expect(walk.removed).toEqual([]);
+    expect(walk.changed).toEqual(['cycle.txt']);
+  });
+
+  // ...........................................................................
+  it('does not report a path written and then deleted as changed', async () => {
+    // The mirror. Without it, a path created and deleted inside the walked
+    // range would lift a tombstone for a file that is gone.
+    const ours = await chain.append({ treeRef: 'T0' });
+    await chain.append({ treeRef: 'T1', changed: ['brief.txt'] });
+    const head = await chain.append({ treeRef: 'T2', removed: ['brief.txt'] });
+
+    const walk = await chain.collectRemovals(head.head, ours.head);
+    expect(walk.changed).toEqual([]);
+    expect(walk.removed).toEqual(['brief.txt']);
   });
 
   // ...........................................................................

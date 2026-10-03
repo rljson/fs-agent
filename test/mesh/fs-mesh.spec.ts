@@ -43,7 +43,7 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
+import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -88,7 +88,7 @@ describe('fs mesh', () => {
     ]);
 
     const result = await mesh.converged();
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(result.snapshot['A']).toEqual([
       'from-a.txt',
       'from-b.txt',
@@ -118,7 +118,7 @@ describe('fs mesh', () => {
 
     mesh.node('B').heal();
     const result = await mesh.converged();
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(result.snapshot['B']).toEqual(['before.txt', 'during.txt']);
   }, 60_000);
 
@@ -183,7 +183,7 @@ describe('fs mesh', () => {
     mesh.node('A').heal();
     const result = await mesh.converged({ timeoutMs: 30_000 });
 
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     // Nobody's work is destroyed: the union, on every node.
     const expected = [
       'copied/one.txt',
@@ -243,7 +243,7 @@ describe('fs mesh', () => {
     mesh.node('B').heal();
     const result = await mesh.converged({ timeoutMs: 30_000 });
 
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     // B's addition survives; A's deletion also survives. Both, not one.
     const expected = ['from-b.txt', 'keeper.txt'];
     expect(result.snapshot['A']).toEqual(expected);
@@ -347,7 +347,7 @@ describe('fs mesh', () => {
       stableMs: 10_000,
     });
 
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     const expected = [
       'keeper.txt',
       'meanwhile.txt',
@@ -415,7 +415,7 @@ describe('fs mesh', () => {
 
     const before = process.memoryUsage().heapUsed;
     const result = await mesh.converged({ timeoutMs: 60_000 });
-    expect(result.converged, JSON.stringify(result.snapshot).slice(0, 400)).toBe(
+    expect(result.converged, whyNot(result).slice(0, 400)).toBe(
       true,
     );
     expect(result.snapshot['B'].length).toBe(400);

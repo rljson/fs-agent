@@ -40,7 +40,7 @@ import { readdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
+import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 const root = (name: string) => join(process.cwd(), `test-temp-wiped-${name}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -263,7 +263,7 @@ describe('a node comes back empty, or holding an older copy', () => {
       timeoutMs: 90_000,
       stableMs: 6_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
 
     // Nobody lost the week's work.
     for (const name of ['A', 'B', 'OLD']) {
@@ -339,7 +339,7 @@ describe('a node comes back empty, or holding an older copy', () => {
       timeoutMs: 60_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     for (const name of ['A', 'B']) {
       expect(
         result.snapshot[name].length,

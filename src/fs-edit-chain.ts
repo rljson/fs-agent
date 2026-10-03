@@ -153,6 +153,9 @@ export const createFsChainTables = async (
  */
 export class FsEditChain {
   private _head: string | undefined;
+
+  /** The last own-lineage walk, keyed by the head it was computed for. */
+  private _lineageCache: { head: string; refs: ReadonlySet<string> } | undefined;
   private _ready = false;
 
   constructor(
@@ -236,6 +239,24 @@ export class FsEditChain {
       } as EditHistory),
       'EditHistory',
     );
+
+    // EXTENDED, not invalidated, for the ordinary case of appending onto our
+    // own head: the ancestors of the new entry are exactly the cached ones
+    // plus itself. Without this, every push would cost a fresh walk of the
+    // node's whole history on the next announcement.
+    //
+    // Only for `previous` being exactly our cached head. Any other shape — a
+    // merge, an entry parented on an older head — may reach a strict subset of
+    // what is cached, and a stop set that is too LARGE stops the walk early.
+    if (
+      this._lineageCache !== undefined &&
+      previous.length === 1 &&
+      previous[0] === this._lineageCache.head
+    ) {
+      const refs = new Set(this._lineageCache.refs);
+      refs.add(head);
+      this._lineageCache = { head, refs };
+    }
 
     this._head = head;
     return { head, timeId: stamp, treeRef: opts.treeRef, previous, changed, removed };
@@ -401,6 +422,32 @@ export class FsEditChain {
   }
 
   /**
+   * Every entry this node's own head descends from, itself included.
+   *
+   * Cached on the head it was computed for. Announcements arrive in bursts and
+   * this node's head changes only when it records an entry, so the walk is
+   * done once per state rather than once per announcement.
+   * @param ourHead - This node's head, or `undefined` when it has none.
+   * @param maxWalk - Give up past this many entries.
+   * @returns The refs reached, or `undefined` when the walk could not be
+   *   trusted — an unreadable entry means the stop set is unknown, not empty.
+   */
+  private async _ourLineage(
+    ourHead: string | undefined,
+    maxWalk: number,
+  ): Promise<ReadonlySet<string> | undefined> {
+    if (ourHead === undefined) return new Set<string>();
+    if (this._lineageCache?.head === ourHead) return this._lineageCache.refs;
+    const walk = await this._ancestorsOf(ourHead, maxWalk);
+    if (walk.holed) return undefined;
+    // A BOUNDED walk is cached and used as it is. It means "everything asked
+    // for was readable and there is more history than the budget", so what it
+    // found really is our lineage — just not all of it. See `classify`.
+    this._lineageCache = { head: ourHead, refs: walk.refs };
+    return walk.refs;
+  }
+
+  /**
    * The NET removals between a peer's head and a state this node knows.
    *
    * **Why a walk is needed at all, and it cost a red run to see.** A removal is
@@ -427,20 +474,56 @@ export class FsEditChain {
    * did collect. `@rljson/mongo-agent` states it as: *"a caller must not latch
    * the head; ancestors beyond the missing row would otherwise be lost
    * forever"*.
+   * **Where the walk stops is THIS NODE'S OWN LINEAGE, asked of the chain.**
+   * It used to be a set of content refs: the current one, the last applied one,
+   * and a thousand remembered past states. That set approximated "everywhere I
+   * have been" — capped, so a long-lived node forgot its oldest states, and
+   * matched BY CONTENT, so an entry on a lineage this node never travelled
+   * stopped the walk whenever it happened to produce bytes this node also
+   * holds. Identical content across nodes was rare while mtime was in the
+   * identity; now it is the norm.
+   *
+   * Neither is a measured data loss — stopping early collects FEWER removals,
+   * which is the safe direction, and content equality does mean the folder was
+   * in that state. It is a heuristic standing in for a question the chain can
+   * answer exactly, which is the whole reason the chain exists.
    * @param head - The peer's head.
-   * @param stopAt - Tree refs this node already knows. The walk stops at the
-   *   first entry producing one of them, exclusive.
+   * @param ourHead - This node's own head, or `undefined` when it has none —
+   *   a node with no history of its own recognises no state, so nothing stops
+   *   the walk short of `maxWalk`.
    * @param maxWalk - Give up past this many entries. A walk this deep is a
    *   cold replay rather than a catch-up, and left unbounded it pins a core on
    *   a long chain.
-   * @returns The net removals, the newest `timeId` seen, and whether the walk
-   *   resolved completely.
+   * **Both halves of the net delta are returned**, and the second one is not
+   * bookkeeping. A receiver holds a TOMBSTONE for every path it has deleted,
+   * including the ones a peer told it to delete, and that tombstone refuses
+   * the path if anyone writes it again. Only a peer that STATES it created
+   * the path may lift it — a tree merely containing the path states nothing,
+   * since every tree that predates the deletion contains it too. Measured: a
+   * file created, deleted and created again at the same path never reached the
+   * second node, in three runs of three, because nothing could clear the
+   * tombstone the node had set on its peer's authority.
+   * @returns The net removals, the net changes, the newest `timeId` seen, and
+   *   whether the walk resolved completely.
    */
   async collectRemovals(
     head: string,
-    stopAt: ReadonlySet<string>,
+    ourHead: string | undefined,
     maxWalk = DEFAULT_MAX_WALK,
-  ): Promise<{ removed: string[]; timeId?: string; complete: boolean }> {
+  ): Promise<{
+    removed: string[];
+    changed: string[];
+    timeId?: string;
+    complete: boolean;
+  }> {
+    const stopAt = await this._ourLineage(ourHead, maxWalk);
+    // Our OWN history unreadable is not a licence to walk past it: the entry
+    // that would have stopped the walk may be inside the unreadable part, and
+    // continuing collects removals from a lineage we may already have left
+    // behind. `complete: false` is the contract for "conclude nothing".
+    if (stopAt === undefined) {
+      return { removed: [], changed: [], complete: false };
+    }
     const walked: FsChainEntry[] = [];
     const seen = new Set<string>();
     let complete = true;
@@ -466,7 +549,7 @@ export class FsEditChain {
         // ancestry is already accounted for in how we got there, and its
         // `timeId` is not news — including it in the maximum below would let a
         // removal claim to be newer than it is and weaken the recency guard.
-        if (stopAt.has(entry.treeRef)) continue;
+        if (stopAt.has(ref)) continue;
         walked.push(entry);
         for (const previous of entry.previous) next.push(previous);
       }
@@ -477,10 +560,20 @@ export class FsEditChain {
     // reversed is the apply order.
     const order = [...walked].reverse();
     const removed = new Set<string>();
+    const changed = new Set<string>();
     for (const entry of order) {
-      for (const path of entry.removed) removed.add(path);
+      for (const path of entry.removed) {
+        removed.add(path);
+        // And the mirror: a removal cancels an earlier change, or a path
+        // written and then deleted inside the walked range would be reported
+        // as created.
+        changed.delete(path);
+      }
       // A re-add cancels an earlier removal, and only the order says so.
-      for (const path of entry.changed) removed.delete(path);
+      for (const path of entry.changed) {
+        changed.add(path);
+        removed.delete(path);
+      }
     }
 
     // The newest id among everything walked, which is what a receiver orders
@@ -492,7 +585,12 @@ export class FsEditChain {
       }
     }
 
-    return { removed: [...removed].sort(), timeId, complete };
+    return {
+      removed: [...removed].sort(),
+      changed: [...changed].sort(),
+      timeId,
+      complete,
+    };
   }
 
   /**

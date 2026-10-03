@@ -61,11 +61,23 @@
 //
 // THE ASSERTION
 // {@link FsMesh.converged} asserts on FOLDER CONTENTS AND STABILITY, never on
-// refs: every uncut node holds the same file set, and no node's file set has
-// moved for `stableMs`. The stability half is the point. The afternoon livelock
-// would have passed any single-sample ref check — both nodes reported a healthy
-// `push` at every instant — and fails this one, because the folder never stops
-// moving.
+// refs: every uncut node holds the same files WITH THE SAME CONTENT, and no
+// node's file set has moved for `stableMs`. The stability half is the point.
+// The afternoon livelock would have passed any single-sample ref check — both
+// nodes reported a healthy `push` at every instant — and fails this one,
+// because the folder never stops moving.
+//
+// **CONTENT, and for a long time this said so without doing it.** It compared
+// file NAMES, so a fleet where every node held a different version of the same
+// document reported itself converged. That is why nothing caught the fleet
+// freeze, where receivers sat six versions behind reporting health
+// (`fs-mesh-invariants.spec.ts`), and it is why the catch-up test asserted the
+// document's version separately and then failed on it once in a full run while
+// passing 8 of 8 alone — the assertion was sampled a moment after a
+// convergence that had never looked at it.
+//
+// Content is read only once the file lists already AGREE, so a churning fleet
+// still costs one `readdir` per node per poll.
 // .............................................................................
 
 import { BsMem } from '@rljson/bs';
@@ -230,12 +242,37 @@ export interface FsTimeline {
   readonly samples: ReadonlyArray<{ atMs: number; files: FsSnapshot }>;
 }
 
+/**
+ * Why a convergence wait ended, as a failure message.
+ *
+ * The snapshot alone is misleading now that content counts: every node holding
+ * `doc.txt` looks like agreement, and the thing worth reading is WHICH paths
+ * differ. A message that names `doc.txt` is the difference between a bug
+ * report and an investigation.
+ * @param result - What the wait concluded.
+ * @returns A one-line explanation for an assertion message.
+ */
+export const whyNot = (result: ConvergenceResult): string =>
+  result.differingPaths.length > 0
+    ? `same files, DIFFERENT CONTENT on ${result.differingPaths.join(', ')} ` +
+      `— ${JSON.stringify(result.snapshot)}`
+    : JSON.stringify(result.snapshot);
+
 /** What {@link FsMesh.converged} concluded. */
 export interface ConvergenceResult {
   /** Whether every uncut node agreed and stayed still. */
   converged: boolean;
   /** Each node's final file set, keyed by name. */
   snapshot: Record<string, string[]>;
+  /**
+   * Paths the uncut nodes hold with DIFFERING content, when that is why they
+   * did not converge.
+   *
+   * Empty when the file lists themselves disagree — then the snapshot already
+   * says it — and empty on success. A failure message that names `doc.txt` is
+   * the difference between a bug report and an investigation.
+   */
+  differingPaths: string[];
   /**
    * How many times a node's file set changed while waiting for stability.
    *
@@ -506,6 +543,28 @@ export const buildFsMesh = async (opts: {
     return out;
   };
 
+  /**
+   * Which paths the uncut nodes hold with differing content.
+   *
+   * Read from DISK, like everything else here, and only called once the file
+   * lists agree — so the cost lands on a fleet that is nearly there, never on
+   * one still churning.
+   * @returns The differing paths, sorted. Empty means the folders are equal.
+   */
+  const contentDisagreement = async (): Promise<string[]> => {
+    const live = nodes.filter((n) => !n.isCut);
+    if (live.length < 2) return [];
+    const [first, ...rest] = live;
+    const differing = new Set<string>();
+    for (const path of await first.files()) {
+      const mine = await first.read(path);
+      for (const other of rest) {
+        if ((await other.read(path)) !== mine) differing.add(path);
+      }
+    }
+    return [...differing].sort();
+  };
+
   const converged = async (o?: {
     stableMs?: number;
     timeoutMs?: number;
@@ -518,6 +577,7 @@ export const buildFsMesh = async (opts: {
     let churn = 0;
     let previous = await snapshot();
     let agreedSince: number | null = null;
+    let differingPaths: string[] = [];
 
     for (;;) {
       await sleep(100);
@@ -533,9 +593,15 @@ export const buildFsMesh = async (opts: {
 
       // Do the nodes that can talk hold the same thing?
       const live = nodes.filter((n) => !n.isCut).map((n) => current[n.name]);
-      const agree =
+      const namesAgree =
         live.length > 0 &&
         live.every((set) => JSON.stringify(set) === JSON.stringify(live[0]));
+
+      // THE SAME FILES IS NOT THE SAME FOLDER. `doc.txt` is present on every
+      // node whatever version it holds, which is exactly how a fleet six
+      // versions behind reported itself healthy.
+      differingPaths = namesAgree ? await contentDisagreement() : [];
+      const agree = namesAgree && differingPaths.length === 0;
 
       if (agree) {
         agreedSince ??= Date.now();
@@ -543,6 +609,7 @@ export const buildFsMesh = async (opts: {
           return {
             converged: true,
             snapshot: current,
+            differingPaths: [],
             churn,
             elapsedMs: Date.now() - started,
           };
@@ -555,6 +622,7 @@ export const buildFsMesh = async (opts: {
         return {
           converged: false,
           snapshot: current,
+          differingPaths,
           churn,
           elapsedMs: Date.now() - started,
         };

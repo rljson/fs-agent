@@ -26,7 +26,7 @@ import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CONFLICT_LOG_FILE } from '../../src/fs-agent.ts';
-import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
+import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 describe('field defects, reduced off-lab', () => {
   let mesh: FsMesh | undefined;
@@ -98,7 +98,7 @@ describe('field defects, reduced off-lab', () => {
       timeoutMs: 90_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     for (const name of ['A', 'B', 'C', 'D']) {
       expect(result.snapshot[name], `node ${name}`).toEqual(['keeper.txt']);
     }
@@ -148,7 +148,7 @@ describe('field defects, reduced off-lab', () => {
       timeoutMs: 60_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     const expected = ['seed.txt', 'sim-a.txt', 'sim-b.txt'];
     // The register's assertion order matters: the one that fails is the writer
     // losing its OWN file, which is the third line of its script.
@@ -187,7 +187,7 @@ describe('field defects, reduced off-lab', () => {
       timeoutMs: 60_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     const expected = ['seed.txt', 'three-a.txt', 'three-b.txt', 'three-c.txt'];
     for (const node of ['A', 'B', 'C']) {
       expect(result.snapshot[node], `node ${node}`).toEqual(expected);
@@ -291,7 +291,7 @@ describe('field defects, reduced off-lab', () => {
       timeoutMs: 90_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
 
     // Stable file LISTS are not agreement — the lab's four nodes all listed
     // the same one file and held three different versions of it.
@@ -364,7 +364,7 @@ describe('field defects, reduced off-lab', () => {
       timeoutMs: 120_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
 
     // The register's own three assertions, in its order.
     for (const name of names) {
@@ -578,7 +578,7 @@ describe('field defects, reduced off-lab', () => {
       timeoutMs: 120_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     for (const name of ['A', 'B', 'C']) {
       expect(result.snapshot[name], `residue on ${name}`).toEqual(['seed.txt']);
     }
@@ -630,7 +630,7 @@ describe('field defects, reduced off-lab', () => {
       timeoutMs: 90_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
 
     // WHETHER there is a conflict at all is not something this test may
     // assume, and assuming it made the test flaky — 1 run in 8.
@@ -658,7 +658,7 @@ describe('field defects, reduced off-lab', () => {
     }
 
     // 1. A fork happened, so both nodes hold the live file and the copy.
-    expect(files.length, JSON.stringify(result.snapshot)).toBe(2);
+    expect(files.length, whyNot(result)).toBe(2);
     const copyName = files.find((f) => f !== 'shared.txt');
     expect(copyName, 'a conflict was reported but no copy was made')
       .toBeDefined();

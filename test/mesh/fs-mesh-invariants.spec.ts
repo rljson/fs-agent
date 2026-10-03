@@ -38,7 +38,12 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildFsMesh, type FsMesh, type FsMeshNode } from './fs-mesh.ts';
+import {
+  buildFsMesh,
+  whyNot,
+  type FsMesh,
+  type FsMeshNode,
+} from './fs-mesh.ts';
 
 const root = (name: string) => join(process.cwd(), `test-temp-inv-${name}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -133,7 +138,7 @@ describe('invariants over the route, not the destination', () => {
     }
 
     const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 5_000 });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
 
     for (const name of ['WRITER', 'B', 'C']) {
       const seen = seriesOf(mesh.node(name), 'doc.txt');

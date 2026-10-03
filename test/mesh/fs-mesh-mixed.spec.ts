@@ -32,7 +32,7 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
+import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 describe('a mixed-version fleet', () => {
   let mesh: FsMesh | undefined;
@@ -66,7 +66,7 @@ describe('a mixed-version fleet', () => {
     await mesh.node('C').write('from-old.txt', 'old');
 
     const result = await mesh.converged({ timeoutMs: 30_000 });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     const expected = ['from-new.txt', 'from-old.txt', 'seed.txt'];
     for (const node of ['A', 'B', 'C', 'D']) {
       expect(result.snapshot[node], `node ${node}`).toEqual(expected);
@@ -94,7 +94,7 @@ describe('a mixed-version fleet', () => {
 
     await mesh.node('A').write('a.txt', 'a');
     const result = await mesh.converged({ timeoutMs: 30_000 });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(result.snapshot['B']).toEqual(['a.txt', 'seed.txt']);
   }, 90_000);
 
@@ -118,7 +118,7 @@ describe('a mixed-version fleet', () => {
 
     await mesh.node('A').del('doomed.txt');
     const result = await mesh.converged({ timeoutMs: 30_000 });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     expect(result.snapshot['A']).toEqual(['seed.txt']);
     expect(result.snapshot['B']).toEqual(['seed.txt']);
   }, 90_000);

@@ -32,7 +32,7 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildFsMesh, type FsMesh } from './fs-mesh.ts';
+import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 
 describe('additive reconciliation', () => {
@@ -73,7 +73,7 @@ describe('additive reconciliation', () => {
     mesh.node('A').heal();
 
     const result = await mesh.converged({ timeoutMs: 60_000 });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     const expected = ['from-a.txt', 'from-b.txt', 'seed.txt'];
     expect(result.snapshot['A']).toEqual(expected);
     expect(result.snapshot['B']).toEqual(expected);
@@ -109,7 +109,7 @@ describe('additive reconciliation', () => {
       timeoutMs: 60_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     const expected = ['keeper.txt', 'meanwhile.txt'];
     expect(result.snapshot['A']).toEqual(expected);
     expect(result.snapshot['B']).toEqual(expected);
@@ -152,7 +152,7 @@ describe('additive reconciliation', () => {
       timeoutMs: 60_000,
       stableMs: 5_000,
     });
-    expect(result.converged, JSON.stringify(result.snapshot)).toBe(true);
+    expect(result.converged, whyNot(result)).toBe(true);
     const expected = ['from-a.txt', 'from-b.txt', 'seed.txt'];
     for (const node of ['A', 'B', 'C']) {
       expect(result.snapshot[node], `node ${node}`).toEqual(expected);

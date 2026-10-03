@@ -197,7 +197,6 @@ describe('scale and endurance', () => {
       atMs: number;
       heapMb: number;
       tombstones: number;
-      stateHistory: number;
       announced: number;
     };
     const samples: Sample[] = [];
@@ -235,7 +234,6 @@ describe('scale and endurance', () => {
           atMs: Date.now() - started,
           heapMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
           tombstones: inner(agent, '_pendingDeletes'),
-          stateHistory: inner(agent, '_stateHistory'),
           announced: inner(agent, '_announcedFiles'),
         });
       }
@@ -247,7 +245,7 @@ describe('scale and endurance', () => {
           .map(
             (s) =>
               `  ${String(s.atMs).padStart(7)} ms  heap ${s.heapMb} MB  ` +
-              `tombstones ${s.tombstones}  states ${s.stateHistory}  ` +
+              `tombstones ${s.tombstones}  ` +
               `announced ${s.announced}`,
           )
           .join('\n'),
@@ -264,7 +262,11 @@ describe('scale and endurance', () => {
     // The caps this agent documents, asserted rather than trusted. These are
     // the "zwei unbegrenzte Listen" the register asks to be bounded — on the
     // file side they are.
-    expect(last.stateHistory).toBeLessThanOrEqual(1_000);
+    // `_announcedHeads` is NOT asserted here. This run is single-node, so it
+    // receives no announcements and the map stays empty — a cap asserted
+    // against a structure nothing filled, which is the very mistake the
+    // `tombstones > 0` check above exists to prevent. Its own bound is
+    // measured in `fs-agent-announced-heads.spec.ts`.
     expect(last.tombstones).toBeLessThanOrEqual(10_000);
     // And the folder is empty at the end, so nothing accumulated on disk
     // either.
