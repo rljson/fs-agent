@@ -12,6 +12,11 @@ export {
   type TimeoutConfig,
 } from './fs-agent.ts';
 export {
+  compileIgnore,
+  globToRegExp,
+  type IgnoreMatcher,
+} from './fs-ignore.ts';
+export {
   antiEntropyDecision,
   DEFAULT_ANTI_ENTROPY,
   FsAntiEntropy,

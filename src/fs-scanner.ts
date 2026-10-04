@@ -7,6 +7,7 @@
 import { Bs, BsMem } from '@rljson/bs';
 
 import { storeFileAsBlob } from './blob-io.ts';
+import { compileIgnore, type IgnoreMatcher } from './fs-ignore.ts';
 import { hip } from '@rljson/hash';
 import { Json } from '@rljson/json';
 import { Tree, TreeRef } from '@rljson/rljson';
@@ -209,6 +210,15 @@ export class FsScanner {
   private _watcher: FSWatcher | null = null;
   private _changeCallbacks: FsChangeCallback[] = [];
   private _options: FsScanOptions;
+  /**
+   * The ignore list, compiled once.
+   *
+   * Compiled rather than re-read per entry because a scan of the customer's
+   * catalogue asks this question once per file, and a glob is a regular
+   * expression that should be built once. `fs-ignore.ts` carries the
+   * compatibility rule that keeps every prefix pattern working.
+   */
+  private readonly _ignoreMatcher: IgnoreMatcher;
   private _bs: Bs;
   private _paused: boolean = false;
   private _missedChangesDuringPause: boolean = false;
@@ -287,6 +297,7 @@ export class FsScanner {
       settleMs: options.settleMs ?? DEFAULT_SETTLE_MS,
       settleMinBytes: options.settleMinBytes ?? DEFAULT_SETTLE_MIN_BYTES,
     };
+    this._ignoreMatcher = compileIgnore(this._options.ignore);
     this._bs = options.bs || new BsMem();
     this._scanCachePath = options.scanCachePath;
   }
@@ -469,13 +480,17 @@ export class FsScanner {
     const childRefs: TreeRef[] = [];
 
     for (const entry of entries) {
-      if (this._shouldIgnore(entry.name)) {
-        continue;
-      }
-
       const childPath = join(absolutePath, entry.name);
       const childRelPath =
         relativePath === '.' ? entry.name : `${relativePath}/${entry.name}`;
+
+      // THE RELATIVE PATH, not the bare name. A pattern with a `/` in it —
+      // `logs/*.txt`, `build/`, `**/tmp` — can never match a basename, so
+      // testing `entry.name` here is why a path pattern had no effect even
+      // after the matcher understood one.
+      if (this._shouldIgnorePath(childRelPath, entry.isDirectory())) {
+        continue;
+      }
 
       if (entry.isSymbolicLink() && !this._options.followSymlinks) {
         continue;
@@ -899,7 +914,7 @@ export class FsScanner {
    *
    * `fs.watch` in recursive mode reports a path RELATIVE TO THE ROOT
    * (`sub/dir/.fsagent-tmp-abc`), while the ignore patterns are basenames.
-   * {@link _shouldIgnore} tests `startsWith`, so a nested match never fired:
+   * The matcher tested a basename only, so a nested match never fired:
    * every atomic write the agent itself makes during a restore came back as a
    * change event, each event triggered a scan, and the debounce that batches a
    * push was reset before it could fire.
@@ -912,26 +927,16 @@ export class FsScanner {
    * Every segment is tested, because the pattern may match a directory as
    * easily as a file.
    * @param relativePath - Path as the watcher reports it.
-   * @returns True when any segment matches an ignore pattern.
+   * @param isDirectory - Whether the path is a directory, when the caller
+   *   knows. A directory-only pattern (`build/`) needs it; the watcher cannot
+   *   say, and not knowing never widens what is ignored.
+   * @returns True when the ignore list covers this path.
    */
-  private _shouldIgnorePath(relativePath: string): boolean {
-    for (const segment of relativePath.split(/[\\/]/)) {
-      if (segment && this._shouldIgnore(segment)) return true;
-    }
-    return false;
-  }
-
-  private _shouldIgnore(name: string): boolean {
-    /* v8 ignore next -- @preserve */
-    if (!this._options.ignore) {
-      return false;
-    }
-    for (const pattern of this._options.ignore) {
-      if (name === pattern || name.startsWith(pattern)) {
-        return true;
-      }
-    }
-    return false;
+  private _shouldIgnorePath(
+    relativePath: string,
+    isDirectory?: boolean,
+  ): boolean {
+    return this._ignoreMatcher.ignores(relativePath, isDirectory);
   }
 
   async watch(): Promise<void> {
