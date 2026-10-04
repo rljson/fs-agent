@@ -5,30 +5,30 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@rljson/bs': 0.0.27
-  '@rljson/db': 0.0.49
+  '@rljson/bs': 0.0.29
+  '@rljson/db': 0.0.51
   '@rljson/hash': 0.0.19
-  '@rljson/io': 0.0.81
+  '@rljson/io': 0.0.83
   '@rljson/json': 0.0.23
   '@rljson/rljson': 0.0.83
-  '@rljson/server': 0.0.72
+  '@rljson/server': 0.0.73
 
 importers:
 
   .:
     dependencies:
       '@rljson/bs':
-        specifier: 0.0.27
-        version: 0.0.27
+        specifier: 0.0.29
+        version: 0.0.29
       '@rljson/db':
-        specifier: 0.0.49
-        version: 0.0.49
+        specifier: 0.0.51
+        version: 0.0.51
       '@rljson/hash':
         specifier: 0.0.19
         version: 0.0.19
       '@rljson/io':
-        specifier: 0.0.81
-        version: 0.0.81
+        specifier: 0.0.83
+        version: 0.0.83
       '@rljson/json':
         specifier: 0.0.23
         version: 0.0.23
@@ -43,8 +43,8 @@ importers:
         version: 4.8.3
     devDependencies:
       '@rljson/server':
-        specifier: 0.0.72
-        version: 0.0.72
+        specifier: 0.0.73
+        version: 0.0.73
       '@types/node':
         specifier: ^25.3.1
         version: 25.3.1
@@ -395,20 +395,20 @@ packages:
   '@microsoft/tsdoc@0.16.0':
     resolution: {integrity: sha512-xgAyonlVVS+q7Vc7qLW0UrJU7rSFcETRWsqdXZtjzRU8dF+6CkozTK4V4y1LwOX7j8r/vHphjDeMeGI4tNGeGA==}
 
-  '@rljson/bs@0.0.27':
-    resolution: {integrity: sha512-qM01n2CaKI4i0tGHYV8mPcuovo2yz/OqYhnZvQcxLwFytsvUPf+fIa32GSMDPPTETKQ70GExNUFSneWyMdpNYw==}
+  '@rljson/bs@0.0.29':
+    resolution: {integrity: sha512-DXVqDc9oeyxVF75XXVuRxHi9KLFIQbw/zVQNHRYSPAvu2gWVFfzodU9CQxbgYdmMJBR9efWMoNCfvE7lB2DMew==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/db@0.0.49':
-    resolution: {integrity: sha512-y7MxmBjX3b5NKNM70iV5+LV0VFndlj4fz9tD7oT7sYO9vL0QgGITQGLHTB2y7ouuJnBCu/dc4TRDOVwT3vQ+qw==}
+  '@rljson/db@0.0.51':
+    resolution: {integrity: sha512-Niim8VeW5j0sSsdUKzPVEt08NbmqCqeCrxGiq/qStwY4b6a3MgmT4v9GklDFvIv+FQ8D/oxbjRzMHOnjK2MVpg==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/hash@0.0.19':
     resolution: {integrity: sha512-1bBHWbzzaOE3ba2niyvmu4d9VYv5atLzzHDI2ka3AlHLyBDD8Q9qI/HCjimULJlprIGVeN4+jN8sth4CdnGxOQ==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/io@0.0.81':
-    resolution: {integrity: sha512-Cat2Gdcug4773ihQj7DS/DbtW1qsKhVGssK8sgsXbY3MZL3PlHRB5r8/6KzkN07eg/AbIjY8a12N5Eu4ssEqFg==}
+  '@rljson/io@0.0.83':
+    resolution: {integrity: sha512-qeonuNY/zZil8Z1VtFgZI8nioiyczW3mnF3GAOaVi5nMn1jMzXjlYrI6cRp5pQCL0c28zutUS+ChfB7+FXYQsQ==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/is-ready@0.0.19':
@@ -427,8 +427,8 @@ packages:
     resolution: {integrity: sha512-/JVC8yEtbWP/lnQbmYTlEAqGBJN/6LoKJSYoxyn8IUTouBIylPNhBmSy9kxYnRlCfgL7pkXlRL/DXQn8jzTOQw==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/server@0.0.72':
-    resolution: {integrity: sha512-X2BqMc72Ml4iefw4NyN2yYaQabUdk2q6BevRP18oiT/0hi8eZng+G9ORWtm1SXooNkL3m+5vz6W3Ahm88j7L4w==}
+  '@rljson/server@0.0.73':
+    resolution: {integrity: sha512-phsr2iiyGtffn4pVWHjfrYd9osc/Ae5ChcMckTUHnZGVdaGIcQc1gcwaXywMEZ4KlJDX492nLM8hw+6dnNRR3g==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/validate@0.0.12':
@@ -2076,16 +2076,16 @@ snapshots:
 
   '@microsoft/tsdoc@0.16.0': {}
 
-  '@rljson/bs@0.0.27':
+  '@rljson/bs@0.0.29':
     dependencies:
       '@rljson/hash': 0.0.19
       '@rljson/json': 0.0.23
       '@rljson/rljson': 0.0.83
 
-  '@rljson/db@0.0.49':
+  '@rljson/db@0.0.51':
     dependencies:
       '@rljson/hash': 0.0.19
-      '@rljson/io': 0.0.81
+      '@rljson/io': 0.0.83
       '@rljson/json': 0.0.23
       '@rljson/rljson': 0.0.83
       '@rljson/validate': 0.0.12
@@ -2096,7 +2096,7 @@ snapshots:
     dependencies:
       '@rljson/json': 0.0.23
 
-  '@rljson/io@0.0.81':
+  '@rljson/io@0.0.83':
     dependencies:
       '@rljson/hash': 0.0.19
       '@rljson/is-ready': 0.0.19
@@ -2116,12 +2116,12 @@ snapshots:
       '@rljson/json': 0.0.23
       nanoid: 6.0.1
 
-  '@rljson/server@0.0.72':
+  '@rljson/server@0.0.73':
     dependencies:
-      '@rljson/bs': 0.0.27
-      '@rljson/db': 0.0.49
+      '@rljson/bs': 0.0.29
+      '@rljson/db': 0.0.51
       '@rljson/hash': 0.0.19
-      '@rljson/io': 0.0.81
+      '@rljson/io': 0.0.83
       '@rljson/json': 0.0.23
       '@rljson/network': 0.0.23
       '@rljson/rljson': 0.0.83
