@@ -513,6 +513,10 @@ export const buildFsMesh = async (opts: {
     // SHARED `BsMem` would make every blob available everywhere for free and
     // hide the half of a rejoin that can actually fail.
     const agentOptions = {
+      // Which node said it. Four agents in one process used to produce three
+      // identical `applied 3 peer deletions: …` lines with nothing saying who,
+      // and a convergence investigation stopped dead there.
+      logName: name,
       // Production sets this, and it is load-bearing: with it off the ancestry
       // DAG, the inline three-way merge and half the prune rule never run, so
       // a mesh without it tests a code path no client ships.

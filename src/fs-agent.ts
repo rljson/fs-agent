@@ -212,6 +212,21 @@ export interface FsAgentOptions {
    * `PLAN-fs-edit-chain.md`.
    */
   joinWaitMs?: number;
+
+  /**
+   * A short name for this agent, shown in every line it logs.
+   *
+   * **Because a log without it cannot be read when more than one agent runs.**
+   * Four nodes in one process produced three identical
+   * `applied 3 peer deletions: …` lines with nothing saying who, and a
+   * convergence investigation stopped there: the three nodes that applied a
+   * removal and the one that stayed silent were indistinguishable. The One
+   * Client has the same problem for a different reason — several routes, one
+   * console.
+   *
+   * Omitted, every line reads `[FsAgent]` exactly as before.
+   */
+  logName?: string;
 }
 
 /** Restore options */
@@ -694,6 +709,14 @@ export interface FsTreeDelta {
 }
 
 export class FsAgent {
+  /**
+   * The prefix on every line this agent logs — see {@link FsAgentOptions.logName}.
+   *
+   * `[FsAgent]` when unnamed, so an unnamed agent's output is byte-identical
+   * to what it was before this existed.
+   */
+  private readonly _tag: string;
+
   private _scanner: FsScanner;
   private _adapter: FsBlobAdapter;
   private _rootPath: string;
@@ -1079,6 +1102,10 @@ export class FsAgent {
       options.bucketSync ?? !(options.announceTreeRef ?? false);
     this._antiEntropyOptions = options.antiEntropy;
     this._joinWaitMs = options.joinWaitMs ?? DEFAULT_JOIN_WAIT_MS;
+    this._tag =
+      options.logName === undefined
+        ? '[FsAgent]'
+        : `[FsAgent ${options.logName}]`;
     this._scanner = new FsScanner(rootPath, {
       ...options,
       ignore: [
@@ -1201,7 +1228,7 @@ export class FsAgent {
       const oldest = this._pendingDeletes.values().next().value as string;
       this._pendingDeletes.delete(oldest);
       console.warn(
-        `[FsAgent] tombstone log full at ${TOMBSTONE_LOG_MAX} — forgetting ` +
+        `${this._tag} tombstone log full at ${TOMBSTONE_LOG_MAX} — forgetting ` +
           `the deletion of ${oldest}. A peer that never saw it can now put ` +
           `it back.`,
       );
@@ -1315,7 +1342,7 @@ export class FsAgent {
     }
     for (const report of reports) {
       console.warn(
-        `[FsAgent] CONFLICT on "${report.path}": kept both — the other ` +
+        `${this._tag} CONFLICT on "${report.path}": kept both — the other ` +
           `version is at "${report.copyPath}"`,
       );
     }
@@ -1710,7 +1737,7 @@ export class FsAgent {
       }
       if (moved > 0) {
         console.log(
-          `[FsAgent] ${moved} file(s) moved rather than deleted — not ` +
+          `${this._tag} ${moved} file(s) moved rather than deleted — not ` +
             `counted against the mass-delete guard`,
         );
       }
@@ -1722,7 +1749,7 @@ export class FsAgent {
         // Loud, because the alternative to noticing this is discovering it
         // from a user whose folder emptied.
         console.error(
-          `[FsAgent] MASS DELETE REFUSED on ${target}: the incoming tree ` +
+          `${this._tag} MASS DELETE REFUSED on ${target}: the incoming tree ` +
             `would remove ${wouldPrune} of ${preRestore.size} files ` +
             `(incoming tree has ${expectedFiles.size}). Nothing was deleted. ` +
             `If this deletion is real, it has to be applied deliberately.`,
@@ -1762,7 +1789,7 @@ export class FsAgent {
     // absence.
     if (this._restoreSkipped > 0 || this._restorePruned > 0) {
       console.log(
-        `[FsAgent] restore: wrote ${this._restoreWritten}, left ` +
+        `${this._tag} restore: wrote ${this._restoreWritten}, left ` +
           `${this._restoreSkipped} already-correct file` +
           `${this._restoreSkipped === 1 ? '' : 's'} untouched` +
           (this._restorePruned > 0 ? `, DELETED ${this._restorePruned}` : '') +
@@ -1866,7 +1893,7 @@ export class FsAgent {
       // For files, fetch content using blobId from Bs
       if (!FsAgent._isInsideRoot(targetPath, meta.relativePath)) {
         console.error(
-          `[FsAgent] REFUSED a tree path that leaves the sync folder: ` +
+          `${this._tag} REFUSED a tree path that leaves the sync folder: ` +
             `"${meta.relativePath}". Nothing was written. This is a tree ` +
             `that should not exist; the rest of it is still applied.`,
         );
@@ -1947,7 +1974,7 @@ export class FsAgent {
           fileStream = await this._bs.getBlobStream(meta.blobId);
         } catch (error) {
           console.warn(
-            `[FsAgent] cannot fetch blob for "${meta.relativePath}" ` +
+            `${this._tag} cannot fetch blob for "${meta.relativePath}" ` +
               `(blobId: ${meta.blobId}): ` +
               `${error instanceof Error ? error.message : String(error)} — ` +
               `skipping this file and applying the rest of the tree.`,
@@ -1958,7 +1985,7 @@ export class FsAgent {
 
         if (!fileStream) {
           console.warn(
-            `[FsAgent] missing blob content for "${meta.relativePath}" ` +
+            `${this._tag} missing blob content for "${meta.relativePath}" ` +
               `(blobId: ${meta.blobId}) — skipping this file and applying the ` +
               `rest of the tree.`,
           );
@@ -2037,7 +2064,7 @@ export class FsAgent {
           // different problem with a different person to talk to.
           if (FsAgent._isBlobReadError(error)) {
             console.warn(
-              `[FsAgent] blob transfer for "${meta.relativePath}" broke off ` +
+              `${this._tag} blob transfer for "${meta.relativePath}" broke off ` +
                 `(blobId: ${meta.blobId}): ` +
                 `${error instanceof Error ? error.message : String(error)} — ` +
                 `skipping this file and applying the rest of the tree.`,
@@ -2069,7 +2096,7 @@ export class FsAgent {
           // restore stops.
           if ((error as NodeJS.ErrnoException)?.code === 'ENOSPC') {
             console.error(
-              `[FsAgent] NO SPACE LEFT on the volume holding ${this._rootPath}` +
+              `${this._tag} NO SPACE LEFT on the volume holding ${this._rootPath}` +
                 ` — "${meta.relativePath}" could not be written. Sync is ` +
                 `stopped for this folder until space is freed.`,
             );
@@ -2078,7 +2105,7 @@ export class FsAgent {
           }
           if (FsAgent._isImpossiblePath(error)) {
             console.warn(
-              `[FsAgent] restore: "${meta.relativePath}" cannot exist on this ` +
+              `${this._tag} restore: "${meta.relativePath}" cannot exist on this ` +
                 `filesystem (${(error as NodeJS.ErrnoException).code}) — ` +
                 `skipped, and the rest of the tree applied.`,
             );
@@ -2087,7 +2114,7 @@ export class FsAgent {
           }
           if (!FsAgent._isLocked(error)) throw error;
           console.warn(
-            `[FsAgent] restore: "${meta.relativePath}" is held open by another ` +
+            `${this._tag} restore: "${meta.relativePath}" is held open by another ` +
               `process (${(error as NodeJS.ErrnoException).code}) — skipped, ` +
               `will retry`,
           );
@@ -2098,7 +2125,7 @@ export class FsAgent {
       // For directories, create directory and recursively restore children
       if (!FsAgent._isInsideRoot(targetPath, meta.relativePath)) {
         console.error(
-          `[FsAgent] REFUSED a tree directory that leaves the sync folder: ` +
+          `${this._tag} REFUSED a tree directory that leaves the sync folder: ` +
             `"${meta.relativePath}". Nothing was created.`,
         );
         this._writeSyncError(
@@ -2256,7 +2283,7 @@ export class FsAgent {
     const same = here.ino === there.ino && here.dev === there.dev;
     if (same) {
       console.warn(
-        `[FsAgent] restore: kept "${fullPath}" — the tree spells it ` +
+        `${this._tag} restore: kept "${fullPath}" — the tree spells it ` +
           `"${expected}" and this filesystem treats them as one file`,
       );
     }
@@ -2274,7 +2301,7 @@ export class FsAgent {
     await rm(path, { recursive: true, force: true });
     this._restoreRetyped++;
     console.warn(
-      `[FsAgent] restore: "${path}" was a ${isDir ? 'directory' : 'file'} ` +
+      `${this._tag} restore: "${path}" was a ${isDir ? 'directory' : 'file'} ` +
         `and the tree says ${want} — replacing it`,
     );
     return true;
@@ -2548,7 +2575,7 @@ export class FsAgent {
               const errMsg =
                 error instanceof Error ? error.message : String(error);
               console.warn(
-                `[FsAgent] _fetchTreeRecursively: db.get failed for ` +
+                `${this._tag} _fetchTreeRecursively: db.get failed for ` +
                   `hash=${hash.slice(0, 8)}…: ${errMsg}`,
               );
               this._writeSyncError(
@@ -2808,7 +2835,7 @@ export class FsAgent {
       if (persisted !== undefined) {
         this._currentRef = persisted;
         console.log(
-          `[FsAgent] resuming from recorded ref ${persisted.slice(0, 8)}… — ` +
+          `${this._tag} resuming from recorded ref ${persisted.slice(0, 8)}… — ` +
             `this folder can declare its ancestry`,
         );
         // AND WHAT THAT REF CONTAINED, which is the half that was missing.
@@ -2836,7 +2863,7 @@ export class FsAgent {
           this._announcedContent = this._getFileContentMap(wasAt);
           this._hasAnnounced = true;
           console.log(
-            `[FsAgent] recovered ${this._announcedContent.size} known path(s) ` +
+            `${this._tag} recovered ${this._announcedContent.size} known path(s) ` +
               `from that state — changes made while stopped can be stated`,
           );
         }
@@ -2959,7 +2986,7 @@ export class FsAgent {
 
     if (isSilentJoiner) {
       console.warn(
-        `[FsAgent] ${this._rootPath} is empty and has no remembered state — ` +
+        `${this._tag} ${this._rootPath} is empty and has no remembered state — ` +
           `joining quietly rather than announcing emptiness.`,
       );
       this._currentRef = initialRef;
@@ -3176,7 +3203,7 @@ export class FsAgent {
               `syncToDb → ancestryPrevious(${treeKey})`,
             ).catch((err) => {
               console.warn(
-                `[FsAgent] ancestry lookup for this push did not finish — ` +
+                `${this._tag} ancestry lookup for this push did not finish — ` +
                   `announcing without db-level predecessors: ${String(err)}`,
               );
               this._writeSyncError('syncToDb/ancestryPrevious', err);
@@ -3268,7 +3295,7 @@ export class FsAgent {
               this._joinPending === undefined
             ) {
               console.warn(
-                `[FsAgent] ${this._rootPath} is empty and its history holds ` +
+                `${this._tag} ${this._rootPath} is empty and its history holds ` +
                   `${wasHolding} file(s) — treating this as a LOSS, not a ` +
                   `deletion, and re-joining as a new machine.`,
               );
@@ -3347,7 +3374,7 @@ export class FsAgent {
             // sender's log said which parent it had used.
             if (ref) {
               console.log(
-                `[FsAgent] pushing ref=${ref.slice(0, 8)}… ` +
+                `${this._tag} pushing ref=${ref.slice(0, 8)}… ` +
                   `parent=${parentRef?.slice(0, 8) ?? 'none'} ` +
                   `files=${this._getFileContentMap(tree).size}`,
               );
@@ -3362,7 +3389,7 @@ export class FsAgent {
           } catch (err) {
             /* v8 ignore start -- @preserve */
             // Don't re-throw — one sync failure must not crash the watcher
-            console.error('[FsAgent] syncToDb failed:', err);
+            console.error(`${this._tag} syncToDb failed:`, err);
             this._writeSyncError('syncToDb', err);
           }
           /* v8 ignore stop -- @preserve */
@@ -3559,6 +3586,35 @@ export class FsAgent {
     // that legitimately authored a path it then kept through a merge still
     // authored it, and dropping that would lose its work in the other
     // direction.
+    this._dontClaimUnchangedPaths(beforeMerge, afterMerge);
+  }
+
+  /**
+   * Stops a merge from making this node look like the author of what it kept.
+   *
+   * A merge that resolves `doc.txt` by keeping this side's existing bytes has
+   * not EDITED `doc.txt`. But the next push computes its delta against what
+   * this node last announced, and after a merge that is some other state — so
+   * the diff reports the path as changed and the entry claims it. The claim is
+   * then the newest edit of that path in the whole fleet, and it carries the
+   * OLDER content.
+   *
+   * Measured on *every node ends on the last save*, with the per-path verdict
+   * already in place and working: the side holding v5 had a LATER edit of
+   * `doc.txt` (…253668) than the writer's v8 (…225297), so the per-path
+   * question answered truthfully and still chose v5. The question was right;
+   * one of its two inputs was a lie.
+   *
+   * The CLAIMS are not touched. A node that legitimately authored a path and
+   * then kept it through a merge still authored it, and dropping that would
+   * lose its work in the other direction.
+   * @param beforeMerge - This node's tree before the merge.
+   * @param afterMerge - Its tree after the merge materialised.
+   */
+  private _dontClaimUnchangedPaths(
+    beforeMerge: FsTree,
+    afterMerge: FsTree,
+  ): void {
     const wasOnDisk = this._getFileContentMap(beforeMerge);
     const nowOnDisk = this._getFileContentMap(afterMerge);
     let untouched = 0;
@@ -3573,7 +3629,7 @@ export class FsAgent {
       // through. It is logged because "who claimed this path" is the question
       // a rollback in the field turns into, and this is the answer.
       console.log(
-        `[FsAgent] merge left ${untouched} path(s) byte-for-byte unchanged — ` +
+        `${this._tag} merge left ${untouched} path(s) byte-for-byte unchanged — ` +
           `not claiming them as this node's edits`,
       );
     }
@@ -3703,14 +3759,14 @@ export class FsAgent {
     this._lastRefusalAnswerMs = now;
 
     console.warn(
-      `[FsAgent] refused an incoming tree — re-announcing ${ref.slice(0, 8)}… ` +
+      `${this._tag} refused an incoming tree — re-announcing ${ref.slice(0, 8)}… ` +
         `so the sender can catch up.`,
     );
     try {
       await this._sendRef(connector, ref);
     } catch (err) {
       /* v8 ignore next -- @preserve a failed answer must not mask the refusal */
-      console.warn(`[FsAgent] re-announcement failed: ${String(err)}`);
+      console.warn(`${this._tag} re-announcement failed: ${String(err)}`);
     }
   }
 
@@ -3918,7 +3974,7 @@ export class FsAgent {
   ): void {
     this._joinPending = { db, treeKey };
     console.warn(
-      `[FsAgent] ${this._rootPath} ${why} — waiting up to ` +
+      `${this._tag} ${this._rootPath} ${why} — waiting up to ` +
         `${this._joinWaitMs} ms for the network's state before saying ` +
         `anything about its own.`,
     );
@@ -3929,7 +3985,7 @@ export class FsAgent {
       const entry = await this._chain.entry(head).catch(() => undefined);
       if (!entry || this._joinPending === undefined) return;
       console.warn(
-        `[FsAgent] asked for the network's state and found ` +
+        `${this._tag} asked for the network's state and found ` +
           `head=${head.slice(0, 8)}… — reconciling before saying anything`,
       );
       await this._reconcileJoin(db, treeKey, entry);
@@ -3949,7 +4005,7 @@ export class FsAgent {
       this._joinPending = undefined;
       this._stopAsking();
       console.warn(
-        `[FsAgent] no network state arrived in ${this._joinWaitMs} ms — ` +
+        `${this._tag} no network state arrived in ${this._joinWaitMs} ms — ` +
           `this folder is the origin of its own history.`,
       );
       void this._pushCurrentState(db, connector, treeKey);
@@ -3984,6 +4040,121 @@ export class FsAgent {
    * @param treeKey - The trees table key.
    * @param entry - The head this node is joining onto.
    */
+  /**
+   * Moves one file out of the way of the state this node is joining onto.
+   *
+   * A method rather than a closure inside the join so that the failure can be
+   * TESTED. A rename that cannot be performed — the source gone between the
+   * scan and the move, the destination occupied by a directory — leaves the
+   * file where it is, and the restore then overwrites it. That loses less than
+   * refusing to join, which is why it is recorded rather than thrown; and a
+   * path that is only ever recorded is a path that needs a test, because
+   * nothing else will ever tell anybody it stopped working.
+   * @param path - The file to move, relative to the root, `/`-separated.
+   * @param name - Where to move it, same form.
+   */
+  private async _setAside(path: string, name: string): Promise<void> {
+    const from = join(this._rootPath, ...path.split('/'));
+    const to = join(this._rootPath, ...name.split('/'));
+    await mkdir(dirname(to), { recursive: true });
+    await rename(from, to).catch((err) => {
+      this._writeSyncError(`join/setAside/${path}`, err);
+    });
+  }
+
+  /**
+   * Uses an unmarked tree ref to finish a join, rather than queueing it.
+   *
+   * A method rather than an inline handler so that both of its failures can be
+   * TESTED. Awaiting a query here is safe for this one case, because a pending
+   * join deliberately schedules nothing — the rule it would otherwise break,
+   * never await before scheduling an apply, exists to stop a late joiner's
+   * bootstrap being lost, and this IS the bootstrap being used.
+   *
+   * No entry for the ref means nothing to reconcile against — an older peer,
+   * or history that has not replicated yet — so the ordinary path applies it
+   * and the next head tries again. A failed lookup leaves the join pending for
+   * the next announcement to retry, which is why it is recorded rather than
+   * thrown.
+   * @param treeRef - The unmarked ref that arrived.
+   * @param pending - The join waiting for a state to reconcile against.
+   * @param schedule - Queues the ordinary debounced apply.
+   */
+  private async _joinOnUnmarkedRef(
+    treeRef: string,
+    pending: { db: Db; treeKey: string },
+    schedule: (ref: string) => void,
+  ): Promise<void> {
+    try {
+      const entry = await this._chain?.entryForTreeRef(treeRef);
+      if (!entry) {
+        schedule(treeRef);
+        return;
+      }
+      await this._reconcileJoin(pending.db, pending.treeKey, entry);
+    } catch (err) {
+      this._writeSyncError('join/lookup', err);
+    }
+  }
+
+  /**
+   * Where an announced state sits relative to this node, per the chain.
+   *
+   * A method rather than an inline block so the two ways the chain can fail
+   * here can be TESTED — both are `.catch`es, so nothing else would ever
+   * report them.
+   *
+   * `classify` compares chain HEADS and what arrived is a TREE ref. The head
+   * the ANNOUNCEMENT carried is the right one: it is what the sender said
+   * about itself. The lookup by tree ref is only the fallback, for a ref that
+   * came without one — the hub's own advertisements, an older peer — and it is
+   * ambiguous by nature, because a tree ref is a content hash and two nodes
+   * holding the same bytes produce the same one. Two freshly started nodes
+   * both have an entry for the EMPTY tree, so asking by hash there can return
+   * either node's.
+   *
+   * `incomplete` means no entry covers this state, which leaves the decision
+   * to the caller's own branches rather than guessing — and an unreadable
+   * chain has to give the same answer as a missing one, because in both cases
+   * the history says nothing.
+   * @param treeRef - The announced state.
+   * @returns The relation, or `incomplete` when the chain cannot say.
+   */
+  private async _classifyAnnouncedRef(
+    treeRef: string,
+  ): Promise<'behind' | 'ahead' | 'fork' | 'incomplete'> {
+    /* v8 ignore next -- @preserve the caller checks both before asking */
+    if (!this._chain || !this._chainHead) return 'incomplete';
+    const theirHead =
+      this._announcedHeads.get(treeRef) ??
+      (await this._chain.entryForTreeRef(treeRef).catch(() => undefined))?.head;
+    if (!theirHead) return 'incomplete';
+    return this._chain
+      .classify(this._chainHead.head, theirHead)
+      .catch(() => 'incomplete' as const);
+  }
+
+  /**
+   * Reconciles a join against the head that arrived, or records why it could not.
+   *
+   * A method rather than an inline `.catch` so the failure can be TESTED. A
+   * failed reconcile leaves the node SILENT rather than guessing — it has
+   * established nothing yet, and announcing a folder it has not judged against
+   * the history is how a stale copy gets published. The next head retries.
+   * @param pending - The join waiting for a state to reconcile against.
+   * @param entry - The chain entry that arrived.
+   */
+  private async _reconcileJoinOrRecord(
+    pending: { db: Db; treeKey: string },
+    entry: FsChainEntry,
+  ): Promise<void> {
+    try {
+      await this._reconcileJoin(pending.db, pending.treeKey, entry);
+    } catch (err) {
+      this._writeSyncError('join/reconcile', err);
+    }
+  }
+
   private async _joinReconcileBody(
     db: Db,
     treeKey: string,
@@ -4015,23 +4186,11 @@ export class FsAgent {
       ...this._getFileContentMap(folderTree).keys(),
       ...this._getFileContentMap(headTree).keys(),
     ]);
-    const setAside = async (path: string, name: string): Promise<void> => {
-      const from = join(this._rootPath, ...path.split('/'));
-      const to = join(this._rootPath, ...name.split('/'));
-      await mkdir(dirname(to), { recursive: true });
-      await rename(from, to).catch((err) => {
-        /* v8 ignore next -- @preserve a file that cannot be moved is left
-           where it is; the restore then overwrites it, which loses less than
-           refusing to join */
-        this._writeSyncError(`join/setAside/${path}`, err);
-      });
-    };
-
     for (const path of plan.recover) {
-      await setAside(path, `${RECOVERED_DIR}/${recoveredName(path, taken)}`);
+      await this._setAside(path, `${RECOVERED_DIR}/${recoveredName(path, taken)}`);
     }
     for (const path of plan.conflict) {
-      await setAside(
+      await this._setAside(
         path,
         conflictCopyName(path, '', Date.now(), taken, 'local'),
       );
@@ -4039,13 +4198,13 @@ export class FsAgent {
 
     if (plan.recover.length > 0 || plan.conflict.length > 0) {
       console.warn(
-        `[FsAgent] joining: moved ${plan.recover.length} file(s) the history ` +
+        `${this._tag} joining: moved ${plan.recover.length} file(s) the history ` +
           `had deleted into ${RECOVERED_DIR}/ and kept ` +
           `${plan.conflict.length} edited while away as conflict copies`,
       );
     }
     console.log(
-      `[FsAgent] joining onto head=${entry.head.slice(0, 8)}…: ` +
+      `${this._tag} joining onto head=${entry.head.slice(0, 8)}…: ` +
         `writing ${plan.write.length}, keeping ${plan.announce.length} of ` +
         `this folder's own`,
     );
@@ -4114,7 +4273,7 @@ export class FsAgent {
       this._localPathTimeIds.delete(path);
     }
     console.log(
-      `[FsAgent] agreed on the fleet's entry for the state this folder is ` +
+      `${this._tag} agreed on the fleet's entry for the state this folder is ` +
         `already in: head=${theirs.head.slice(0, 8)}…`,
     );
   }
@@ -4276,7 +4435,7 @@ export class FsAgent {
       // re-announce" out loud for an unresolvable head; this one said nothing
       // for the case where nothing can be resolved at all.
       console.warn(
-        `[FsAgent] ${this._rootPath}: head=${head.slice(0, 8)}… arrived ` +
+        `${this._tag} ${this._rootPath}: head=${head.slice(0, 8)}… arrived ` +
           `before this agent has a chain — DISCARDED. Nothing will repair ` +
           `from it; the node is relying entirely on being pushed to.`,
       );
@@ -4286,7 +4445,7 @@ export class FsAgent {
       const entry = await this._chain.entry(head);
       if (!entry) {
         console.warn(
-          `[FsAgent] head=${head.slice(0, 8)}… is not resolvable here — ` +
+          `${this._tag} head=${head.slice(0, 8)}… is not resolvable here — ` +
             `ignoring it; the sender will re-announce.`,
         );
         return undefined;
@@ -4533,7 +4692,7 @@ export class FsAgent {
           plan.drop.length / Math.max(held, 1) > MASS_DELETE_MAX_RATIO);
       if (tooMany) {
         console.error(
-          `[FsAgent] MASS DELETE REFUSED on ${this._rootPath}: a bucket-sync ` +
+          `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: a bucket-sync ` +
             `round would remove ${plan.drop.length} of ${held} files. ` +
             `Nothing was deleted.`,
         );
@@ -4565,7 +4724,7 @@ export class FsAgent {
       // NAMED, not resolved. Both sides edited the same file, which no
       // additive step can settle — the ordinary conflict resolver owns it.
       console.warn(
-        `[FsAgent] bucket-sync: ${plan.conflict.length} path` +
+        `${this._tag} bucket-sync: ${plan.conflict.length} path` +
           `${plan.conflict.length === 1 ? '' : 's'} edited on both sides: ` +
           `${plan.conflict.slice(0, 3).join(', ')}`,
       );
@@ -4622,7 +4781,7 @@ export class FsAgent {
       );
       if (!walk.complete) {
         console.warn(
-          `[FsAgent] ancestry of head=${entry.head.slice(0, 8)}… is ` +
+          `${this._tag} ancestry of head=${entry.head.slice(0, 8)}… is ` +
             `incomplete — not acting on its deletions; the sender will ` +
             `re-announce.`,
         );
@@ -4682,7 +4841,7 @@ export class FsAgent {
     if (lifted.length > 0) {
       this._persistTombstones();
       console.log(
-        `[FsAgent] lifted ${lifted.length} tombstone` +
+        `${this._tag} lifted ${lifted.length} tombstone` +
           `${lifted.length === 1 ? '' : 's'} a peer re-created: ` +
           `${lifted.slice(0, 3).join(', ')}`,
       );
@@ -4736,7 +4895,7 @@ export class FsAgent {
       // Loud, because the alternative to noticing this is discovering it from
       // a user whose folder emptied.
       console.error(
-        `[FsAgent] MASS DELETE REFUSED on ${this._rootPath}: a peer's edit ` +
+        `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: a peer's edit ` +
           `would remove ${incoming.removed.length} of ${held.size} files. ` +
           `Nothing was deleted.`,
       );
@@ -4751,7 +4910,7 @@ export class FsAgent {
 
     if (plan.staler.length > 0) {
       console.warn(
-        `[FsAgent] kept ${plan.staler.length} path` +
+        `${this._tag} kept ${plan.staler.length} path` +
           `${plan.staler.length === 1 ? '' : 's'} a peer deleted — this node ` +
           `has newer work on ${plan.staler.slice(0, 3).join(', ')}`,
       );
@@ -4807,7 +4966,7 @@ export class FsAgent {
     }
     this._persistTombstones();
     console.log(
-      `[FsAgent] applied ${plan.apply.length} peer deletion` +
+      `${this._tag} applied ${plan.apply.length} peer deletion` +
         `${plan.apply.length === 1 ? '' : 's'}: ` +
         `${plan.apply.slice(0, 3).join(', ')}`,
     );
@@ -5115,7 +5274,7 @@ export class FsAgent {
     // sync-error entry below says what it now costs.
     if (connector.syncConfig?.causalOrdering !== true) {
       console.warn(
-        `[FsAgent] ${this._rootPath}: this transport carries no ancestry ` +
+        `${this._tag} ${this._rootPath}: this transport carries no ancestry ` +
           `(syncConfig.causalOrdering is not true). Deletions and ` +
           `simultaneous writes cannot be told apart, so a file written here ` +
           `at the same moment as one written on a peer can be removed from ` +
@@ -5192,7 +5351,7 @@ export class FsAgent {
         const verdict = this._inboundRefVerdict(treeRef, isNewestFromSender);
         if (verdict !== 'apply') {
           console.warn(
-            `[FsAgent] ref=${treeRef.slice(0, 8)}… ${VERDICT_REASON[verdict]} ` +
+            `${this._tag} ref=${treeRef.slice(0, 8)}… ${VERDICT_REASON[verdict]} ` +
               `— ignoring it.`,
           );
           // Hand it back to the connector's dedup, WHATEVER the verdict was.
@@ -5259,7 +5418,7 @@ export class FsAgent {
           // Log fetch result for diagnostics
           const incomingNodeCount = incomingTree.trees.size;
           console.log(
-            `[FsAgent] syncFromDb: fetched tree with ${incomingNodeCount} nodes ` +
+            `${this._tag} syncFromDb: fetched tree with ${incomingNodeCount} nodes ` +
               `for ref=${treeRef.slice(0, 8)}…`,
           );
 
@@ -5277,7 +5436,7 @@ export class FsAgent {
             const incomingFiles = this._getFileContentMap(incomingTree);
             const currentFiles = this._getFileContentMap(currentTree);
             console.log(
-              `[FsAgent] syncFromDb: equivalent content, skipping restore ` +
+              `${this._tag} syncFromDb: equivalent content, skipping restore ` +
                 `(incoming=${incomingFiles.size} entries, ` +
                 `current=${currentFiles.size} entries, ` +
                 `ref=${treeRef.slice(0, 8)}…)`,
@@ -5397,18 +5556,7 @@ export class FsAgent {
             //
             // Neither available means no entry covers this state, which leaves
             // the decision to the branches below rather than guessing.
-            const theirHead =
-              this._announcedHeads.get(treeRef) ??
-              (
-                await this._chain
-                  .entryForTreeRef(treeRef)
-                  .catch(() => undefined)
-              )?.head;
-            const relation = theirHead
-              ? await this._chain
-                  .classify(this._chainHead.head, theirHead)
-                  .catch(() => 'incomplete' as const)
-              : 'incomplete';
+            const relation = await this._classifyAnnouncedRef(treeRef);
             // Kept for the merge gate below, so the chain's answer is used
             // there too rather than recomputed from the whole history.
             chainRelation = relation;
@@ -5421,7 +5569,7 @@ export class FsAgent {
               // means that peer is behind and does not know it. The node
               // protects itself here, but somebody still has to catch up.
               console.warn(
-                `[FsAgent] ref=${treeRef.slice(0, 8)}… is a state this node ` +
+                `${this._tag} ref=${treeRef.slice(0, 8)}… is a state this node ` +
                   `has already left — ignoring it.`,
               );
               return;
@@ -5521,7 +5669,7 @@ export class FsAgent {
           const incomingFileMap = this._getFileContentMap(incomingTree);
           const currentFileMap = this._getFileContentMap(currentTree);
           console.log(
-            `[FsAgent] applying ref=${treeRef.slice(0, 8)}… ` +
+            `${this._tag} applying ref=${treeRef.slice(0, 8)}… ` +
               `newestFromSender=${isNewestFromSender} ` +
               `incomingFiles=${incomingFileMap.size} ` +
               `currentFiles=${currentFileMap.size}`,
@@ -5560,7 +5708,7 @@ export class FsAgent {
               missingFromSender / currentFileMap.size > MASS_DELETE_MAX_RATIO)
           ) {
             console.warn(
-              `[FsAgent] ref=${treeRef.slice(0, 8)}… holds ` +
+              `${this._tag} ref=${treeRef.slice(0, 8)}… holds ` +
                 `${incomingFileMap.size} where this node holds ` +
                 `${currentFileMap.size} — the sender is the one missing data.`,
             );
@@ -5645,7 +5793,7 @@ export class FsAgent {
               this._antiEntropy?.agreedOn(treeRef);
             }
             console.warn(
-              `[FsAgent] applied ${treeRef.slice(0, 8)}… but re-derived ` +
+              `${this._tag} applied ${treeRef.slice(0, 8)}… but re-derived ` +
                 `${postRestoreRef.slice(0, 8)}… — ` +
                 (sameContent
                   ? 'same content, so not a divergence'
@@ -5816,7 +5964,7 @@ export class FsAgent {
             this._rememberAnnounced(postRestoreTree);
             if (postRestoreFiles.size < incomingFiles.size) {
               console.log(
-                `[FsAgent] ref=${treeRef.slice(0, 8)}… left this node behind ` +
+                `${this._tag} ref=${treeRef.slice(0, 8)}… left this node behind ` +
                   `(${postRestoreFiles.size} of ${incomingFiles.size} files) — ` +
                   `not announcing a state that is catching up.`,
               );
@@ -5913,7 +6061,7 @@ export class FsAgent {
             if (recoveryAttempt >= this._timeouts.recoveryRetries) {
               // Recovery budget exhausted (or disabled) — give up and record it.
               console.error(
-                `[FsAgent] syncFromDb processRef failed after ${maxAttempts} ` +
+                `${this._tag} syncFromDb processRef failed after ${maxAttempts} ` +
                   `attempts and ${recoveryAttempt} recoveries:`,
                 err,
               );
@@ -5935,7 +6083,7 @@ export class FsAgent {
                 // lose the file written during a transport disruption) we
                 // re-queue it for a later recovery cycle. tearDown() stops it.
                 console.warn(
-                  `[FsAgent] syncFromDb: ref=${treeRef.slice(0, 8)}… not yet ` +
+                  `${this._tag} syncFromDb: ref=${treeRef.slice(0, 8)}… not yet ` +
                     `fetchable after ${maxAttempts} attempts, re-queueing ` +
                     `(recovery ${recoveryAttempt + 1}/${this._timeouts.recoveryRetries}): ` +
                     `${FsAgent._errMessage(err)}`,
@@ -5954,7 +6102,7 @@ export class FsAgent {
             const delaySec =
               (attempt * this._timeouts.processRefRetryDelayMs) / 1000;
             console.warn(
-              `[FsAgent] syncFromDb: attempt ${attempt}/${maxAttempts} failed ` +
+              `${this._tag} syncFromDb: attempt ${attempt}/${maxAttempts} failed ` +
                 `for ref=${treeRef.slice(0, 8)}…, retrying in ${delaySec}s: ` +
                 `${FsAgent._errMessage(err)}`,
             );
@@ -6085,24 +6233,7 @@ export class FsAgent {
         // stop a late joiner's bootstrap being lost, and this is the bootstrap
         // being used rather than queued.
         if (this._joinPending) {
-          const pending = this._joinPending;
-          void this._chain
-            ?.entryForTreeRef(treeRef)
-            .then((entry) => {
-              if (!entry) {
-                // No entry covers this state — an older peer, or history that
-                // has not replicated yet. Nothing to reconcile against, so the
-                // ordinary path applies it and the next head tries again.
-                schedule(treeRef);
-                return;
-              }
-              return this._reconcileJoin(pending.db, pending.treeKey, entry);
-            })
-            .catch((err) => {
-              /* v8 ignore next -- @preserve a failed lookup leaves the join
-                 pending; the next announcement retries it */
-              this._writeSyncError('join/lookup', err);
-            });
+          void this._joinOnUnmarkedRef(treeRef, this._joinPending, schedule);
           return Promise.resolve();
         }
         schedule(treeRef);
@@ -6155,7 +6286,7 @@ export class FsAgent {
       )
         .catch((err) => {
           console.warn(
-            `[FsAgent] could not resolve announced head ` +
+            `${this._tag} could not resolve announced head ` +
               `${treeRef.slice(0, 12)}… — leaving it for anti-entropy: ` +
               `${String(err)}`,
           );
@@ -6182,14 +6313,7 @@ export class FsAgent {
           // which cannot tell new work from a stale copy.
           const pending = this._joinPending;
           if (pending) {
-            const joining = resolved.entry;
-            void this._reconcileJoin(pending.db, pending.treeKey, joining).catch(
-              (err) => {
-                /* v8 ignore next -- @preserve a failed reconcile leaves the
-                   node silent rather than guessing; the next head retries */
-                this._writeSyncError('join/reconcile', err);
-              },
-            );
+            void this._reconcileJoinOrRecord(pending, resolved.entry);
             return;
           }
           // PARKED, not claimed. The peer's head becomes a parent of whatever
@@ -6301,7 +6425,7 @@ export class FsAgent {
         // its own switch.
         if (this._bucketSync?.start()) {
           console.log(
-            `[FsAgent] divergence answered by a bucket-sync round rather ` +
+            `${this._tag} divergence answered by a bucket-sync round rather ` +
               `than a ${action}`,
           );
           return;
