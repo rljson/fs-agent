@@ -28,7 +28,7 @@
     "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
   },
   "devDependencies": {
-    "@rljson/server": "0.0.71",
+    "@rljson/server": "0.0.72",
     "@types/node": "^25.3.1",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
@@ -51,9 +51,9 @@
   },
   "dependencies": {
     "@rljson/bs": "0.0.27",
-    "@rljson/db": "0.0.48",
+    "@rljson/db": "0.0.49",
     "@rljson/hash": "0.0.19",
-    "@rljson/io": "0.0.80",
+    "@rljson/io": "0.0.81",
     "@rljson/json": "0.0.23",
     "@rljson/rljson": "0.0.83",
     "socket.io": "^4.8.3",
@@ -65,12 +65,12 @@
     ],
     "overrides": {
       "@rljson/bs": "0.0.27",
-      "@rljson/db": "0.0.48",
+      "@rljson/db": "0.0.49",
       "@rljson/hash": "0.0.19",
-      "@rljson/io": "0.0.80",
+      "@rljson/io": "0.0.81",
       "@rljson/json": "0.0.23",
       "@rljson/rljson": "0.0.83",
-      "@rljson/server": "0.0.71"
+      "@rljson/server": "0.0.72"
     }
   },
   "packageManager": "pnpm@10.11.0"

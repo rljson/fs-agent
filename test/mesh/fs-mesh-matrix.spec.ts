@@ -210,23 +210,29 @@ describe('the scenario matrix, at the mesh tier', () => {
   //    bounded, loud, and the ref is handed back to the connector's dedup so a
   //    re-announcement can get through.
   //
-  // 4. NOT THIS PACKAGE, and it is why this test is still red. All three
-  //    hangs are one hazard: **while a peer socket is unresponsive, a db read
-  //    does not complete.** Both timeouts fire at exactly 10 000 ms, so the
-  //    reads are blocked rather than slow, and after the cut node is gagged
-  //    NOTHING recovers — there is no anti-entropy activity in the window at
-  //    all, at 30 seconds or at 90. The receiver cannot learn which tree the
-  //    head names, because interpreting a `~H~` announcement requires a read
-  //    and that read is blocked by an unrelated dead peer.
+  // 4. FIXED IN `@rljson/io` 0.0.81, and that is why this entry changed. All
+  //    three hangs were one hazard: `IoMulti.readRows` said it raced the
+  //    readables in a priority group and then awaited `Promise.allSettled`,
+  //    so a group was only as fast as its slowest member and one silent peer
+  //    cost every read that peer's full request timeout. Fixed there; this
+  //    scenario now runs with ZERO blocked reads where it had one, and
+  //    `every node ends on the last save` went from 13 blocked reads and
+  //    failing 2 runs in 3 to 9 of 9 clean.
   //
-  //    Two ways out, neither of them a line of code here:
-  //      - the peer aggregation must not block a read on an unresponsive
-  //        socket (`@rljson/io` / `@rljson/server`) — the same shape as the
-  //        hub that lost one of four sockets and never recovered;
-  //      - or an announcement carries the TREE ref beside the head, so a
-  //        receiver never needs a network read to interpret one. That is a
-  //        wire change, and `announceTreeRef` is where mixed-fleet handling
-  //        already lives.
+  // WHAT IS STILL RED, and it is the narrowest the residue has been. The
+  // re-creating node now DOES announce — `pushing ref=…  files=2` is in the
+  // log — and the receiving node resolves that announcement without blocking.
+  // It still does not write the file.
+  //
+  // So the remaining suspect is the TOMBSTONE the receiver set when it applied
+  // the original deletion. `_applyIncomingRemovals` lifts tombstones for the
+  // paths an incoming walk reports in `changed`, and the restore refuses to
+  // write a tombstoned path (`_pendingDeletes`); if the lift does not happen
+  // before the restore for this shape, the re-creation is skipped silently and
+  // the counters `_restoreTombstoned`/`_restoreSkipped` are where it shows.
+  // That is the next thing to instrument — and note the earlier conclusions in
+  // this comment were each arrived at by tracing rather than reasoning, which
+  // is the only thing that has worked on this scenario.
   //
   // Note it reproduces only with `bucketSync` at its DEFAULT. With the flag
   // forced off the timing differs and the push goes out — that is the old
