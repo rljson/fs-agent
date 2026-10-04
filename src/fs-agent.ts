@@ -3244,11 +3244,37 @@ export class FsAgent {
             const head = this._currentRef;
             const announced = head !== undefined && head === this._lastSentRef;
             const parentRef = announced ? head : (this._lastAppliedRef ?? head);
-            const previous = await this._ancestryPrevious(
-              db,
-              treeKey,
-              parentRef ? [parentRef] : undefined,
-            );
+            // BOUNDED, like every other async step — and this one was not.
+            //
+            // `_ancestryPrevious` is the legacy db-level ancestry: a query per
+            // parent ref against the InsertHistory. It was the only `await` in
+            // the push path with no timeout around it, and it HANGS when the
+            // read has to traverse a peer that cannot answer — a cut node, a
+            // half-open socket. Nothing recovered, because the push had not
+            // reached the store's own timeout yet: it was still inside this
+            // call, for ever, and the node never announced its own work.
+            //
+            // A failure DEGRADES rather than aborts: `previous` is optional
+            // (it is `undefined` whenever ancestry tracking is off), so the
+            // push goes out without the db-level predecessors rather than not
+            // at all. The edit chain carries the ancestry that matters now.
+            // Said out loud, because a push without ancestry is a weaker push.
+            const previous = await FsAgent._withTimeout(
+              this._ancestryPrevious(
+                db,
+                treeKey,
+                parentRef ? [parentRef] : undefined,
+              ),
+              this._timeouts.dbQuery,
+              `syncToDb → ancestryPrevious(${treeKey})`,
+            ).catch((err) => {
+              console.warn(
+                `[FsAgent] ancestry lookup for this push did not finish — ` +
+                  `announcing without db-level predecessors: ${String(err)}`,
+              );
+              this._writeSyncError('syncToDb/ancestryPrevious', err);
+              return undefined;
+            });
             const ref = await FsAgent._withRetry(
               () =>
                 FsAgent._withTimeout(
@@ -6175,7 +6201,43 @@ export class FsAgent {
         void this._collectRemovalsForTreeRef(treeRef);
         return Promise.resolve();
       }
-      return this._resolveAnnouncement(treeRef).then((resolved) => {
+      // BOUNDED, AND A FAILURE IS SAID OUT LOUD.
+      //
+      // Resolving a `~H~` head is a READ, and a read may have to travel to a
+      // peer — which, if that peer cannot answer, never returns. Measured in
+      // `I7b`: a node heard a peer's head and sat inside this call for the
+      // rest of the run, so the announcement was swallowed with no log, no
+      // retry and no fallback.
+      //
+      // It is the third unbounded read that scenario found, and the other two
+      // were on the push side. The rule this package states about itself —
+      // every async step is bounded, because an unbounded one is a silent hang
+      // — has to hold on the receive path too.
+      //
+      // `invalidateReceived` is the half that makes a retry possible. The ref
+      // was marked on arrival; leaving it marked means the NEXT announcement
+      // of the same head is dropped by the connector before the agent sees it,
+      // and a head is derived from content, so it does not change. That is the
+      // shape recorded for a refused tree a few hundred lines down: refusing a
+      // state is not the same as having consumed it. Anti-entropy then closes
+      // the gap, because the hub's beacon advertises a plain tree ref that
+      // needs no resolution at all.
+      return FsAgent._withTimeout(
+        this._resolveAnnouncement(treeRef),
+        this._timeouts.dbQuery,
+        `syncFromDb → resolveAnnouncement(${treeRef.slice(0, 12)}…)`,
+      )
+        .catch((err) => {
+          console.warn(
+            `[FsAgent] could not resolve announced head ` +
+              `${treeRef.slice(0, 12)}… — leaving it for anti-entropy: ` +
+              `${String(err)}`,
+          );
+          this._writeSyncError('syncFromDb/resolveAnnouncement', err);
+          connector.invalidateReceived(treeRef);
+          return undefined;
+        })
+        .then((resolved) => {
         if (resolved === undefined) return;
         // Parked for the apply, which happens after a debounce. The sender's
         // removals are the authorisation the ancestry rule cannot give, so

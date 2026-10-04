@@ -188,41 +188,49 @@ describe('the scenario matrix, at the mesh tier', () => {
   //
   // The newer creation must win everywhere, as it does in I7.
   //
-  // COMMITTED INVERTED (`it.fails`) — red today, deterministically, and this
-  // comment names what turns it green. It passes while the body diverges and
-  // breaks the build the day it stops, which is what this package does with a
-  // known-red test rather than skipping it.
+  // COMMITTED INVERTED (`it.fails`) — red today, deterministically. Four
+  // separate faults were traced from this one scenario; three are fixed and
+  // the fourth is not in this package.
   //
-  // HALF OF IT IS FIXED, and the half that is fixed was data loss:
-  // `planRemovals` now refuses a removal for a path this node holds and has
-  // never announced (`RemovalQuestion.unannounced`). A stated removal is
-  // re-collected by every later walk, so it keeps arriving after it was first
-  // applied — and a path re-created in the meantime has no `localTimeIds`
-  // entry yet, because claims are recorded by the PUSH. So the re-creating
-  // node had its own new file deleted under it, which the trace showed
-  // plainly: `C content: undefined` three seconds after C wrote it. It now
-  // logs `kept 1 path a peer deleted — this node has newer work` and keeps the
-  // file.
+  // 1. FIXED, AND IT WAS DATA LOSS. A stated removal is re-collected by every
+  //    later walk, so it keeps arriving after it was first applied — and a
+  //    path re-created meanwhile has no `localTimeIds` entry yet, because
+  //    claims are recorded by the PUSH. The re-creating node had its own new
+  //    file deleted under it: `C content: undefined`, three seconds after it
+  //    wrote it. `RemovalQuestion.unannounced` now outranks any removal.
   //
-  // WHAT IS STILL RED, and where to look: the re-creating node holds its own
-  // work and never tells anyone. The trace ends at
+  // 2. FIXED. `_ancestryPrevious` was the only `await` in the push path with
+  //    no timeout, and it HUNG — so the node never announced the file it had
+  //    just brought back. Bounded, and it degrades to announcing without
+  //    db-level predecessors rather than not announcing at all.
   //
-  //   applied hd3PHz1r… but re-derived _esQ4A0L… — this node is short of
-  //   what it applied
+  // 3. FIXED as a hang, not as a recovery. `_resolveAnnouncement` on the
+  //    RECEIVE side hung the same way, swallowing a peer's announcement with
+  //    no log, no retry and no fallback for the rest of the run. It is now
+  //    bounded, loud, and the ref is handed back to the connector's dedup so a
+  //    re-announcement can get through.
   //
-  // with no push following it. That message is the defect in one line: the
-  // node is NOT short, it holds a SUPERSET — the applied state plus the file
-  // it just re-created. `postRestoreRef !== treeRef` is read as "I hold less
-  // than I applied", and the two cases need opposite actions. Holding less
-  // means stay quiet, because a node must not advertise a state it does not
-  // have. Holding MORE means announce, because the extra is this node's own
-  // change and no edit exists for it yet — "an edit exists where the change
-  // was made" cuts both ways, and the adoption rule currently swallows the
-  // author's own work along with the sender's.
+  // 4. NOT THIS PACKAGE, and it is why this test is still red. All three
+  //    hangs are one hazard: **while a peer socket is unresponsive, a db read
+  //    does not complete.** Both timeouts fire at exactly 10 000 ms, so the
+  //    reads are blocked rather than slow, and after the cut node is gagged
+  //    NOTHING recovers — there is no anti-entropy activity in the window at
+  //    all, at 30 seconds or at 90. The receiver cannot learn which tree the
+  //    head names, because interpreting a `~H~` announcement requires a read
+  //    and that read is blocked by an unrelated dead peer.
+  //
+  //    Two ways out, neither of them a line of code here:
+  //      - the peer aggregation must not block a read on an unresponsive
+  //        socket (`@rljson/io` / `@rljson/server`) — the same shape as the
+  //        hub that lost one of four sockets and never recovered;
+  //      - or an announcement carries the TREE ref beside the head, so a
+  //        receiver never needs a network read to interpret one. That is a
+  //        wire change, and `announceTreeRef` is where mixed-fleet handling
+  //        already lives.
   //
   // Note it reproduces only with `bucketSync` at its DEFAULT. With the flag
-  // forced off the push does go out, which is the old model and not what
-  // ships — see the warning on `bucketSync` in `fs-mesh.ts`.
+  // forced off the timing differs and the push goes out — that is the old
+  // model and not what ships; see the warning on `bucketSync` in `fs-mesh.ts`.
   // ...........................................................................
   it.fails('I7b: a delivered deletion does not beat a later re-creation', async () => {
     mesh = await buildFsMesh({ root: root('i7b'), names: ['A', 'B', 'C'] });
