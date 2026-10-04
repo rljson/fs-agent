@@ -86,54 +86,19 @@ describe('FsAgent', () => {
       expect(agent).toBeDefined();
     });
 
-    it('should reject auto-sync via constructor with db and treeKey', async () => {
-      // Create a mock database
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-
-      // Create table
-      const treeCfg = createTreesTableCfg('testTree');
-      await db.core.createTableWithInsertHistory(treeCfg);
-
-      // Constructor with db and treeKey triggers deprecated auto-sync pattern
-      // This will fail internally but is silently ignored
-      new FsAgent(testDir, undefined, {
-      ...ORIGIN_FIXTURE,
-        db,
-        treeKey: 'testTree',
-      });
-
-      // Wait for async error handling
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // No assertion - deprecated pattern fails silently
-    });
-
-    it('should reject bidirectional auto-sync via constructor', async () => {
-      // Create a mock database
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-
-      // Create table
-      const treeCfg = createTreesTableCfg('testTree');
-      await db.core.createTableWithInsertHistory(treeCfg);
-
-      // Constructor with db, treeKey, and bidirectional triggers deprecated pattern
-      // This will fail internally but is silently ignored
-      new FsAgent(testDir, undefined, {
-      ...ORIGIN_FIXTURE,
-        db,
-        treeKey: 'testTree',
-        bidirectional: true,
-      });
-
-      // Wait for async error handling
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // No assertion - deprecated pattern fails silently
-    });
+    // THE TWO CONSTRUCTOR AUTO-SYNC TESTS ARE GONE, with the code they ran.
+    //
+    // They asserted NOTHING — their own last lines said so ("no assertion -
+    // deprecated pattern fails silently"). What they did was execute
+    // `_startAutoSync` and `_startAutoSyncFromDb`, two methods that returned
+    // early or threw into a `.catch(() => {})`, so the coverage gate would not
+    // notice they were dead. Seven `v8 ignore` markers sat on that path.
+    //
+    // Removed together: the methods, the constructor branch, the `db`,
+    // `treeKey` and `bidirectional` options, and the two never-assigned fields
+    // `_stopSync`/`_stopSyncFromDb` that made `dispose()` a no-op. A test that
+    // asserts nothing is not a test, and here it was the only thing keeping
+    // dead code reachable.
   });
 
   describe('extract', () => {

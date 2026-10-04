@@ -149,33 +149,32 @@ Files are stored efficiently using content-addressed blob storage:
 
 ### Automatic Watching
 
-### Automatic Synchronization (Constructor-based)
+### Automatic Synchronization (Constructor-based) — REMOVED
 
-**Note:** Constructor-based automatic synchronization using `db`, `treeKey`, and `bidirectional` options is deprecated and will throw an error. Use the explicit `syncToDb()` and `syncFromDb()` methods with a `Connector` instance instead (see examples above).
+The `db`, `treeKey` and `bidirectional` constructor options are **gone**. They
+never worked: the constructor started a method that threw
+`'Auto-sync from constructor is not supported'` into a `.catch(() => {})`, so
+passing them did nothing at all and said nothing about it. A `Connector` needs
+a socket, and the constructor has none.
 
-The new approach provides better control and uses the Connector pattern for socket-based synchronization:
+Sync is started explicitly, which is the only way it was ever started:
 
 ```typescript
-// ❌ Deprecated (will throw error)
-const agent = new FsAgent('./my-project', new BsMem(), {
-  db,
-  treeKey,
-  bidirectional: true,
-});
-
-// ✅ Use this instead
 const agent = new FsAgent('./my-project', new BsMem());
 const connector = new Connector(db, route, socket);
 const stopToDb = await agent.syncToDb(db, connector, treeKey);
 const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
 ```
 
+Or, against a `Client` from `@rljson/server`, with `FsAgent.fromClient()` —
+which is what the One Client uses.
+
 ### Live Client-Server Demo
 
 Run the live in-process demo that mirrors changes between two folders using the same approach as our sync tests (SocketMock, IoMem, BsMem):
 
 ```bash
-pnpm exec vite-node src/live-client-server.ts
+pnpm exec vite-node src/client-server/live-client-server.ts
 ```
 
 It wipes and recreates `demo/live-client-server/folder-a` and `demo/live-client-server/folder-b`, seeds sample files, and keeps them in sync until you press Ctrl+C. Pass `--keep-existing` to skip the reset.
@@ -410,10 +409,7 @@ import { BsSql } from '@rljson/bs-sql';
 
 // SQL-backed blob storage
 const sqlBs = new BsSql(myDatabase);
-const agent = new FsAgent('./my-project', sqlBs, {
-  db,
-  treeKey: 'filesTree',
-});
+const agent = new FsAgent('./my-project', sqlBs);
 ```
 
 ### Ignore Patterns
@@ -422,8 +418,6 @@ Control what gets scanned and synced:
 
 ```typescript
 const agent = new FsAgent('./my-project', new BsMem(), {
-  db,
-  treeKey: 'filesTree',
   ignore: [
     'node_modules',
     '.git',
@@ -442,8 +436,6 @@ Control how deep to traverse directories:
 
 ```typescript
 const agent = new FsAgent('./my-project', new BsMem(), {
-  db,
-  treeKey: 'filesTree',
   maxDepth: 3, // Only scan 3 levels deep
 });
 ```
@@ -523,10 +515,7 @@ agent.scanner.onChange(async (change) => {
 
 ```typescript
 try {
-  const agent = new FsAgent('./nonexistent', new BsMem(), {
-    db,
-    treeKey: 'filesTree',
-  });
+  const agent = new FsAgent('./nonexistent', new BsMem());
 } catch (error) {
   // Error: Root path "./nonexistent" does not exist. Cannot scan non-existent directory.
 }
@@ -611,34 +600,49 @@ async function cleanRestore() {
 
 ### Example 3: Bidirectional Sync
 
+Two folders kept in step through one database. This example used to pass `db`,
+`treeKey` and `bidirectional: true` to the constructor and describe the result
+as working; it never did — see **Automatic Synchronization (Constructor-based)
+— REMOVED** above. Each direction is started explicitly, and each returns the
+function that stops it.
+
 ```typescript
 async function bidirectionalSync() {
-  // Setup database
   const io = new IoMem();
   await io.init();
   const db = new Db(io);
 
-  const treeTableCfg = createTreesTableCfg('sharedTree');
-  await db.core.createTableWithInsertHistory(treeTableCfg);
+  const treeKey = 'sharedTree';
+  await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
+  const route = Route.fromFlat(`/${treeKey}`);
 
-  // Agent 1: Watches ./alice and syncs to DB
-  const alice = new FsAgent('./alice', new BsMem(), {
-    db,
-    treeKey: 'sharedTree',
-    bidirectional: true, // ← Bidirectional
-  });
+  // One socket pair, so the two agents can hear each other.
+  const [socketA, socketB] = createSocketPair();
 
-  // Agent 2: Watches ./bob and syncs to DB
-  const bob = new FsAgent('./bob', new BsMem(), {
-    db,
-    treeKey: 'sharedTree',
-    bidirectional: true, // ← Bidirectional
-  });
+  const alice = new FsAgent('./alice', new BsMem());
+  const bob = new FsAgent('./bob', new BsMem());
+
+  // `causalOrdering` is a REQUIREMENT, not a tuning option: the predecessor
+  // refs it puts on the wire are what let a conflicting edit to one file be
+  // merged. The agent warns, once and loudly, if it is missing.
+  const syncCfg = { causalOrdering: true, includeClientIdentity: true };
+  const connectorA = new Connector(db, route, socketA, syncCfg);
+  const connectorB = new Connector(db, route, socketB, syncCfg);
+
+  const stops = [
+    // RECEIVE FIRST, then push — a node that announces before it can hear
+    // speaks about a state it may be about to replace.
+    await alice.syncFromDb(db, connectorA, treeKey),
+    await bob.syncFromDb(db, connectorB, treeKey),
+    await alice.syncToDb(db, connectorA, treeKey),
+    await bob.syncToDb(db, connectorB, treeKey),
+  ];
 
   // Now:
-  // - Changes in ./alice → sync to DB → appear in ./bob
-  // - Changes in ./bob → sync to DB → appear in ./alice
-  // - Loop prevention ensures stability
+  // - a change in ./alice reaches ./bob, and the other way round;
+  // - a DELETION travels too, because it is written down in the edit chain
+  //   rather than inferred from a file being absent from a tree;
+  // - stopping is explicit: `stops.forEach((stop) => stop())`.
 }
 ```
 
@@ -646,10 +650,7 @@ async function bidirectionalSync() {
 
 ```typescript
 async function customHandling() {
-  const agent = new FsAgent('./watched', new BsMem(), {
-    db,
-    treeKey: 'watchedTree',
-  });
+  const agent = new FsAgent('./watched', new BsMem());
 
   let changeCount = 0;
 

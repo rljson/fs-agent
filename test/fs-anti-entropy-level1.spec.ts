@@ -20,10 +20,14 @@
 // because the property is "for every pair of views", and that is precisely the
 // shape of defect an example test cannot see.
 //
-// `it.fails` — red today, deterministically, and names what turns it green.
+// ALL GREEN as of 2026-10-04, and nothing here is inverted any more.
 //
-// MEASURED 2026-10-01: **D1, D2 and D4 are GREEN**, and none of them needed
-// the chain — see each comment. D3 and D5 are still red.
+// The file was written with `it.fails` for the rules that were red —
+// deterministically red, naming what would turn each one green. They all did:
+// D1, D2 and D4 on 2026-10-01 without needing the chain (see each comment),
+// D3 as a GUARD once the livelock closed, and D5's rule was **deleted
+// outright** with its second decision site rather than fixed — see the block
+// below where it used to be.
 //
 // The history is worth keeping. On 2026-09-30 all four were red, and two of
 // them (§7.3's D2 and D3) the plan expected to be green: enumerated, the

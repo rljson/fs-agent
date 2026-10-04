@@ -152,14 +152,18 @@ describe('coming back does not cost what you missed', () => {
 
     // AGREEMENT on one of the writer's saves, not on its LAST one.
     //
-    // **Deliberately weaker than it looks, and the reason has a name.** About
-    // one run in three the whole fleet settles one version back — the writer
-    // included — because a receiver catching up stamps the version it managed
-    // to apply as its own change and that out-orders the writer's newer save.
-    // That is the open defect recorded as `OPEN: a writer is not rolled back
-    // by a receiver that is catching up` in `fs-mesh-invariants.spec.ts`,
-    // where it is root-caused; THIS test is its cheapest reproduction (~40 s,
-    // 1 run in 3) and is the place to re-measure a fix.
+    // **Deliberately weaker than it looks, and the reason is now history.**
+    // About one run in three the whole fleet used to settle one version back —
+    // the writer included — because a receiver catching up stamped the version
+    // it managed to apply as its own change, and that out-ordered the writer's
+    // newer save. This test was its cheapest reproduction, ~40 s at 1 run in 3.
+    //
+    // CLOSED 2026-10-04: a merge claimed every path whose bytes differed from
+    // what the node last ANNOUNCED, and now claims only the paths it
+    // synthesised. The assertion is left as agreement on ONE of the writer's
+    // saves rather than tightened to the last, because that is what this file
+    // measures COST under; `fs-mesh-invariants.spec.ts` asserts the ordering
+    // itself, unskipped.
     //
     // Asserting the last save here would report the same defect twice and
     // make the measurement below — which is what this test exists for —

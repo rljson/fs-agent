@@ -123,14 +123,8 @@ export interface FsAgentOptions {
    * store (e.g. `@rljson/bs-fs`). See {@link FsScanOptions.scanCachePath}.
    */
   scanCachePath?: string;
-  /** Database instance for automatic syncing */
-  db?: Db;
-  /** Tree key for database storage */
-  treeKey?: string;
   /** Storage options for database operations */
   storageOptions?: StoreFsTreeOptions;
-  /** Enable bidirectional sync (both fs→db and db→fs) */
-  bidirectional?: boolean;
   /** Restore options applied when syncing from DB */
   restoreOptions?: RestoreOptions;
   /** Timeout configuration for async operations */
@@ -705,10 +699,6 @@ export class FsAgent {
   private _adapter: FsBlobAdapter;
   private _rootPath: string;
   private _bs: Bs;
-  private _db?: Db;
-  private _treeKey?: string;
-  private _stopSync?: () => void;
-  private _stopSyncFromDb?: () => void;
   private _lastSentRef?: string;
 
   /**
@@ -1079,8 +1069,6 @@ export class FsAgent {
   constructor(rootPath: string, bs?: Bs, options: FsAgentOptions = {}) {
     this._rootPath = rootPath;
     this._bs = bs || new BsMem();
-    this._db = options.db;
-    this._treeKey = options.treeKey;
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._onConflict = options.onConflict;
@@ -1116,18 +1104,6 @@ export class FsAgent {
     // heard about it.
     this._loadPersistedTombstones();
 
-    // Automatically start syncing if db and treeKey are provided
-    /* v8 ignore next -- @preserve */
-    if (this._db && this._treeKey) {
-      this._startAutoSync().catch(() => {
-        // Intentionally ignored - deprecated constructor pattern
-      });
-
-      // Start reverse sync if bidirectional is enabled
-      this._startAutoSyncFromDb(options.bidirectional || false).catch(() => {
-        // Intentionally ignored - deprecated constructor pattern
-      });
-    }
   }
 
   /**
@@ -1684,58 +1660,27 @@ export class FsAgent {
   }
 
   /**
-   * Starts automatic syncing to database
-   * Note: Auto-sync requires Connector which is not available in constructor.
-   * Consider using syncToDb() directly instead of constructor options.
-   */
-  private async _startAutoSync(): Promise<void> {
-    /* v8 ignore next -- @preserve */
-    if (!this._db || !this._treeKey) {
-      return;
-    }
-
-    // Cannot create Connector without socket - auto-sync not supported
-    /* v8 ignore next -- @preserve */
-    throw new Error(
-      'Auto-sync from constructor is not supported. ' +
-        'Use syncToDb() method directly with a Connector instance.',
-    );
-  }
-
-  /**
-   * Starts automatic syncing from database
-   * @param bidirectional - Whether bidirectional sync is enabled
-   * Note: Auto-sync requires Connector which is not available in constructor.
-   * Consider using syncFromDb() directly instead of constructor options.
-   */
-  private async _startAutoSyncFromDb(bidirectional: boolean): Promise<void> {
-    /* v8 ignore if -- @preserve */
-    if (!this._db || !this._treeKey || !bidirectional) {
-      return;
-    }
-
-    // Cannot create Connector without socket - auto-sync not supported
-    /* v8 ignore next -- @preserve */
-    throw new Error(
-      'Auto-sync from constructor is not supported. ' +
-        'Use syncFromDb() method directly with a Connector instance.',
-    );
-  }
-
-  /**
-   * Stops automatic syncing and cleans up resources
+   * Abandons a join this agent is still waiting on.
+   *
+   * **This method used to do nothing at all**, and the One Client calls it in
+   * six places on shutdown. It read two fields that were never assigned —
+   * leftovers of the constructor auto-sync pattern, which was removed — each
+   * behind a `v8 ignore` that hid the fact. The real stopping is done by the
+   * functions `syncToDb` and `syncFromDb` return, which the client already
+   * calls first.
+   *
+   * What it does now is the one thing those cannot: cancel a pending join. A
+   * folder that deferred its first announcement keeps asking the network for a
+   * head every {@link JOIN_ASK_INTERVAL_MS} until the wait expires, and a
+   * `stop()` does not end it — so a node shut down mid-join went on asking a
+   * connector that was being torn down, and every refusal reached the sync
+   * error log. The timers are `unref`'d, so this was never a reason the
+   * process stayed alive; it was noise at exactly the moment a shutdown is
+   * being diagnosed.
    */
   dispose(): void {
-    /* v8 ignore if -- @preserve */
-    if (this._stopSync) {
-      this._stopSync();
-      this._stopSync = undefined;
-    }
-    /* v8 ignore if -- @preserve */
-    if (this._stopSyncFromDb) {
-      this._stopSyncFromDb();
-      this._stopSyncFromDb = undefined;
-    }
+    this._joinPending = undefined;
+    this._stopAsking();
   }
 
   /**
@@ -5162,25 +5107,32 @@ export class FsAgent {
     // Said once, loudly, because the alternative is finding out from a user
     // whose file disappeared.
     //
-    // Without `causalOrdering` nothing on the wire says what a sender had seen
-    // when it spoke, so a tree that simply predates this node's newest write
-    // is indistinguishable from one deleting it. The prune rule has a
-    // deliberate escape hatch for that case — judging silence as "has not seen
-    // my state" refused every deletion across twenty tests — and the hatch is
-    // where `KNOWN-WEAKNESSES.md` §3 lives: *"two people save different files
-    // at the same moment on different machines, one file disappears, and the
-    // node that lost it is the one that created it"*.
+    // THE DATA-LOSS REASON FOR THIS WARNING IS CLOSED. The warning stays,
+    // because `causalOrdering` is still a requirement — for a narrower reason,
+    // and the history matters more than the line of code.
     //
-    // It cannot be closed from inside this agent. The distinction needed is
-    // between a tree that PREDATES a local write and one that POSTDATES
-    // somebody deleting it, and no fact available on one machine separates
-    // them: the only local predicate that protects the writer also protects it
-    // from every legitimate deletion, because the AUTHOR of a file never
-    // receives its own path back. Three rules were built and withdrawn proving
-    // it, and the one that closed §3 broke §1 at four nodes in the same run.
+    // It used to read: without ancestry on the wire, a tree that simply
+    // predates this node's newest write is indistinguishable from one deleting
+    // it, so the prune rule needed a deliberate escape hatch — and the hatch
+    // was where `KNOWN-WEAKNESSES.md` §3 lived, *"two people save different
+    // files at the same moment on different machines, one file disappears, and
+    // the node that lost it is the one that created it"*. It then said the
+    // case could not be closed from inside this agent, because no fact
+    // available on one machine separates the two trees.
     //
-    // So this is a REQUIREMENT, not a tuning option — and a configuration
-    // that silently loses data should not be reachable silently.
+    // That was true of the mechanism it was written about, and that mechanism
+    // is gone. **There is no prune rule and no escape hatch**: an absence is
+    // never a deletion, and a removal arrives STATED in the chain by the node
+    // that performed it. The distinction the comment said was impossible is no
+    // longer needed, because nothing is inferred from a tree's silence. Mesh
+    // F2 — *two nodes writing DIFFERENT files at the same instant keep both* —
+    // asserts §3's exact scenario and passes.
+    //
+    // What `causalOrdering` is still needed for: the predecessor refs it
+    // carries are what let the merge gate in `processRef` fire at all, so a
+    // transport without it resolves no conflicts. That is a real loss and
+    // worth one loud line — but it is not silent data loss any more, so the
+    // sync-error entry below says what it now costs.
     if (connector.syncConfig?.causalOrdering !== true) {
       console.warn(
         `[FsAgent] ${this._rootPath}: this transport carries no ancestry ` +
@@ -5192,7 +5144,9 @@ export class FsAgent {
       this._writeSyncError(
         'syncFromDb/noAncestry',
         new Error(
-          'causalOrdering is off: simultaneous writes may lose the local copy',
+          'causalOrdering is off: no predecessors on the wire, so conflicting ' +
+            'edits to one file are not merged (both copies are kept, but ' +
+            'nothing reconciles them)',
         ),
       );
     }
@@ -5444,6 +5398,11 @@ export class FsAgent {
           // Rolling backwards is not a conflict-resolution concern and not
           // something to opt into — a node must never move to a state it has
           // already left, whatever else is configured.
+          // What the CHAIN says about the two histories, when it can say.
+          // Read twice: by the rollback guard immediately below, and by the
+          // merge gate after it.
+          let chainRelation: 'behind' | 'ahead' | 'fork' | 'incomplete' =
+            'incomplete';
           if (this._chain && this._chainHead) {
             // `classify` compares chain HEADS, and what arrived is a TREE ref.
             //
@@ -5470,6 +5429,9 @@ export class FsAgent {
                   .classify(this._chainHead.head, theirHead)
                   .catch(() => 'incomplete' as const)
               : 'incomplete';
+            // Kept for the merge gate below, so the chain's answer is used
+            // there too rather than recomputed from the whole history.
+            chainRelation = relation;
             if (relation === 'ahead') {
               // A state this node REFUSES is never a parent of anything it
               // records later. Dropping the parked head is what keeps the
@@ -5492,18 +5454,42 @@ export class FsAgent {
             predecessorRefs &&
             predecessorRefs.length > 0
           ) {
-            const relation = await this._ancestryRelation(
-              db,
-              treeKey,
-              this._currentRef,
-              treeRef,
-              predecessorRefs,
-            );
+            // THE CHAIN ANSWERS FIRST; `_ancestryRelation` IS THE OLD PATH.
+            //
+            // `_ancestryRelation` reads the WHOLE InsertHistory table and
+            // builds two maps over every row in it, on every announcement
+            // that reaches here — and it answers the same question
+            // `classify` just answered above with a bounded, cached walk. It
+            // predates the chain and it is kept for one case only: a peer the
+            // chain cannot speak for, which is a node on the old wire format
+            // (`announceTreeRef`) or one whose chain failed to initialise.
+            // The same condition keeps the heuristics in
+            // `antiEntropyDecision` alive, and both go when the fleet is on
+            // the chain.
+            //
+            // Where the chain HAS an answer it is authoritative, so there is
+            // nothing to recompute: `fork` is the merge, `behind` is the
+            // fast-forward that falls through to the restore below, and
+            // `ahead` already returned above.
+            const relation =
+              chainRelation !== 'incomplete'
+                ? chainRelation
+                : await this._ancestryRelation(
+                    db,
+                    treeKey,
+                    this._currentRef,
+                    treeRef,
+                    predecessorRefs,
+                  );
+            /* v8 ignore next -- @preserve the unconditional guard above
+               returns on `ahead` before this is reached; only the old path
+               can produce it here, and only for a peer the chain cannot
+               speak for */
             if (relation === 'ahead') {
               return; // We already have a newer revision; ignore the ancestor.
             }
             /* v8 ignore else -- @preserve 'behind' falls through to restore */
-            if (relation === 'diverged') {
+            if (relation === 'diverged' || relation === 'fork') {
               await this._resolveConflictInline(
                 db,
                 treeKey,

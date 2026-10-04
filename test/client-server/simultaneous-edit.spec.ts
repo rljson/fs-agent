@@ -169,17 +169,17 @@ describe.each([
       }),
     );
 
-  // **The second case is expected to FAIL, and that is the measurement.**
-  // `it.fails` passes while the body does not converge and turns red the day it
-  // does — so the cost of shipping with the merge switched off is recorded
-  // here rather than rediscovered on four machines, and improving it cannot
-  // pass unnoticed.
-  // Both cases converge now. Until ONE-446 the second one did not: without
+  // BOTH CASES CONVERGE. The second one did not until ONE-446: without
   // `resolveConflicts` three simultaneous writes settled on three different
-  // versions and stayed there — measured on four machines on 2026-09-19, and
-  // encoded here as `it.fails`. The anti-entropy repairs it: each node notices
-  // it disagrees with the hub for longer than the grace period and pulls, so
-  // the contest ends on one version without the merge being switched on.
+  // versions and stayed there, measured on four machines on 2026-09-19, and it
+  // was committed here as `it.fails` — green while the body diverged, red the
+  // day it stopped. That is what happened, so the inversion is gone.
+  //
+  // The anti-entropy is what repairs it: each node notices it disagrees with
+  // the hub for longer than the grace period and pulls, so the contest ends on
+  // one version even with the merge switched off. The alias below is kept
+  // because the second case is the CONTEST and the first deliberately is not,
+  // and reading `contest(...)` says which is which.
   const contest = it;
 
   it('lets one writer\'s second edit win, which is not a conflict at all', async () => {

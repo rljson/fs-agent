@@ -10,26 +10,32 @@
 // Every one of these is an OPEN OR CLOSED DEFECT, not an invented case. They
 // are written together, before any of the fixes, so the baseline is explicit.
 //
-// MEASURED BASELINE, 2026-09-30, against `fs-agent` 0.0.85:
+// MEASURED BASELINE, 2026-09-30, against `fs-agent` 0.0.85 — and where each
+// one stands now that the edit chain is in:
 //
 //   T1  green here, LOST DATA IN THE FIELD  — see its comment
 //   T2  green here, LOST DATA IN THE FIELD  — see its comment
 //   T3  green
-//   T4  RED — reproduces the field failure in seven seconds. WP2b's target.
+//   T4  was RED, reproducing the field failure in seven seconds. GREEN, and
+//       deterministically so only under `bucketSync` — see §13.16 of the plan.
 //   T5  green
-//   T6  cannot be written yet — nothing announces a chain head. WP3.
-//   T7  green at 400 files; the scale wall is WP5's, not this file's.
+//   T6  could not be written: nothing announced a chain head. The chain does
+//       now, and what T6 was for is covered by `fs-chain-crosses-the-wire`
+//       and the mesh matrix's J-section, so it was never written here.
+//   T7  green at 400 files; the scale wall is `fs-scale`'s, not this file's.
 //
-// T4 and T6 are committed INVERTED (`it.fails`), not skipped: failing is the
-// expected result and does not break the build, while PASSING breaks it with
-// "this works now — remove the inversion and let it gate". A skipped test is
-// silent in both directions and relies on somebody remembering to return.
+// T4 and T6 were committed INVERTED (`it.fails`) rather than skipped: failing
+// was the expected result, while PASSING broke the build with "this works now
+// — remove the inversion and let it gate". That is what happened, which is why
+// no inversion is left in this package: T4 is an ordinary assertion and T6
+// does not exist. The mechanism is recorded because it is the right way to
+// commit a known-red test, and a skipped one is silent in both directions.
 //
 // The plan this came from predicted T1, T2 and T4 would all be red. Only T4
-// is. **A green T1 or T2 here is not evidence the defect is gone** — both were
-// measured on four machines the same day, and their comments say what this
-// mesh does not yet model. They are kept and asserted because a test that
-// passes is still a regression guard, and because narrowing the rule they
+// was. **A green T1 or T2 here is still not evidence the defect is gone** —
+// both were measured on four machines the same day, and their comments say
+// what this mesh does not model. They are kept and asserted because a test
+// that passes is a regression guard, and because narrowing the rule they
 // depend on is what caused T4's sibling failure.
 //
 // Read `PLAN-fs-edit-chain.md` §7 in the workspace root for why this exists

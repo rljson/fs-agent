@@ -110,9 +110,19 @@ built.
 
 What changed:
 
-- **Ancestry is authoritative on every route, with no switch.** `classify`
-  answers `behind` / `ahead` / `fork` / `incomplete` from the chain, and
-  `resolveConflicts` no longer gates whether causality is consulted.
+- **A node never moves to a state it has already left, and that is not a
+  setting.** `classify` answers `behind` / `ahead` / `fork` / `incomplete`
+  from the chain, and the rollback guard asks it **unconditionally** — the
+  arrival-order race this section was about cannot happen whatever else is
+  configured.
+- **Where the chain can answer, it decides the merge too.** The gate on
+  `resolveConflicts` remains, because a hub deliberately leaves it off to stay
+  a dumb relay, and the One Client sets it `true`
+  (`src/config/fs-sync-options.ts`). What is gone is the second opinion: the
+  old `_ancestryRelation`, which rebuilt a predecessor map from the entire
+  insert-history table on every announcement, now runs only for a peer the
+  chain cannot speak for — an old wire format, or a chain that failed to
+  initialise.
 - **A conflict is ordered on the edit's own `timeId`**, authored where the
   change was made, not on which advertisement arrived last and not on the
   greater blob id. `compareTips` ordering a BRANCH and applying that verdict to

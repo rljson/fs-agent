@@ -7,23 +7,28 @@
 // .............................................................................
 // A transport that carries no ancestry must say so, once, loudly.
 //
-// Without `causalOrdering` nothing on the wire says what a sender had seen when
-// it spoke, so a tree that merely PREDATES this node's newest write cannot be
-// told from one DELETING it. The prune rule has a deliberate escape hatch for
-// that — judging silence as "has not seen my state" refused every deletion
-// across twenty tests — and the hatch is where `KNOWN-WEAKNESSES.md` §3 lives:
-// *"two people save different files at the same moment on different machines,
-// one file disappears, and the node that lost it is the one that created it"*,
-// reproduced in eleven seconds.
+// WHY IT MATTERS HAS CHANGED, and the tests have not — which is the point of
+// asserting on the WARNING and not on its wording.
 //
-// It cannot be closed from inside the agent. Three local prune rules were built
-// and withdrawn proving it: the only predicate that protects the writer also
-// protects it from every legitimate deletion, because the AUTHOR of a file
-// never receives its own path back — and the one that closed §3 broke §1 at
-// four nodes in the same run.
+// It used to be about data loss. Without `causalOrdering` a tree that merely
+// PREDATES this node's newest write could not be told from one DELETING it,
+// the prune rule needed an escape hatch for that case, and the hatch was where
+// `KNOWN-WEAKNESSES.md` §3 lived: *"two people save different files at the same
+// moment on different machines, one file disappears, and the node that lost it
+// is the one that created it"* — reproduced in eleven seconds. Three local
+// prune rules were built and withdrawn proving it could not be closed from
+// inside the agent.
 //
-// So `causalOrdering` is a REQUIREMENT, and the point of these tests is that a
-// configuration which silently loses data cannot be reached silently.
+// **There is no prune rule any more.** An absence is never a deletion; a
+// removal arrives stated in the chain, written down by the node that performed
+// it. So the question those three rules tried to answer is not asked, and §3's
+// scenario is asserted green at mesh tier as F2 — *two nodes writing DIFFERENT
+// files at the same instant keep both*.
+//
+// `causalOrdering` is still a REQUIREMENT, for what it carries rather than for
+// what its absence destroys: the predecessor refs are what let the merge gate
+// fire, so a transport without it reconciles no conflicting edit to one file.
+// A configuration that quietly gives that up must not be reachable quietly.
 // .............................................................................
 
 import { BsMem } from '@rljson/bs';

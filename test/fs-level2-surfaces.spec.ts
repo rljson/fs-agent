@@ -15,7 +15,11 @@
 // not.
 //
 // `GUARD` — passes today and must never stop passing.
-// `it.fails` — red today, deterministically, naming what turns it green.
+//
+// The rest were committed as `it.fails`: red deterministically, each naming
+// what would turn it green. They are all green now and asserted normally —
+// there is nothing to call that is missing any more, which is what this level
+// existed to define.
 // .............................................................................
 
 import { BsMem } from '@rljson/bs';
