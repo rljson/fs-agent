@@ -10,6 +10,7 @@ import { Json } from '@rljson/json';
 import { mkdir, open, stat, utimes } from 'fs/promises';
 import { dirname } from 'path';
 
+import { atomicWriteStream } from './fs-atomic-write.ts';
 import { storeFileAsBlob } from './blob-io.ts';
 
 // .............................................................................
@@ -167,18 +168,22 @@ export class FsBlobAdapter {
     // Stream the blob to disk rather than fetching it whole and then writing
     // it: two full copies of the file in RAM, for no gain, on a path whose
     // whole job is moving bytes between two places that are not memory.
+    //
+    // Through a STAGING FILE, and that part is not tidiness. This used to open
+    // `targetPath` with `'w'` and grow it in place, which truncates the
+    // existing document to zero and then rebuilds it — so a user opening the
+    // file mid-fetch saw it half-written, and the agent's own five-second
+    // safety rescan could hash the partial content and announce it as
+    // authoritative.
+    //
+    // Worse, two concurrent fetches of one path then MIXED: both truncate,
+    // both write from offset zero, and the shorter one leaves the longer one's
+    // tail behind. Measured as a fuzz run where a node held `"s25"` in a file
+    // that had only ever been given `s2`, `s14`, `s15` and `s22` — `"s2"`
+    // written over `"s15"`. This is the bucket-sync fetch path, where a path
+    // edited on both sides is exactly what gets fetched twice.
     const stream = await bs.getBlobStream(metadata.blobId);
-    const handle = await open(targetPath, 'w');
-    try {
-      const reader = stream.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await handle.write(value);
-      }
-    } finally {
-      await handle.close();
-    }
+    await atomicWriteStream(targetPath, stream);
 
     // Preserve modification time if requested
     if (preserveMtime && metadata.mtime) {

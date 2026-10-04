@@ -10,16 +10,13 @@ import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import {
   mkdir,
-  open,
   readdir,
   rename,
   rm,
   lstat,
   rmdir,
   stat,
-  unlink,
   utimes,
-  writeFile,
 } from 'fs/promises';
 import { dirname, join, relative, resolve, sep } from 'path';
 
@@ -29,6 +26,11 @@ import {
   FsAntiEntropy,
   type Reachability,
 } from './fs-anti-entropy.ts';
+import {
+  ATOMIC_TMP_PREFIX,
+  atomicWriteFile,
+  atomicWriteStream,
+} from './fs-atomic-write.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
 import {
   conflictCopyName,
@@ -392,12 +394,9 @@ export const DEFAULT_JOIN_WAIT_MS = 1_500;
  */
 export const CONFLICT_LOG_MAX = 200;
 
-/**
- * Filename prefix for the staging files used by atomic writes. The scanner
- * ignores anything starting with this so the transient temp + rename never
- * pollutes the tree or churns the watcher.
- */
-export const ATOMIC_TMP_PREFIX = '.fsagent-tmp-';
+// `ATOMIC_TMP_PREFIX` now lives in `fs-atomic-write.ts`, beside the writers
+// that use it. Re-exported so this module's surface is unchanged.
+export { ATOMIC_TMP_PREFIX };
 
 /**
  * Filename for the agent's own state, kept beside the synced folder's content
@@ -1396,13 +1395,12 @@ export class FsAgent {
   }
 
   /**
-   * Atomically writes a file: stages the content in a sibling `.<rand>.tmp`,
-   * then renames over the target. The rename is atomic, so a crash mid-write
-   * leaves only the temp behind — never a half-written target file. (We do not
-   * `fsync` the temp: it adds significant per-file latency under bursty
-   * restores, and durability-on-power-loss is secondary here since the content
-   * is replicated and re-synced.) The random suffix keeps concurrent restores
-   * of the same path from trampling each other.
+   * Writes a file through a staging file and a rename.
+   *
+   * Kept as a thin named wrapper because the restore path reads as a pair with
+   * {@link FsAgent._atomicWriteStream}. The rule, and the byte-level
+   * corruption that made it a rule on every platform rather than on Windows
+   * only, are in `fs-atomic-write.ts`.
    * @param filePath - Destination path
    * @param content - Bytes to write
    */
@@ -1410,38 +1408,7 @@ export class FsAgent {
     filePath: string,
     content: Buffer | string,
   ): Promise<void> {
-    // Windows-only. On Windows the temp+rename is atomic AND
-    // ReadDirectoryChangesW keeps watching the path across the rename. On
-    // Linux/macOS a rename replaces the file's inode, which fs.watch can lose —
-    // dropping subsequent change events for that file — so write in place there
-    // (still safe enough: content is replicated and re-synced on any crash).
-    /* v8 ignore next -- @preserve win32 branch not exercised on Linux/macOS CI */
-    if (process.platform !== 'win32') {
-      await writeFile(filePath, content);
-      return;
-    }
-    /* v8 ignore start -- @preserve Windows-only atomic path; CI runs on Linux */
-    const rnd = `${Date.now().toString(36)}-${Math.floor(
-      Math.random() * 1e9,
-    ).toString(36)}`;
-    // Temp lives in the same directory (so the rename is atomic on one
-    // filesystem) but uses the ATOMIC_TMP_PREFIX, which the scanner ignores —
-    // otherwise the native watcher (esp. Linux inotify) would catch the
-    // transient temp/rename and churn the sync state.
-    const tmp = join(dirname(filePath), `${ATOMIC_TMP_PREFIX}${rnd}`);
-    try {
-      await writeFile(tmp, content);
-      await rename(tmp, filePath);
-    } catch (err) {
-      /* v8 ignore start -- @preserve temp cleanup on a failed write */
-      try {
-        await unlink(tmp);
-      } catch {
-        // temp may not exist
-      }
-      throw err;
-    }
-    /* v8 ignore stop -- @preserve */
+    return atomicWriteFile(filePath, content);
   }
 
   /**
@@ -1467,8 +1434,8 @@ export class FsAgent {
   /**
    * Writes a file from a stream, holding one chunk at a time.
    *
-   * The twin of {@link FsAgent._atomicWriteFile}, with the same platform rule
-   * and the same reason for it, but never materialising the whole file. A 500 MB
+   * The twin of {@link FsAgent._atomicWriteFile} — temp and rename on every
+   * platform, for the same reasons — but never materialising the whole file. A 500 MB
    * file used to cost 500 MB of Buffer on the receiving agent, another copy in
    * the socket parser, and — on the serving hub — the same again. That is the
    * shape that killed the cloud EventHub: memory that is work in flight rather
@@ -1484,72 +1451,12 @@ export class FsAgent {
     filePath: string,
     stream: ReadableStream<Uint8Array>,
   ): Promise<void> {
-    // A temp file in the SAME directory, then a rename — on every platform,
-    // not only Windows.
-    //
-    // It used to write straight to `filePath` everywhere but win32, which
-    // means a multi-megabyte file existed at its final name, truncated to
-    // zero, and grew as the stream arrived. Three things can see that, and all
-    // three are worse than a slow restore:
-    //
-    //  - a USER opening the document mid-restore gets a truncated file, and
-    //    for the .dbf and .PRJZ documents this agent exists to carry that is
-    //    silent corruption;
-    //  - this agent's own SCANNER, whose safety rescan runs every five
-    //    seconds, can hash the partial content and announce it to the whole
-    //    network as authoritative — a wrong file, published, with nothing
-    //    saying so;
-    //  - a crash leaves a half-written file that looks complete.
-    //
-    // The call site has claimed "temp + fsync + rename" for a long time. The
-    // branch that did any of it was the one marked as never exercised on CI.
-    //
-    // Rename within a directory is atomic on POSIX and on NTFS, and costs one
-    // directory entry — nothing next to writing the bytes. The prefix is
-    // already in the scanner's ignore list, so a temp file in a watched folder
-    // is not mistaken for user content.
-    const target = join(
-      dirname(filePath),
-      `${ATOMIC_TMP_PREFIX}${Date.now().toString(36)}-${Math.floor(
-        Math.random() * 1e9,
-      ).toString(36)}`,
+    return atomicWriteStream(filePath, stream, (error) =>
+      Object.assign(
+        error instanceof Error ? error : new Error(String(error)),
+        { __blobRead: true },
+      ),
     );
-
-    const handle = await open(target, 'w');
-    try {
-      const reader = stream.getReader();
-      for (;;) {
-        let chunk: ReadableStreamReadResult<Uint8Array>;
-        try {
-          chunk = await reader.read();
-        } catch (error) {
-          throw Object.assign(
-            error instanceof Error ? error : new Error(String(error)),
-            { __blobRead: true },
-          );
-        }
-        if (chunk.done) break;
-        await handle.write(chunk.value);
-      }
-    } catch (error) {
-      await handle.close();
-      // The partial file must not survive the failure — it is invisible to
-      // everything while it carries this name, and leaving it behind would
-      // make it litter.
-      /* v8 ignore next -- @preserve a temp file this call just created */
-      await unlink(target).catch(() => {});
-      throw error;
-    }
-    await handle.close();
-
-    try {
-      await rename(target, filePath);
-      /* v8 ignore start -- @preserve a rename within one directory, onto a path the caller owns */
-    } catch (err) {
-      await unlink(target).catch(() => {});
-      throw err;
-    }
-    /* v8 ignore stop -- @preserve */
   }
 
   /**

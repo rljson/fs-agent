@@ -12,6 +12,12 @@ export {
   type TimeoutConfig,
 } from './fs-agent.ts';
 export {
+  ATOMIC_TMP_PREFIX,
+  atomicTmpPath,
+  atomicWriteFile,
+  atomicWriteStream,
+} from './fs-atomic-write.ts';
+export {
   compileIgnore,
   globToRegExp,
   type IgnoreMatcher,
