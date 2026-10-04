@@ -100,9 +100,38 @@ Without those the fix traded a lost delete for a lost add.
 the whole progression — 4-5 of 8 as shipped, through five packages that were all
 coin flips and two that made it worse.
 
-## Two people saving the same file at the same time
+## CLOSED — two people saving the same file at the same time
 
-**The later write does not win. A deterministic one does.**
+**Closed on 2026-10-04 by the edit chain, on the branch `fs-mesh-harness`.**
+Everything below is kept as the record of what the limit was and how it was
+measured, because the diagnosis at the end of it — *"what fixing it takes:
+making ancestry authoritative on the default path"* — is exactly what was then
+built.
+
+What changed:
+
+- **Ancestry is authoritative on every route, with no switch.** `classify`
+  answers `behind` / `ahead` / `fork` / `incomplete` from the chain, and
+  `resolveConflicts` no longer gates whether causality is consulted.
+- **A conflict is ordered on the edit's own `timeId`**, authored where the
+  change was made, not on which advertisement arrived last and not on the
+  greater blob id. `compareTips` ordering a BRANCH and applying that verdict to
+  paths the branch never touched was itself a defect, fixed with per-path
+  ancestry (`lastEditOf`).
+- **The losing content is always preserved** as a renamed conflict copy, and
+  the conflict is reported.
+
+`should converge when both clients modify the same file` — skipped since
+2026-09-27 as unachievable — is unskipped and green 8 of 8, and its whole file
+15 of 15 twice including the deletion test the old note warned would break.
+Note that test is the SEQUENTIAL case (B waits until it holds A's content
+before writing); the genuinely simultaneous contest is `fs-mesh-field-defects`'
+F5 and F10, which keep both versions and say so.
+
+---
+
+**The historical note follows.** The later write does not win. A deterministic
+one does.
 
 When two workstations change the same file at once, the winner is decided by
 comparing the two blob ids and taking the greater. Both machines see both ids in

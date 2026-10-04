@@ -86,7 +86,15 @@ import { createSocketPair, IoMem } from '@rljson/io';
 import { createTreesTableCfg, Route, type SyncConfig } from '@rljson/rljson';
 import { Client, Server } from '@rljson/server';
 
-import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'fs/promises';
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from 'fs/promises';
 import { dirname, join, relative, sep } from 'path';
 
 import {
@@ -600,9 +608,32 @@ export const buildFsMesh = async (opts: {
         deafInbound = false;
       },
       write: async (path, content) => {
+        // ATOMICALLY, as every real application saves.
+        //
+        // `writeFile` truncates and then writes, so for an instant the file is
+        // ZERO BYTES — and anything watching can observe that. The timeline
+        // sampler did, and the route invariant correctly called it a step
+        // backwards:
+        //
+        //   ["v0","v1","v2","v3","","v4","v5","v6","v7","v8"]
+        //
+        // The fleet was right and the harness was wrong: no editor leaves a
+        // file empty between saves, the agent's own writes go through
+        // temp-and-rename for exactly this reason, and `fs-editor-patterns`
+        // tests that an atomic save converges. A harness that produces a state
+        // no application produces manufactures failures.
+        //
+        // The temp name carries `ATOMIC_TMP_PREFIX`, which the scanner ignores,
+        // so the intermediate file is invisible to sync as well as to the
+        // sampler.
         const file = abs(path);
         await mkdir(dirname(file), { recursive: true });
-        await writeFile(file, content);
+        const tmp = join(
+          dirname(file),
+          `${ATOMIC_TMP_PREFIX}${Math.random().toString(36).slice(2)}`,
+        );
+        await writeFile(tmp, content);
+        await rename(tmp, file);
       },
       del: async (path) => {
         await unlink(abs(path));

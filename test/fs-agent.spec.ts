@@ -1132,82 +1132,18 @@ describe('FsAgent', () => {
       db.notify.unregister(notifyRoute, syncCallback as any);
     });
 
-    it.skip('should automatically sync when db and treeKey are provided in constructor', async () => {
-      // Setup initial file
-      await writeFile(join(testDir, 'auto-sync.txt'), 'initial content');
-
-      // Setup database
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
-      await db.core.createTableWithInsertHistory(treeTableCfg);
-
-      // Create agent with db and treeKey - should automatically start syncing
-      const agent = new FsAgent(testDir, undefined, { db, treeKey });
-
-      // Wait for initial sync
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // Verify initial state was stored
-      let insertHistory = await db.getInsertHistory(treeKey);
-      let historyTable = insertHistory[`${treeKey}InsertHistory`];
-      expect(historyTable._data.length).toBeGreaterThanOrEqual(1);
-      const initialCount = historyTable._data.length;
-
-      // Modify file
-      await writeFile(join(testDir, 'auto-sync.txt'), 'modified content');
-
-      // Wait for automatic sync
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      // Verify new version was automatically created
-      insertHistory = await db.getInsertHistory(treeKey);
-      historyTable = insertHistory[`${treeKey}InsertHistory`];
-      expect(historyTable._data.length).toBeGreaterThan(initialCount);
-
-      // Clean up
-      agent.dispose();
-    });
-
-    it.skip('should stop automatic syncing when dispose is called', async () => {
-      // Setup initial file
-      await writeFile(join(testDir, 'dispose-test.txt'), 'initial');
-
-      // Setup database
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
-      await db.core.createTableWithInsertHistory(treeTableCfg);
-
-      // Create agent with automatic syncing
-      const agent = new FsAgent(testDir, undefined, { db, treeKey });
-
-      // Wait for initial sync
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // Get initial history count
-      const insertHistory1 = await db.getInsertHistory(treeKey);
-      const initialCount =
-        insertHistory1[`${treeKey}InsertHistory`]._data.length;
-
-      // Stop automatic syncing
-      agent.dispose();
-
-      // Modify file after dispose
-      await writeFile(join(testDir, 'dispose-test.txt'), 'after dispose');
-
-      // Wait to ensure no sync happens
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      // Verify no new entries added
-      const insertHistory2 = await db.getInsertHistory(treeKey);
-      const finalCount = insertHistory2[`${treeKey}InsertHistory`]._data.length;
-      expect(finalCount).toBe(initialCount);
-    });
+    // THE CONSTRUCTOR AUTO-SYNC TESTS ARE GONE, with the feature.
+    //
+    // Three tests sat here skipped, exercising `new FsAgent(dir, bs, { db,
+    // treeKey })` as a way to start syncing. That path was removed and now
+    // THROWS — `'Auto-sync from constructor is not supported. Use
+    // syncFromDb() method directly with a Connector instance.'` — and the two
+    // tests that assert the rejection are live, above.
+    //
+    // So they were not a known limit or a deferred decision: they were tests
+    // for code that does not exist, kept alive by `.skip`. Deleted rather
+    // than carried, because a skipped test reads as work outstanding and
+    // these described none.
 
     it('should handle dispose being called when no sync is active', () => {
       // Create agent without db/treeKey
@@ -1273,55 +1209,6 @@ describe('FsAgent', () => {
 
       // Clean up
       stopSyncFromDb();
-    });
-
-    it.skip('should not create loops with bidirectional sync', async () => {
-      // Setup database
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
-      await db.core.createTableWithInsertHistory(treeTableCfg);
-
-      // Create initial file
-      await writeFile(join(testDir, 'test.txt'), 'content');
-
-      // Create agent with bidirectional sync
-      const agent = new FsAgent(testDir, undefined, {
-      ...ORIGIN_FIXTURE,
-        db,
-        treeKey,
-        bidirectional: true,
-      });
-
-      // Wait for initial sync
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Get initial history count
-      const insertHistory1 = await db.getInsertHistory(treeKey);
-      const initialCount =
-        insertHistory1[`${treeKey}InsertHistory`]._data.length;
-
-      // Modify filesystem
-      await writeFile(join(testDir, 'test.txt'), 'modified');
-
-      // Wait for sync
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      // Get final history count
-      const insertHistory2 = await db.getInsertHistory(treeKey);
-      const finalCount = insertHistory2[`${treeKey}InsertHistory`]._data.length;
-
-      // Should have only a few more entries (not dozens from loops)
-      // We expect initialCount + 1 from the modification, but bidirectional
-      // sync may cause 1-2 additional syncs as the change propagates
-      const extraEntries = finalCount - initialCount;
-      expect(extraEntries).toBeGreaterThanOrEqual(1);
-      expect(extraEntries).toBeLessThanOrEqual(3);
-
-      // Clean up
-      agent.dispose();
     });
 
     it('should pause and resume file watching', async () => {

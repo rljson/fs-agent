@@ -127,7 +127,7 @@ describe('a node comes back empty, or holding an older copy', () => {
   // require an operator to approve, keep refusing but push anyway — is the
   // same decision L1 is waiting on for `approved-mass-delete`.
   // ...........................................................................
-  it.skip('OPEN: a wiped node is refilled rather than abandoned', async () => {
+  it('a wiped node is refilled rather than abandoned', async () => {
     mesh = await buildFsMesh({
       root: root('refill'),
       names: ['A', 'B', 'LOST'],
@@ -172,6 +172,25 @@ describe('a node comes back empty, or holding an older copy', () => {
   // sync, then recovery. A ratio with no floor plus a question, rather than a
   // floor with no question.
   // ...........................................................................
+  // THE BAND BETWEEN THE TWO FLOORS, named here because this test sits in it.
+  //
+  // Forty files is above the receiver's floor (`ALL_GONE_MIN_FILES`, ten) and
+  // below the author's (`MASS_DELETE_MIN_FILES`, a hundred). So this wiped node
+  // DOES announce its emptiness, and the point of the test is that A and B
+  // refuse it — which they do, and which is what protects the data.
+  //
+  // What it does not get is a REFILL. Its head descends from the fleet's, so
+  // the fleet's state arrives at it as a rollback and is ignored, while the
+  // fleet ignores its emptiness: both sides are right and nothing moves. Above
+  // a hundred files the push path recognises the loss and re-joins (the test
+  // above, 150 files); below ten nothing is refused in the first place.
+  //
+  // The two floors differ deliberately — refusing to APPLY is free, refusing
+  // to ANNOUNCE resurrects the user's own deletion — and the band is the
+  // price. Closing it needs a signal this agent does not have: that an
+  // announcement was REFUSED. A node cannot tell "nobody followed my deletion
+  // because it was refused" from "nobody has heard it yet", and guessing is
+  // how a legitimate deletion of fifty files comes back.
   it('a small folder survives a wiped peer too', async () => {
     mesh = await buildFsMesh({
       root: root('smallwipe'),
@@ -226,7 +245,37 @@ describe('a node comes back empty, or holding an older copy', () => {
   // So this is a design decision and not a patch — which is why it is skipped
   // with the measurement rather than quietly left out.
   // ...........................................................................
-  it.skip('OPEN: a node reverted to an older copy does not drag the fleet back', async () => {
+  // A RUNNING NODE'S REVERT IS NOT DECIDABLE FROM THE CHAIN. Kept skipped
+  // deliberately, with the reason, because the reason is the result.
+  //
+  // This node CONVERGED on the week's work before it was reverted — the
+  // `settlesOn` above asserts it for all three. So its head descends from the
+  // edit that added `added-later.txt`: it adopted that edit, and now the file
+  // is gone from its folder. Against the chain that is character for character
+  // what a user deleting the file looks like. The same holds for the bytes of
+  // `shared.txt`: a node that adopted v2 and now holds other bytes is a node
+  // that edited it.
+  //
+  // So neither mechanism this package has can separate the two. Per-path
+  // ancestry (`lastEditOf`) says the remover had adopted the edit it is
+  // removing, which is the condition for a LEGITIMATE deletion. Authorship
+  // claims cannot help either: claims are recorded after a push, so a node is
+  // a stranger to its own newest work at the moment it would be judged — which
+  // is how three attempts at a restore detector each suppressed ordinary work
+  // instead (a rename's target, an atomic save, and a file created, deleted
+  // and created again all look exactly like a restored copy by that measure).
+  //
+  // What could separate them is outside the chain by design: mtimes going
+  // backwards, which are deliberately not part of content identity, or breadth
+  // — and two files is below every floor the mass-delete guard has.
+  //
+  // THE FIELD SHAPE IS COVERED. A folder restored from a backup is restored
+  // while the agent is NOT running, and that node then JOINS: `planJoin` puts
+  // every path the history removed in its `recover` bucket, renames it aside
+  // and announces nothing (`fs-plan-join.spec.ts`, and J5 of the matrix). The
+  // uncovered case is a revert performed under a live agent, which no backup
+  // tool does.
+  it.skip('a node reverted to an older copy does not drag the fleet back', async () => {
     // Nextcloud's `testDataFingetPrint`, and our U7. Somebody restores the
     // folder from a backup — on one machine. Every file in it is OLDER than
     // what the fleet holds, and several files the fleet has do not exist in it

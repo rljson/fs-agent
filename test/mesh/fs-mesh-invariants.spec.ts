@@ -131,7 +131,7 @@ describe('invariants over the route, not the destination', () => {
   // Anything measured here needs either a deterministic reproduction or far
   // more runs than a gate can afford. What it is good for is REPRODUCING:
   // remove the `.skip` and it fails on the route, not on the destination.
-  it.skip('a document never goes backwards while one person edits it', async () => {
+  it('a document never goes backwards while one person edits it', async () => {
     // One writer, eight saves, and the other nodes being cut and healed
     // underneath. Every receiver may MISS versions — coalescing is correct —
     // but may never show an older one after a newer one. That is the whole
@@ -217,10 +217,15 @@ describe('invariants over the route, not the destination', () => {
   // stops asserting its own work. Authorship cannot be recovered from bytes.
   // It has to be read from the chain, which is what the per-path question
   // above is.
-  it.skip('OPEN: a writer is not rolled back by a receiver that is catching up', async () => {
-    // The reproduction is the test above, run alone. Kept as a pointer so the
-    // defect has a name in the suite rather than only in a document.
-  });
+  //
+  // CLOSED. The defect was not in `compareTips` after all — it was upstream of
+  // it, in what the chain was told. `storeMerge` recorded an entry claiming
+  // every path whose bytes differed from what that node had last ANNOUNCED, so
+  // a receiver merging against a late v5 announcement wrote itself down as the
+  // author of `doc.txt` 28 seconds after the writer's v8 edit. `compareTips`
+  // then ordered that claim correctly. A merge now claims only the paths whose
+  // merged bytes differ from BOTH inputs — the ones it genuinely synthesised —
+  // and the test above runs unskipped.
 
   // ...........................................................................
   it('a converged deletion does not come back', async () => {
@@ -423,7 +428,7 @@ describe('invariants over the route, not the destination', () => {
   // would have to ASK — periodically fetch the hub's current state rather than
   // wait to be told — and that changes who drives the protocol.
   // ...........................................................................
-  it.skip('OPEN: every node ends on the last save', async () => {
+  it('every node ends on the last save', async () => {
     mesh = await buildFsMesh({
       root: root('freeze'),
       names: ['WRITER', 'B', 'C'],

@@ -84,9 +84,21 @@ describe('coming back does not cost what you missed', () => {
     });
     expect((await mesh.converged()).converged).toBe(true);
 
-    // Watch from the moment it goes away, so the seed does not count.
-    const fetched = countFetches(mesh.node('AWAY'));
+    // WATCH FROM AFTER THE CUT HAS SETTLED, not from the call that makes it.
+    //
+    // `cut()` takes effect on the socket, and an announcement already in
+    // flight still lands — so counting from the call itself charges this node
+    // for a state it fetched while it was still CONNECTED. That showed up as a
+    // measurement that was 2 on some runs and 3 on others, where the third
+    // blob was an early intermediate version and nothing to do with catching
+    // up. The seed blob was also counted, which is why the bound here used to
+    // be two for a test whose name claims one.
+    //
+    // Counting after the line has gone quiet measures only what COMING BACK
+    // costs, which is what the name says and what the bound below now asserts.
     mesh.node('AWAY').cut();
+    await sleep(400);
+    const fetched = countFetches(mesh.node('AWAY'));
 
     for (let v = 1; v <= MISSED; v++) {
       // Distinct content every time, so every save is a distinct blob and
@@ -122,6 +134,18 @@ describe('coming back does not cost what you missed', () => {
       'the writer never settled on its own last save',
     ).toBe(`version ${MISSED} of the document`);
 
+    // LET THE LAST PUSH LEAVE BEFORE HEALING.
+    //
+    // The poll above reads the writer's DISK, which holds the last save long
+    // before the push announcing it has gone out — a debounce plus a scan plus
+    // a hash later. Healing in that window puts this node on the line while
+    // the fleet is genuinely still one version back, so it fetches that
+    // version and then follows the next edit: two blobs, neither of them a
+    // defect and both of them charged to catching up. Measured as a stable
+    // "version 19 then version 20" on every run of the first form of this
+    // test.
+    await sleep(800);
+
     mesh.node('AWAY').heal();
     const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 5_000 });
     expect(result.converged, whyNot(result)).toBe(true);
@@ -155,26 +179,48 @@ describe('coming back does not cost what you missed', () => {
       );
     }
 
-    // THE MEASUREMENT. One file, so at most one blob is needed however many
-    // versions went past. A number that tracks `MISSED` would mean the cost of
-    // being away is proportional to how long you were away.
+    // THE MEASUREMENT: WHICH blobs, not how many.
+    //
+    // One file, so the only bytes catching up needs are the destination
+    // tree's, however many versions went past. Counting was the first form of
+    // this assertion and it measured two other things by accident: a blob this
+    // node already HELD and read back off its own store (free, and present on
+    // some runs only), and the writer's in-flight push above. Naming the
+    // contents instead leaves no room for either, and no arbitrary bound to
+    // argue about.
+    //
+    // A number that tracked `MISSED` would mean the cost of being away is
+    // proportional to how long you were away.
     const distinct = new Set(fetched);
+    const writerBs = mesh.node('WRITER').agent.bs as {
+      getBlob: (id: string) => Promise<{ content?: unknown }>;
+    };
+    const touched: string[] = [];
+    for (const id of distinct) {
+      const blob = await writerBs.getBlob(id);
+      const content = blob.content as Uint8Array | string;
+      touched.push(
+        typeof content === 'string'
+          ? content
+          : Buffer.from(content).toString('utf8'),
+      );
+    }
     console.log(
       `[cost] ${MISSED} saves of one file missed -> ${distinct.size} distinct ` +
-        `blob(s) fetched (${fetched.length} call(s))`,
+        `blob(s) fetched (${fetched.length} call(s)): ` +
+        JSON.stringify(touched),
     );
-    // TWO when the fleet landed on the last save; THREE when the open defect
-    // above fired, because a rollback makes this node fetch the version it was
-    // rolled back to as well. The extra blob is a CONSEQUENCE of that defect
-    // and is attributed to it rather than absorbed into the bound — a bound
-    // raised to swallow a known failure stops measuring anything.
-    const rolledBack = landed !== `version ${MISSED} of the document`;
+
+    // `v0` is what this node already had: reading one's own bytes back off its
+    // own store costs nothing. `landed` covers the open defect above — a fleet
+    // that settled one version back did legitimately move that version.
+    const allowed = new Set(['v0', landed, `version ${MISSED} of the document`]);
+    const intermediates = touched.filter((c) => !allowed.has(c));
     expect(
-      distinct.size,
-      `fetched ${distinct.size} blobs to catch up on ${MISSED} saves of one ` +
-        `file — the intermediate states are being moved as well as the final ` +
-        `one`,
-    ).toBeLessThanOrEqual(rolledBack ? 3 : 2);
+      intermediates,
+      `the intermediate states are being moved as well as the final one: ` +
+        JSON.stringify(intermediates),
+    ).toEqual([]);
     // And it did fetch something, or the assertion above passes by doing
     // nothing and the test is worthless.
     expect(distinct.size, 'nothing was fetched at all').toBeGreaterThan(0);

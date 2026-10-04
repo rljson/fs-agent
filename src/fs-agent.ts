@@ -357,6 +357,28 @@ export const RECOVERED_DIR = '.fsagent-recovered';
 export const JOIN_ASK_INTERVAL_MS = 150;
 
 /**
+ * How often a node ASKS whether the fleet has moved on without it.
+ *
+ * **Because listening is not enough, and the gap is invisible.** The
+ * anti-entropy compares this folder against the last state it HEARD the hub
+ * announce. Under silent announcement loss — which is what a relay under load
+ * does, reporting success and delivering nothing — a receiver hears nothing,
+ * so its idea of the hub stays equal to its own state, the two agree, and it
+ * reports `diverged: false` with zero repairs. *The repair mechanism's own
+ * input is the thing that failed, so the harder the transport fails the
+ * healthier the fleet reports itself.* Measured: receivers six versions behind
+ * a writer, every one of them claiming health.
+ *
+ * Asking costs a read of this node's own database and puts nothing on the
+ * wire: the fleet's entries replicate there, and the newest one is the
+ * question. It cannot help while NOTHING arrives — no local source can — but
+ * it closes the window that matters, where the rows are present and the
+ * announcement that would have triggered a repair was the thing dropped.
+ */
+export const ANTI_ENTROPY_ASK_MS = 2_000;
+
+
+/**
  * How long a joining node asks before concluding it is the origin.
  *
  * The default for every route. Long enough for a hub's bootstrap to arrive on
@@ -858,6 +880,30 @@ export class FsAgent {
 
   /** Asks for the network's state, repeatedly, while a join is pending. */
   private _joinAskTimer: ReturnType<typeof setInterval> | null = null;
+
+
+
+  /**
+   * The two sides of a merge in progress, so its entry claims only its own
+   * work.
+   *
+   * **A merge authors the bytes it PRODUCES, and nothing else.** Where it keeps
+   * this side's content, the author is whoever wrote it here; where it adopts
+   * the other side's, the author is the peer. The only bytes a merge brings
+   * into the world are the ones at paths neither side had — the conflict
+   * copies.
+   *
+   * The merge revision's `changed` was a diff against what this node last
+   * ANNOUNCED, which says nothing about authorship. Measured end to end: node
+   * C merged against a late v5 announcement, took the writer's v5 bytes, and
+   * claimed `doc.txt` — a claim 28 seconds newer than the writer's own v8
+   * edit, so the per-path question answered truthfully and still chose v5.
+   * Then the writer adopted C's state and claimed v5 as well. Two nodes
+   * recorded themselves as the author of a version neither had written.
+   */
+  private _mergeInputs:
+    | { before: ReadonlyMap<string, string>; incoming: ReadonlyMap<string, string> }
+    | undefined;
 
 
 
@@ -2992,62 +3038,7 @@ export class FsAgent {
       initialParentRef === undefined &&
       !this._treeIsEmpty(initialTree);
     if (joinsWithUnknownFiles) {
-      this._joinPending = { db, treeKey };
-      console.warn(
-        `[FsAgent] ${this._rootPath} holds files and no history — waiting up ` +
-          `to ${this._joinWaitMs} ms for the network's state before saying ` +
-          `anything about its own.`,
-      );
-      // AND IT KEEPS LOOKING, rather than waiting to be told once.
-      //
-      // The hub does volunteer its state — the connector has a bootstrap
-      // channel, which is *"the server ANNOUNCING current state"*, and a
-      // bootstrap heartbeat that re-sends it. But a joining node that misses
-      // those has no way to go and find out, and "I heard nothing" is
-      // indistinguishable from "there is nothing" at the moment it has to
-      // decide whether to announce its own folder over the fleet's.
-      //
-      // So it asks until it has an answer: the fleet's entries replicate into
-      // this node's own database after the connection, and the tip is the
-      // question. Nothing new goes on the wire for it.
-      const ask = async (): Promise<void> => {
-        if (this._joinPending === undefined || !this._chain) return;
-        const head = await this._chain.refreshHead().catch(() => undefined);
-        if (head === undefined) return;
-        const entry = await this._chain.entry(head).catch(() => undefined);
-        if (!entry || this._joinPending === undefined) return;
-        console.warn(
-          `[FsAgent] asked for the network's state and found ` +
-            `head=${head.slice(0, 8)}… — reconciling before saying anything`,
-        );
-        await this._reconcileJoin(db, treeKey, entry);
-      };
-      this._joinAskTimer = setInterval(() => {
-        void ask().catch((err) => {
-          /* v8 ignore next -- @preserve a failed ask is retried by the next
-             tick; the bounded wait is what ends it */
-          this._writeSyncError('join/ask', err);
-        });
-      }, JOIN_ASK_INTERVAL_MS);
-      this._joinAskTimer.unref?.();
-
-      // BOUNDED. No head means no history anywhere, so this folder is the
-      // origin and the ordinary push states it. A fleet whose nodes all start
-      // with files all reach here, all time out, and all announce — and their
-      // roots agree by content, so nothing is lost by every one of them
-      // waiting.
-      this._joinWaitTimer = setTimeout(() => {
-        this._joinWaitTimer = null;
-        if (this._joinPending === undefined) return;
-        this._joinPending = undefined;
-        this._stopAsking();
-        console.warn(
-          `[FsAgent] no network state arrived in ${this._joinWaitMs} ms — ` +
-            `this folder is the origin of its own history.`,
-        );
-        void this._pushCurrentState(db, connector, treeKey);
-      }, this._joinWaitMs);
-      this._joinWaitTimer.unref?.();
+      this._deferToNetwork(db, connector, treeKey, 'holds files and no history');
     }
 
     // A node that comes back UNCHANGED has nothing to announce.
@@ -3362,6 +3353,76 @@ export class FsAgent {
               return;
             }
 
+            // A FOLDER THAT HAS LOST EVERYTHING HAS NOT DELETED EVERYTHING.
+            //
+            // A wipe — a disk failure, a folder unmounted and recreated, a
+            // sync root someone moved — looks to a watcher like the user
+            // deleting every file at once. The other nodes refuse to follow it
+            // (`ALL_GONE_MIN_FILES`), which is why no data is lost; but this
+            // node then sits empty for ever, because its own history says it
+            // meant it. Its head descends from the fleet's, so the fleet's
+            // state arrives as a ROLLBACK and is ignored, while the fleet
+            // ignores its emptiness. Both sides are right and nothing moves.
+            //
+            // So an empty folder with a non-empty history is treated as a
+            // LOSS: this node stops claiming anything, forgets the lineage
+            // that says it emptied itself, and asks the network for its state
+            // as a new machine would.
+            //
+            // THE FLOOR HERE IS THE MASS-DELETE ONE, NOT `ALL_GONE_MIN_FILES`,
+            // and the two differ because the two costs differ. The receiving
+            // side refuses to APPLY a state that would empty it, and refusing
+            // is free: nothing is lost, the sender re-announces, anti-entropy
+            // settles it. Refusing to ANNOUNCE is not free — it suppresses the
+            // user's own deletion and then asks the network to put the files
+            // back, which is a resurrection. So a receiver may be cautious
+            // from ten files; an author may not be, and emptying a folder of
+            // fewer than a hundred files is a deletion like any other.
+            //
+            // `fs-scale`'s T1 caught this: it churns by writing twenty files
+            // and deleting all twenty, and with the receiver's floor here that
+            // ordinary emptying was swallowed as a wipe, so the tombstone log
+            // the test measures stayed at zero on every sample.
+            const wasHolding = this._announcedContent.size;
+            if (
+              this._treeIsEmpty(tree) &&
+              wasHolding > MASS_DELETE_MIN_FILES &&
+              this._joinPending === undefined
+            ) {
+              console.warn(
+                `[FsAgent] ${this._rootPath} is empty and its history holds ` +
+                  `${wasHolding} file(s) — treating this as a LOSS, not a ` +
+                  `deletion, and re-joining as a new machine.`,
+              );
+              this._writeSyncError(
+                'push/folderLost',
+                new Error(
+                  `folder emptied while history held ${wasHolding} files; ` +
+                    `re-joining rather than announcing it`,
+                ),
+              );
+              // Nothing here was deleted by anybody, so nothing is tombstoned
+              // and nothing is claimed. Forgetting the lineage is what stops
+              // the fleet's state looking like a rollback.
+              this._pendingDeletes.clear();
+              this._persistTombstones();
+              this._localPathTimeIds.clear();
+              this._announcedContent = new Map();
+              this._hasAnnounced = false;
+              this._chainHead = undefined;
+              this._currentRef = undefined;
+              this._lastSentRef = undefined;
+              this._lastPushedRef = undefined;
+              this._lastSentContentKey = undefined;
+              this._deferToNetwork(
+                db,
+                connector,
+                treeKey,
+                'has lost its contents',
+              );
+              return;
+            }
+
             // Track the ref and content we're sending
             this._lastSentRef = ref;
             this._lastPushedRef = ref;
@@ -3569,12 +3630,21 @@ export class FsAgent {
     const resolver = new FsConflictResolver(
       this._buildConflictResolverDeps(db, treeKey),
     );
-    await resolver.resolve({
-      table: treeKey,
-      type: 'dagBranch',
-      detectedAt: Date.now(),
-      branches: [...headTimeIds, ...incomingTimeIds],
-    });
+    // The two sides, so the merge revision claims only what it produced.
+    this._mergeInputs = {
+      before: this._getFileContentMap(beforeMerge),
+      incoming: this._getFileContentMap(incomingTree),
+    };
+    try {
+      await resolver.resolve({
+        table: treeKey,
+        type: 'dagBranch',
+        detectedAt: Date.now(),
+        branches: [...headTimeIds, ...incomingTimeIds],
+      });
+    } finally {
+      this._mergeInputs = undefined;
+    }
 
     // AND THE MERGE DOES NOT AUTHOR THE BYTES IT KEPT.
     //
@@ -3587,7 +3657,48 @@ export class FsAgent {
     // actually made — a conflict copy — sits at a path no peer sent and is
     // still claimed. Safe to scan here: the watcher is paused for the whole
     // apply, so this sees the merge's own result and nothing else.
-    this._recordReceived(incomingTree, beforeMerge, await this._scanner.scan());
+    const afterMerge = await this._scanner.scan();
+    this._recordReceived(incomingTree, beforeMerge, afterMerge);
+
+    // A MERGE'S OWN WORK IS WHAT IT CHANGED, AND KEEPING BYTES IS NOT WRITING
+    // THEM.
+    //
+    // A merge that resolves `doc.txt` by keeping this side's existing bytes has
+    // not edited `doc.txt`. But the next push computes its delta against what
+    // this node last ANNOUNCED, and after a merge that is some other state — so
+    // the diff reports the path as changed and the entry claims it. The claim
+    // is then the newest edit of that path in the whole fleet, and it carries
+    // the OLDER content.
+    //
+    // Measured on `every node ends on the last save`, with the per-path
+    // verdict already in place and working: the side holding v5 had a LATER
+    // edit of `doc.txt` (…253668) than the writer's v8 (…225297), so the
+    // per-path question answered truthfully and still chose v5. The question
+    // was right; one of its two inputs was a lie.
+    //
+    // Aligning what this node believes it announced, for the paths the merge
+    // left alone, is what stops the lie. The CLAIMS are not touched: a node
+    // that legitimately authored a path it then kept through a merge still
+    // authored it, and dropping that would lose its work in the other
+    // direction.
+    const wasOnDisk = this._getFileContentMap(beforeMerge);
+    const nowOnDisk = this._getFileContentMap(afterMerge);
+    let untouched = 0;
+    for (const [path, hash] of nowOnDisk) {
+      if (wasOnDisk.get(path) !== hash) continue;
+      if (this._announcedContent.get(path) === hash) continue;
+      this._announcedContent.set(path, hash);
+      untouched++;
+    }
+    if (untouched > 0) {
+      // Ordinary operation, not a warning: most merges carry most paths
+      // through. It is logged because "who claimed this path" is the question
+      // a rollback in the field turns into, and this is the answer.
+      console.log(
+        `[FsAgent] merge left ${untouched} path(s) byte-for-byte unchanged — ` +
+          `not claiming them as this node's edits`,
+      );
+    }
   }
 
   /**
@@ -3896,6 +4007,78 @@ export class FsAgent {
    * @param treeKey - The trees table key.
    * @param entry - The head this node is joining onto.
    */
+  /**
+   * Says nothing about this folder until the network's state has been seen.
+   *
+   * Two situations need it, and they are the same situation: this folder's
+   * contents have not been established, so announcing them would make a claim
+   * rather than report a fact.
+   *
+   *  - a folder with files and NO history — a client joining for the first
+   *    time, or one whose folder was copied in from somewhere;
+   *  - a folder that has LOST its contents while having a history — a wipe,
+   *    which is not a deletion anybody performed.
+   *
+   * It keeps ASKING rather than waiting to be told once. The hub volunteers
+   * its state — the connector has a bootstrap channel and a heartbeat — but a
+   * node that misses those cannot tell "I heard nothing" from "there is
+   * nothing", and those demand opposite actions at the moment it decides
+   * whether to speak.
+   *
+   * BOUNDED: no head anywhere means no history anywhere, so this folder is the
+   * origin and the ordinary push states it. A deferral, never a refusal.
+   * @param db - The route's database.
+   * @param connector - Connector to announce on, once there is something to say.
+   * @param treeKey - The trees table key.
+   * @param why - How this folder got here, for the log.
+   */
+  private _deferToNetwork(
+    db: Db,
+    connector: Connector,
+    treeKey: string,
+    why: string,
+  ): void {
+    this._joinPending = { db, treeKey };
+    console.warn(
+      `[FsAgent] ${this._rootPath} ${why} — waiting up to ` +
+        `${this._joinWaitMs} ms for the network's state before saying ` +
+        `anything about its own.`,
+    );
+    const ask = async (): Promise<void> => {
+      if (this._joinPending === undefined || !this._chain) return;
+      const head = await this._chain.refreshHead().catch(() => undefined);
+      if (head === undefined) return;
+      const entry = await this._chain.entry(head).catch(() => undefined);
+      if (!entry || this._joinPending === undefined) return;
+      console.warn(
+        `[FsAgent] asked for the network's state and found ` +
+          `head=${head.slice(0, 8)}… — reconciling before saying anything`,
+      );
+      await this._reconcileJoin(db, treeKey, entry);
+    };
+    this._joinAskTimer = setInterval(() => {
+      void ask().catch((err) => {
+        /* v8 ignore next -- @preserve a failed ask is retried by the next
+           tick; the bounded wait is what ends it */
+        this._writeSyncError('join/ask', err);
+      });
+    }, JOIN_ASK_INTERVAL_MS);
+    this._joinAskTimer.unref?.();
+
+    this._joinWaitTimer = setTimeout(() => {
+      this._joinWaitTimer = null;
+      if (this._joinPending === undefined) return;
+      this._joinPending = undefined;
+      this._stopAsking();
+      console.warn(
+        `[FsAgent] no network state arrived in ${this._joinWaitMs} ms — ` +
+          `this folder is the origin of its own history.`,
+      );
+      void this._pushCurrentState(db, connector, treeKey);
+    }, this._joinWaitMs);
+    this._joinWaitTimer.unref?.();
+  }
+
   /** Stops asking, whichever way the join ended. */
   private _stopAsking(): void {
     if (this._joinAskTimer) clearInterval(this._joinAskTimer);
@@ -4839,6 +5022,23 @@ export class FsAgent {
       // win files it never touched. The answer comes from the chain and not
       // from a clock, which is what makes every node work out the same winner
       // on its own.
+      // A LOG SINK, which this never had.
+      //
+      // `FsConflictResolver` logs through `deps.log?.()`, and with no sink
+      // supplied every line it writes — including the one that says which
+      // paths a per-path verdict moved, and the warning about paths that
+      // cannot be written here — went nowhere. A resolver that resolves in
+      // silence is the defect this package already fixed once at the report
+      // level; it was still true of its log.
+      //
+      // It also cost hours of this investigation: diagnostics added through
+      // this sink produced no output, and the absence was read as the code not
+      // running.
+      log: (level, message) => {
+        if (level === 'error') console.error(message);
+        else if (level === 'warn') console.warn(message);
+        else console.log(message);
+      },
       lastEditOfPath: async (treeRef, path) => {
         await this._ensureChain(db, treeKey);
         const entry = await this._chain
@@ -4901,7 +5101,23 @@ export class FsAgent {
         // The chain entry is still LINEAR here, because naming both parents
         // means mapping two tree refs to two chain heads, and nothing resolves
         // that direction yet. It belongs with the walk.
-        await this._recordChainEntry(ref, this._rememberAnnounced(tree));
+        //
+        // AND IT CLAIMS ONLY WHAT THE MERGE PRODUCED. See `_mergeInputs`: a
+        // path whose merged bytes came from either side was authored by
+        // whoever wrote those bytes, not by the act of choosing between them.
+        const mergeDelta = this._rememberAnnounced(tree);
+        const inputs = this._mergeInputs;
+        if (inputs) {
+          const merged = this._getFileContentMap(tree);
+          mergeDelta.changed = mergeDelta.changed.filter((path) => {
+            const bytes = merged.get(path);
+            return (
+              bytes !== inputs.before.get(path) &&
+              bytes !== inputs.incoming.get(path)
+            );
+          });
+        }
+        await this._recordChainEntry(ref, mergeDelta);
         this._currentRef = ref;
         return ref;
       },
@@ -6135,6 +6351,54 @@ export class FsAgent {
         });
       });
     };
+    // AND IT ASKS, rather than only listening. See `ANTI_ENTROPY_ASK_MS`.
+    //
+    // The same question the join path asks, for the same reason: a node that
+    // only ever hears cannot tell silence from agreement. Here it is the
+    // fleet's newest entry, read locally, offered to the anti-entropy as
+    // though it had been announced — which is what it would have been.
+    const askTheFleet = async (): Promise<void> => {
+      if (!this._chain || this._joinPending !== undefined) return;
+      const head = await this._chain.refreshHead().catch(() => undefined);
+      if (head === undefined) return;
+      const entry = await this._chain.entry(head).catch(() => undefined);
+      if (!entry) return;
+      // Our own state needs no repair, and neither does one we have left.
+      if (entry.treeRef === this._currentRef) return;
+      if (this._chainHead?.head === head) return;
+
+      // ONLY WHEN WE ARE GENUINELY BEHIND, which is the only question this ask
+      // is entitled to raise.
+      //
+      // `refreshHead` returns A tip, and during churn there can be several —
+      // a sibling branch is a tip too. Offering one to the anti-entropy as
+      // though the hub had announced it starts a repair that nothing asked
+      // for: measured as a node ending on round 5 of 10 because a `fork`
+      // verdict sent it into a merge against a branch it was not behind.
+      //
+      // A fork needs no prompting from here. It arrives as an announcement and
+      // the ordinary path resolves it. What an announcement cannot tell us is
+      // that we are MISSING work, because the announcement is the thing that
+      // went missing — so that is the only case worth asking about.
+      if (!this._chainHead) return;
+      const relation = await this._chain
+        .classify(this._chainHead.head, head)
+        .catch(() => undefined);
+      if (relation !== 'behind') return;
+      antiEntropy.observe({
+        ref: entry.treeRef,
+        predecessors: [...entry.previous],
+        reachability: relation,
+      });
+    };
+    const askTimer = setInterval(() => {
+      void askTheFleet().catch((err) => {
+        /* v8 ignore next -- @preserve a failed ask is retried on the next tick */
+        this._writeSyncError('antiEntropy/ask', err);
+      });
+    }, ANTI_ENTROPY_ASK_MS);
+    askTimer.unref?.();
+
     // Two sources of the same announcement. The bootstrap (and its optional
     // heartbeat) reaches every connector anyway. The STATE BEACON is the one a
     // deployment should run: `@rljson/server`'s `stateBeaconMs` sends the same
@@ -6152,6 +6416,7 @@ export class FsAgent {
     // Return cleanup function
     return () => {
       if (fromDbTimer) clearTimeout(fromDbTimer);
+      clearInterval(askTimer);
       for (const event of hubEvents) {
         connector.socket.off(event, onHubAnnouncement);
       }

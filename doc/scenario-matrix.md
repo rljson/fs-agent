@@ -43,6 +43,7 @@ it. The event comes from the watcher; the meaning comes from the chain.
 | L11 | atomic save (temp + rename over) | one edit for the final bytes | final content converges, no temp residue | editor-patterns *an atomic save* |
 | L12 | lock file appears and disappears | edits for a short-lived path | no residue anywhere | editor-patterns *an Office lock file* |
 | L13 | partial copy still being written | **no edit until it settles** | a truncated file is never announced | fs-slow-copy (decision + single node) — **partial** |
+| L13b | a save that TRUNCATES before writing (`>`, `O_TRUNC`) | whatever the filesystem did, in order | the fleet ends on the final bytes, nobody stranded on the empty one | **editor-patterns *a save that TRUNCATES*** ✓ |
 | L14 | touch without changing bytes | **no edit at all** | no traffic, no deletion scare | wiped-and-reverted *touching a file* |
 | L15 | create, delete, create again at one path | claim, removal, claim — in order | the second creation reaches every node | editor-patterns *created, deleted and created again* |
 | L16 | 100 of 400 files deleted at once | 100 removals | all complete everywhere | mesh F7 |
@@ -89,46 +90,54 @@ missing to reach it.
 | J1 | empty | empty | request the head, apply it, **then** accept fs events | folder filled from the network | mesh T7 (populated peer), *handle both folders starting empty* — **partial: no head request** |
 | J2 | empty | non-empty, no head anywhere | this folder is the **origin** | its contents become the first state | fs-plan-join *leaves an origin alone* — **partial** |
 | J3 | empty | non-empty, head exists, folder ⊂ head | write what is missing | folder completed | fs-plan-join *writes what the head has* — **partial** |
-| J4 | empty | non-empty, a path unknown to the history | **announce** it — new work | the node keeps its own work | fs-plan-join *announces a local file the history has never mentioned* — **partial** |
-| J5 | empty | non-empty, a path the history REMOVED | **recover**: rename aside, say nothing | no resurrection, nothing destroyed | fs-plan-join *recovers a local file the history DELETED* — **partial** |
+| J4 | empty | non-empty, a path unknown to the history | **announce** it — new work | the node keeps its own work | **mesh-matrix J4+J5** ✓, fs-plan-join *announces a local file the history has never mentioned* |
+| J5 | empty | non-empty, a path the history REMOVED | **recover**: rename aside, say nothing | no resurrection, nothing destroyed | **mesh-matrix J4+J5** ✓, fs-plan-join *recovers a local file the history DELETED* |
 | J6 | empty | non-empty, a path live on both sides, different bytes | head's bytes win, local kept as a conflict copy | no silent overwrite of local work | fs-plan-join *live on both sides* — **partial** |
 | J7 | empty | non-empty, head exists and is EMPTY | emptiness is a FACT; judge each local path as J4/J5 | an emptied network stays joinable | fs-plan-join *EMPTY head as a fact* — **partial** |
 | J8 | present | agrees with its head | ordinary operation | — | every mesh test |
 | J9 | present | differs from its head (crash, or edited while down) | the chain wins on what it STATES; the rest are new local events | neither loss nor resurrection | **mesh-matrix J9 ×2** ✓ — found a real defect, see §6 |
-| J10 | present | folder WIPED | do not push emptiness; be refilled | fleet intact, node refilled | wiped-and-reverted *does not empty the fleet* ✓; **refill is an open skip** |
-| J11 | present | folder REVERTED to an older copy | the chain's removals win over the old copy | fleet not dragged back | **open skip** — *a node reverted to an older copy* |
+| J10 | present | folder WIPED | do not push emptiness; be refilled | fleet intact, node refilled | wiped-and-reverted *does not empty the fleet* ✓ **and** *is refilled rather than abandoned* ✓ (both 150 files) |
+| J10b | present | folder wiped, 11–99 files | the fleet refuses it; the node is NOT refilled | no data lost anywhere, one node left empty | wiped-and-reverted *a small folder survives a wiped peer too* ✓ — the refill gap is the band between the two floors, documented there |
+| J11 | present | folder REVERTED to an older copy | **undecidable while the agent runs**; decided on JOIN by J5 | fleet not dragged back | J5 at the decision tier; the live-agent revert stays skipped **with the proof**, see §5 |
 
 ---
 
 ## 4. What is missing, in priority order
 
-1. **Nothing asks the hub for a head.** `classify` and `collectRemovals` read
-   the LOCAL database and degrade to `incomplete`; neither requests the rows it
-   is missing. Every **partial** in §3 is partial for this one reason: the
-   decision is built and tested, and the input never arrives. This is also what
-   leaves I9 as *deletions silently delayed*.
-2. **`planJoin` is not wired in.** The startup path still authors a root from
-   whatever the folder holds (§3 J2's behaviour, applied to every row).
-3. **L18 (locked file) is single-node only.** Windows file semantics are the
+The first two entries of this list are **done**, and they were the two that
+mattered: a joining node now asks the hub for its head and keeps asking until
+it gets one, and `planJoin` decides what happens next. Every **partial** in §3
+was partial for that one reason — the decision was built and tested and the
+input never arrived — so those rows are now partial only in TIER: the mechanism
+runs, and J4, J5 and J9 are proven at the mesh tier. What is left:
+
+1. **L18 (locked file) is single-node only.** Windows file semantics are the
    one thing on the list a mesh cannot settle; a Windows CI runner can.
-4. **L13 (partial copy) is single-node only**, and the settle rule it tests is
-   sender-side — the half of this package with the worst record.
-5. **I11 (an empty incoming tree) is single-node only.** I10, its neighbour, is
+2. **L13 (partial copy) is single-node only**, and the settle rule it tests is
+   sender-side — the half of this package with the worst record. Its neighbour
+   L13b (a truncating save) is now at the mesh tier, added when the harness
+   stopped producing a zero-byte intermediate on every write of the suite.
+3. **I11 (an empty incoming tree) is single-node only.** I10, its neighbour, is
    now at the mesh tier; I11 is the same shape with nothing in it.
+4. **J1, J2, J3, J6 and J7 are decision-tier only.** The protocol they decide
+   is now reached and exercised, but each specific shape — an empty folder
+   filled from the network, a conflict on joining, an EMPTY head applied as a
+   fact — is asserted on `planJoin` rather than on a mesh.
 
 Closed since this document was written: **L7, L8, I7, I10 and J9** now have
 mesh-tier tests (`fs-mesh-matrix.spec.ts`), and the harness grew `down()` /
 `up()` to express them — a stopped PROCESS rather than a broken network, which
 is what a crash actually is.
 
-## 5. Open defects referenced above
+## 5. The defect register, and where it now stands
 
-| id | defect | where it is recorded |
+| id | defect | verdict |
 | --- | --- | --- |
-| I12 | a writer rolled back by a receiver that is catching up — `compareTips` orders a BRANCH, so a tip wins paths it never edited | `fs-conflict-resolver.spec.ts` *orders a BRANCH, not a path* (3 ms), `fs-mesh-invariants.spec.ts` |
-| J10 | a wiped node is not refilled | `fs-mesh-wiped-and-reverted.spec.ts` |
-| J11 | a reverted node drags the fleet back — **J5 makes this structurally impossible once wired** | same |
-| — | every node ends on the last save | `fs-mesh-invariants.spec.ts` |
+| I12 | a writer rolled back by a receiver that is catching up | **CLOSED.** `storeMerge` claimed every path whose bytes differed from what the node last ANNOUNCED, so a receiver merging against a late announcement wrote itself down as the author of a file it never edited, with a newer `timeId` than the real edit. A merge now claims only paths whose merged bytes differ from BOTH inputs. 8/8, and the cost test lands on the writer's last save in every run |
+| J10 | a wiped node is not refilled | **CLOSED.** The push path recognises a wipe and defers instead of stating a hundred removals; anti-entropy refills it, because a node that is `behind` now ASKS. 3 × 6/6 |
+| J11 | a reverted node drags the fleet back | **UNDECIDABLE from the chain under a live agent, by proof rather than by effort.** The reverted node had ADOPTED the edit it is now missing, which is the exact condition for a legitimate deletion; and authorship claims are recorded after the push being judged, so a node is a stranger to its own newest work at check time. Three detectors each suppressed ordinary work instead (a rename's target, an atomic save, a create/delete/recreate). The field shape — restore while the agent is stopped, then join — is covered by J5's `recover` bucket. Kept skipped, with the reasoning in the test |
+| — | every node ends on the last save | **CLOSED.** Unskipped and green; a node that is `behind` now ASKS the fleet rather than waiting to be told, which is what ends a frozen receiver |
+| — | a document never goes backwards while one person edits it | **CLOSED.** Unskipped and green — it was the same authorship defect as I12, plus a harness that truncated every file to zero bytes mid-write (see L13b) |
 
 ---
 
@@ -155,3 +164,22 @@ protocol was already proven by a pure function, and the defect was not in a
 decision — it was in the input never being assembled. No decision-tier test
 could have found it, and no single-node test either: it needs a node that
 stops, a folder that changes behind its back, and a peer that has to be told.
+
+---
+
+## 7. A mesh suite's pass count is a sample
+
+Written here because it cost more than any defect in the register. An
+invariants run gave 6/8, then 4/8, then 8/8 on code whose only difference was a
+guard that logged zero hits — so a "6/8 → 4/8 regression" was read off pure
+noise, from a file that already carried a warning about exactly this.
+
+A change to this package is confirmed by a run that **isolates** it, repeated,
+on a test whose assertion names what it means. Two of the three things fixed
+above were only visible once that rule was followed:
+
+- the conflict resolver took a `log` dependency **nothing supplied**, so its
+  diagnostics went nowhere and silence read as "this code never runs";
+- the catch-up cost test asserted a count that included a blob the node already
+  held and the writer's own in-flight push. It now names the contents touched,
+  and reports one blob on every run.

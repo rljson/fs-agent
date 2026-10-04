@@ -244,4 +244,50 @@ describe('how real programs save', () => {
     expect(await mesh.node('B').settlesOn(last, 30_000)).toEqual(last);
     expect(await mesh.node('B').read('cycle.txt')).toBe('final');
   }, 240_000);
+
+  // ...........................................................................
+  it('a save that TRUNCATES before writing still converges on the final bytes', async () => {
+    // The other way programs save, and the one the harness no longer does.
+    //
+    // `node.write()` in the mesh harness goes through temp-and-rename, because
+    // a bare `writeFile` truncates first and leaves the file at ZERO BYTES for
+    // an instant — which the route-invariant sampler observed as
+    // `["v0","v1","v2","v3","","v4",…]` and correctly called a step backwards.
+    // The harness was wrong there: no editor leaves a file empty between
+    // saves, and baking that into every write in the suite manufactured
+    // failures.
+    //
+    // But truncate-then-write is a REAL pattern — `>` in a shell, a program
+    // opening with O_TRUNC — so it gets its own case rather than disappearing
+    // with the harness fix. What is asserted is what can be asserted: an
+    // intermediate empty state MAY be observed and propagated, because the
+    // agent reports what the filesystem did; the fleet must still end on the
+    // final bytes, and must not strand anyone on the empty one.
+    mesh = await buildFsMesh({
+      root: root('truncate'),
+      names: ['A', 'B'],
+      seed: async (folders) => {
+        for (const folder of Object.values(folders)) {
+          await writeFile(join(folder, 'doc.txt'), 'original');
+        }
+      },
+    });
+    expect((await mesh.converged()).converged).toBe(true);
+
+    // Not `node.write()`: straight at the file, truncating, five times over.
+    const file = join(mesh.node('A').folder, 'doc.txt');
+    for (let v = 1; v <= 5; v++) {
+      await writeFile(file, `rewritten ${v}`);
+      await sleep(250);
+    }
+
+    const result = await mesh.converged({ timeoutMs: 60_000, stableMs: 4_000 });
+    expect(result.converged, whyNot(result)).toBe(true);
+    for (const name of ['A', 'B']) {
+      expect(
+        await mesh.node(name).read('doc.txt'),
+        `${name} did not end on the last of the five truncating saves`,
+      ).toBe('rewritten 5');
+    }
+  }, 180_000);
 });
