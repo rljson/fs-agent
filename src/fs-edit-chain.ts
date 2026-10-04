@@ -891,6 +891,15 @@ export interface RemovalQuestion {
    * Absent means "ask the rules below", so an omitted set changes nothing.
    */
   unannounced?: ReadonlySet<string>;
+  /**
+   * How many paths the SAME edit claims.
+   *
+   * It counts towards what the folder would be left with, because a rename
+   * drops every old name and claims every new one — a folder that is renamed
+   * does not shrink, and reading the removals alone makes one look like a
+   * wipe. Default 0, which is what a pure deletion is.
+   */
+  claims?: number;
   /** Below this many removals, nothing is bounded. */
   minFiles: number;
   /**
@@ -989,7 +998,8 @@ export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
   // {@link ALL_GONE_MIN_FILES}, which is low enough to catch a wipe and high
   // enough to leave the folders where emptying is ordinary work alone.
   const allGone =
-    opts.held.size > ALL_GONE_MIN_FILES && apply.length >= opts.held.size;
+    opts.held.size > ALL_GONE_MIN_FILES &&
+    opts.held.size - apply.length + (opts.claims ?? 0) <= ALL_GONE_MIN_FILES;
   const blocked =
     allGone ||
     (apply.length > opts.minFiles &&

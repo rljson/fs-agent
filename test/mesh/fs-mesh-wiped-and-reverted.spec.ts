@@ -245,37 +245,47 @@ describe('a node comes back empty, or holding an older copy', () => {
   // So this is a design decision and not a patch — which is why it is skipped
   // with the measurement rather than quietly left out.
   // ...........................................................................
-  // A RUNNING NODE'S REVERT IS NOT DECIDABLE FROM THE CHAIN. Kept skipped
-  // deliberately, with the reason, because the reason is the result.
+  // A RUNNING NODE'S REVERT IS NOT DECIDABLE FROM THE CHAIN, and this is
+  // MEASURED rather than argued. Committed inverted (`it.fails`) rather than
+  // skipped, so it runs on every gate and breaks the build the day the
+  // protection it wants exists.
   //
-  // This node CONVERGED on the week's work before it was reverted — the
-  // `settlesOn` above asserts it for all three. So its head descends from the
-  // edit that added `added-later.txt`: it adopted that edit, and now the file
-  // is gone from its folder. Against the chain that is character for character
-  // what a user deleting the file looks like. The same holds for the bytes of
-  // `shared.txt`: a node that adopted v2 and now holds other bytes is a node
-  // that edited it.
+  // What actually happens, every run, deterministically in 9.5 seconds:
   //
-  // So neither mechanism this package has can separate the two. Per-path
-  // ancestry (`lastEditOf`) says the remover had adopted the edit it is
-  // removing, which is the condition for a LEGITIMATE deletion. Authorship
-  // claims cannot help either: claims are recorded after a push, so a node is
-  // a stranger to its own newest work at the moment it would be judged — which
-  // is how three attempts at a restore detector each suppressed ordinary work
-  // instead (a rename's target, an atomic save, and a file created, deleted
-  // and created again all look exactly like a restored copy by that measure).
+  //   A holds only  ["shared.txt"]        — `added-later.txt` is gone
+  //   A shared.txt  "week 1"              — reverted
+  //   conflicts reported                  0
   //
-  // What could separate them is outside the chain by design: mtimes going
-  // backwards, which are deliberately not part of content identity, or breadth
-  // — and two files is below every floor the mass-delete guard has.
+  // And every one of those three is CORRECT given what the fleet was told.
+  // The folder was emptied on OLD, so OLD's own watcher authored an edit
+  // STATING the removal of `added-later.txt` — a stated removal from the node
+  // that performed it, which is exactly the authority the whole design rests
+  // on. OLD's rewrite of `shared.txt` descends from week 2, so it is a linear
+  // successor and not a fork; there is no conflict to report and nothing to
+  // keep aside. The fleet followed sound rules on honest-looking input.
   //
-  // THE FIELD SHAPE IS COVERED. A folder restored from a backup is restored
-  // while the agent is NOT running, and that node then JOINS: `planJoin` puts
-  // every path the history removed in its `recover` bucket, renames it aside
-  // and announces nothing (`fs-plan-join.spec.ts`, and J5 of the matrix). The
-  // uncovered case is a revert performed under a live agent, which no backup
-  // tool does.
-  it.skip('a node reverted to an older copy does not drag the fleet back', async () => {
+  // So the two things cannot be separated from the history. A node that
+  // reverted had ADOPTED the edit whose file is now missing, which is the
+  // precise condition for a legitimate deletion, and claims are recorded
+  // after the push being judged, so a node is a stranger to its own newest
+  // work at check time. Three detectors were built on that and each suppressed
+  // ordinary work — a rename's target, an atomic save, a create/delete/
+  // recreate all look like a restored copy by that measure.
+  //
+  // WHAT WOULD ACTUALLY CLOSE IT is not a chain rule. It is the mass-delete
+  // guard, which exists for exactly this and does not fire here: OLD removed
+  // 2 of 2 files, far below `ALL_GONE_MIN_FILES`. A small folder has no
+  // protection at all, which is the same band recorded as J10b in
+  // `scenario-matrix.md` seen from the other side — and the approval path L1
+  // asks for is the product-level answer. Either a guard that works on small
+  // folders, or a trash, or a user who is asked.
+  //
+  // THE FIELD SHAPE IS COVERED. A backup is restored while the agent is NOT
+  // running, so that node JOINS, and `planJoin` renames every path the
+  // history removed into `.fsagent-recovered/` and announces nothing. The
+  // uncovered case is a revert performed underneath a live agent, which no
+  // backup tool does.
+  it.fails('a node reverted to an older copy does not drag the fleet back', async () => {
     // Nextcloud's `testDataFingetPrint`, and our U7. Somebody restores the
     // folder from a backup — on one machine. Every file in it is OLDER than
     // what the fleet holds, and several files the fleet has do not exist in it

@@ -4604,7 +4604,22 @@ export class FsAgent {
       // against 40 held files is a ratio of 1.0 and still under the floor,
       // which is how a wiped peer took every other node's copy with it
       // (`a small folder survives a wiped peer too`).
-      const wouldEmpty = held > ALL_GONE_MIN_FILES && plan.drop.length >= held;
+      //
+      // "ALMOST ALL" IS ALSO A LOSS, and reading the rule as "exactly all"
+      // left the hole one file wide. Measured under full-suite load: a peer
+      // that had been emptied produced a round dropping **39 of 40**, so
+      // `drop >= held` was false and `39 > MASS_DELETE_MIN_FILES` was false
+      // too — both floors missed it and 39 files were deleted with no refusal
+      // logged at all. The node was left holding one file out of forty while
+      // `planRemovals` on the very same node correctly refused "40 of 40".
+      //
+      // What the folder would be LEFT with is the honest measure, and the
+      // paths the same round FETCHES count towards it — otherwise renaming a
+      // directory, which drops every old name and fetches every new one, reads
+      // as a wipe. A rename leaves the folder the same size; a wipe does not.
+      const wouldLeave = held - plan.drop.length + plan.fetch.length;
+      const wouldEmpty =
+        held > ALL_GONE_MIN_FILES && wouldLeave <= ALL_GONE_MIN_FILES;
       const tooMany =
         wouldEmpty ||
         (plan.drop.length > MASS_DELETE_MIN_FILES &&
@@ -4802,6 +4817,10 @@ export class FsAgent {
       localTimeIds: this._localPathTimeIds,
       held,
       unannounced,
+      // What the same edit CLAIMS, so a renamed folder is not read as a wipe:
+      // it drops every old name and claims every new one, and a folder that is
+      // renamed does not shrink. See `RemovalQuestion.claims`.
+      claims: incoming.changed.length,
       minFiles: MASS_DELETE_MIN_FILES,
       maxRatio: MASS_DELETE_MAX_RATIO,
     });
