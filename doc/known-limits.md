@@ -86,9 +86,12 @@ the other's.
 
 It needed two more things to be true at once, and neither was in the plan:
 
-- **the prune rule had to stop deleting on authority it does not have.** An
-  absence prunes only for a sender that has demonstrably seen this node's
-  state (`senderSawMyState`, narrowed on authorship — D5).
+- **the prune rule had to stop deleting on authority it does not have.** It
+  was first narrowed, so an absence pruned only for a sender that had
+  demonstrably seen this node's state — and then removed outright. There is no
+  prune rule and no `senderSawMyState` any more: an absence is never a
+  deletion, and a removal is stated in the chain by the node that performed it.
+  See [One Decision Site](../README.architecture.md#one-decision-site--and-the-removal-of-the-second).
 - **the inline merge had to stop pruning.** It materialises a merged tree, and
   one whose ancestor it could not resolve is missing a side's files. Its
   materialisation is additive and its deletions are targeted at the paths it

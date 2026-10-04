@@ -869,6 +869,28 @@ export interface RemovalQuestion {
   localTimeIds: ReadonlyMap<string, string>;
   /** Relative paths this node currently holds. */
   held: ReadonlySet<string>;
+  /**
+   * Paths this node HOLDS but has never told anyone about — local work made
+   * since its last announcement.
+   *
+   * **A removal cannot be about a file its author has never seen.** A peer's
+   * stated removal travels with the chain and is re-collected by every later
+   * walk, so it keeps arriving after it was first applied. If this node
+   * re-creates the path in the meantime, that creation has no `localTimeIds`
+   * entry yet — claims are recorded by the PUSH, which has not happened — so
+   * the recency rule above cannot see it and the removal deletes a file the
+   * user has just made.
+   *
+   * Measured as `I7b`: three nodes, a deletion everyone applied, then a
+   * different node re-creates the path. The re-created file was removed again
+   * before its author could announce it, and the fleet ended up split, with
+   * the deleter holding the file and the author who re-made it without it.
+   * Found by the random-churn fuzzer at roughly one run in eight; the named
+   * reproduction is deterministic in 33 seconds.
+   *
+   * Absent means "ask the rules below", so an omitted set changes nothing.
+   */
+  unannounced?: ReadonlySet<string>;
   /** Below this many removals, nothing is bounded. */
   minFiles: number;
   /**
@@ -935,6 +957,12 @@ export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
     // Nothing to delete is not a refusal. It is the ordinary case: the peer
     // and this node already agree the path is gone.
     if (!opts.held.has(path)) continue;
+    // Local work nobody has heard of yet outranks any removal, because no
+    // removal can have been about it. See `unannounced`.
+    if (opts.unannounced?.has(path)) {
+      staler.push(path);
+      continue;
+    }
     const local = opts.localTimeIds.get(path);
     if (local !== undefined && compareTimeId(opts.timeId, local) < 0) {
       staler.push(path);

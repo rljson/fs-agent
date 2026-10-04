@@ -144,8 +144,15 @@ agent.dispose();
 
 ### Against a `Client` from `@rljson/server`
 
-What the One Client does. `fromClient` builds the `Db`, the `Connector` and the
-blob store from an initialised client and adds two convenience wrappers.
+What the One Client does, and **the path that defaults to the configuration
+above**. `fromClient` builds the `Db`, the `Connector` and the blob store from
+an initialised client, adds two convenience wrappers, and defaults
+`resolveConflicts`, `causalOrdering` and `includeClientIdentity` to `true`
+because that is the only mode integrated into the product and measured in the
+lab. Your own values still win if you pass them.
+
+`new FsAgent(...)` keeps the primitive defaults — it is the building block, and
+the quick start above sets them explicitly for exactly that reason.
 
 ```typescript
 const agent = await FsAgent.fromClient(folder, treeKey, client, socket, {
@@ -214,13 +221,13 @@ costs.
 
 | option | default | what it does |
 | --- | --- | --- |
-| `resolveConflicts` | `false` | Reconciles two edits to one file, keeping the loser as a renamed copy. **Set it to `true` on a client.** The default is `false` because a hub relays and must not arbitrate. Off, conflicting edits are never merged |
+| `resolveConflicts` | `false` on the constructor, **`true` via `fromClient`** | Reconciles two edits to one file, keeping the loser as a renamed copy. Off, a conflicting edit is never merged — the resolver is not even constructed. The constructor keeps the primitive default because a hub may relay without arbitrating |
 | `onConflict` | — | Called with the conflict reports. Without it a conflict is resolved and nobody is told |
 | `joinWaitMs` | `1500` | How long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
 | `bucketSync` | `true` | Repairs a divergence by comparing manifests and fetching only what is missing, instead of replacing a folder. Defaults to `false` only when `announceTreeRef` is on |
 | `announceTreeRef` | `false` | Announces plain tree refs instead of chain refs — the **old wire format**, for rolling out into a fleet that has not upgraded. Turn it off once every machine has |
 | `antiEntropy` | `DEFAULT_ANTI_ENTROPY` | The periodic comparison that heals a lost announcement. A machine that is behind **asks**, rather than waiting to be told |
-| `syncConfig` | — | Forwarded to every `Connector` the agent builds. `causalOrdering: true` belongs here |
+| `syncConfig` | **`causalOrdering` and `includeClientIdentity` default to `true` via `fromClient`** | Forwarded to every `Connector` the agent builds. Without `causalOrdering` the wire carries no predecessor refs, so no conflicting edit can be merged — the agent warns once, loudly |
 | `clientIdentity` | — | Who this machine is, on the wire |
 
 ### Scanning

@@ -166,6 +166,106 @@ describe('the scenario matrix, at the mesh tier', () => {
   }, 180_000);
 
   // ...........................................................................
+  // I7b — THE SAME QUESTION, WITH THE DELETION ALREADY DELIVERED.
+  //
+  // I7 above has the deleter delete while it is ALREADY cut off, so its
+  // removal reaches nobody and the fleet never agrees the file is gone. This
+  // is the harder order, and it is the one the fuzzer found:
+  //
+  //   1. everybody holds the file;
+  //   2. B deletes it WHILE CONNECTED — the fleet converges on "gone";
+  //   3. B is cut off;
+  //   4. C re-creates the path, strictly later than B's removal;
+  //   5. everybody heals.
+  //
+  // Found by `fs-mesh-invariants`' random churn at seed 1, roughly one run in
+  // eight, as a STABLE split rather than a slow convergence: 120 seconds with
+  // 6 seconds of required stability and the fleet still disagreed. In that run
+  // the deleter B ended up holding `sub/four.txt` while A, C and D — C being
+  // the node that re-created it — had all lost it. So the re-joining node
+  // adopted the newer creation while the rest re-applied its older removal,
+  // which is the two halves of the answer landing on opposite sides.
+  //
+  // The newer creation must win everywhere, as it does in I7.
+  //
+  // COMMITTED INVERTED (`it.fails`) — red today, deterministically, and this
+  // comment names what turns it green. It passes while the body diverges and
+  // breaks the build the day it stops, which is what this package does with a
+  // known-red test rather than skipping it.
+  //
+  // HALF OF IT IS FIXED, and the half that is fixed was data loss:
+  // `planRemovals` now refuses a removal for a path this node holds and has
+  // never announced (`RemovalQuestion.unannounced`). A stated removal is
+  // re-collected by every later walk, so it keeps arriving after it was first
+  // applied — and a path re-created in the meantime has no `localTimeIds`
+  // entry yet, because claims are recorded by the PUSH. So the re-creating
+  // node had its own new file deleted under it, which the trace showed
+  // plainly: `C content: undefined` three seconds after C wrote it. It now
+  // logs `kept 1 path a peer deleted — this node has newer work` and keeps the
+  // file.
+  //
+  // WHAT IS STILL RED, and where to look: the re-creating node holds its own
+  // work and never tells anyone. The trace ends at
+  //
+  //   applied hd3PHz1r… but re-derived _esQ4A0L… — this node is short of
+  //   what it applied
+  //
+  // with no push following it. That message is the defect in one line: the
+  // node is NOT short, it holds a SUPERSET — the applied state plus the file
+  // it just re-created. `postRestoreRef !== treeRef` is read as "I hold less
+  // than I applied", and the two cases need opposite actions. Holding less
+  // means stay quiet, because a node must not advertise a state it does not
+  // have. Holding MORE means announce, because the extra is this node's own
+  // change and no edit exists for it yet — "an edit exists where the change
+  // was made" cuts both ways, and the adoption rule currently swallows the
+  // author's own work along with the sender's.
+  //
+  // Note it reproduces only with `bucketSync` at its DEFAULT. With the flag
+  // forced off the push does go out, which is the old model and not what
+  // ships — see the warning on `bucketSync` in `fs-mesh.ts`.
+  // ...........................................................................
+  it.fails('I7b: a delivered deletion does not beat a later re-creation', async () => {
+    mesh = await buildFsMesh({ root: root('i7b'), names: ['A', 'B', 'C'] });
+
+    await mesh.node('A').write('anchor.txt', 'anchor');
+    await mesh.node('A').write('flip.txt', 'first');
+    expect((await mesh.converged({ timeoutMs: 30_000 })).converged).toBe(true);
+
+    // B deletes it while CONNECTED, so every node agrees it is gone. This is
+    // what makes the removal a delivered fact rather than an unheard one.
+    await mesh.node('B').del('flip.txt');
+    for (const name of ['A', 'B', 'C']) {
+      expect(
+        await mesh.node(name).settlesOn(['anchor.txt'], 30_000),
+        `${name} never saw the deletion`,
+      ).toEqual(['anchor.txt']);
+    }
+
+    // Now B goes away, and C brings the path back — strictly after the
+    // removal everyone has already applied.
+    mesh.node('B').cut();
+    await sleep(400);
+    await mesh.node('C').write('flip.txt', 'brought back by C');
+    for (const name of ['A', 'C']) {
+      expect(
+        await mesh.node(name).settlesOn(['anchor.txt', 'flip.txt'], 30_000),
+        `${name} never saw the re-creation`,
+      ).toEqual(['anchor.txt', 'flip.txt']);
+    }
+
+    mesh.node('B').heal();
+    const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 5_000 });
+    expect(result.converged, whyNot(result)).toBe(true);
+
+    for (const name of ['A', 'B', 'C']) {
+      expect(
+        await mesh.node(name).read('flip.txt'),
+        `${name} lost C's re-creation to a deletion that predates it`,
+      ).toBe('brought back by C');
+    }
+  }, 180_000);
+
+  // ...........................................................................
   // I10 — a peer that holds far less than this node does.
   //
   // Tested against a single agent with a hand-built tree; never with a real

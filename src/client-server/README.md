@@ -8,6 +8,17 @@ found in the LICENSE file in the root of this package.
 
 # Client-Server Architecture for FsAgent
 
+> **`cleanTarget` on the sync path does nothing any more.** It used to be how a
+> deletion propagated: a received tree was applied with a prune, so a path
+> missing from it was removed. That is exactly the inference the edit chain
+> exists to remove — a tree lacks a path because the sender deleted it, or
+> because the sender never had it, and a content hash cannot tell the two
+> apart. `syncFromDb` now always applies **additively** and overrides the flag;
+> a deletion arrives STATED in the chain, written down by the node that
+> performed it. `restore({ cleanTarget: true })` still prunes, for a caller
+> asserting that the tree is the whole truth.
+
+
 This directory contains implementations demonstrating how to use `FsAgent` in a distributed client-server architecture using the `@rljson/server` package.
 
 ## Architecture Overview
@@ -337,26 +348,33 @@ pnpm exec vite-node src/client-server/live-client-server.ts --keep-existing
 
 ## Testing
 
-The comprehensive test suite in `test/client-server/full-sync-test.spec.ts` validates:
+The suite for this pattern lives in `test/client-server/`, and the core of it —
+`shared-sync-tests.ts`, 35 scenarios — is run **twice**: once over `SocketMock`
+and once over a real socket.io server configured at production's 50 MB limit.
+The same assertions, two transports, so a defect in either is visible.
 
-- ✅ One-shot syncs (A→B, B→A)
-- ✅ File updates and modifications
-- ✅ Nested directory structures
-- ✅ Binary file handling
-- ✅ Large file transfers with checksum verification
-- ✅ Deletion handling with `cleanTarget: true` (removes stale files)
-- ✅ Rename/move operations with proper cleanup
-- ✅ Nested directory cleanup with `cleanTarget`
-- ✅ Hidden files
-- ✅ Conflict resolution (last writer wins)
-- ✅ Modification time preservation
-- ✅ Idempotency (same tree ref → same result)
-- ✅ Live sync with filesystem watchers
-- ✅ Bidirectional propagation
+| file | what it validates |
+| --- | --- |
+| `shared-sync-tests.ts` ×2 | a file A→B and B→A, content changes, deletions, a deletion of a file created DURING the session, new and nested directories, directory deletion, empty directories, binaries, empty files, special characters, a file growing and shrinking, a rename, 100 KB, convergence that then goes quiet, and that teardown really stops it |
+| `advanced-sync.spec.ts` | three clients, a late joiner catching up, teardown and restart, 10 MB, 100 files, 50 rapid watcher-driven changes, two clients editing one file |
+| `heals-after-forced-divergence.spec.ts` | deliberately dropped messages — a push the hub never received, a deletion a peer never received, a peer deletion that must NOT be undone, and a node that misses every forward while another keeps writing |
+| `conflict-sync.spec.ts` | a real offline divergent edit, with both versions preserved |
+| `simultaneous-edit.spec.ts` | five rounds of three clients contesting one file |
 
-All tests use the exact same Server/Client pattern documented here.
+**Conflict resolution is not "last writer wins".** The winner is decided on the
+edit's own `timeId` from the shared chain, authored where the change was made —
+not on which advertisement arrived last and not on the greater content hash,
+both of which this package has shipped and both of which gave a different
+answer per machine. The loser is kept as a renamed conflict copy and the
+conflict is reported.
 
-**Coverage:** The project maintains 100% test coverage across all metrics (statements, branches, functions, lines). Every code path is validated, including error scenarios and edge cases.
+**Coverage.** The package gate is 100 % on statements, branches, functions and
+lines — but note that **this directory is excluded from it**
+(`vitest.config.mts`), because the files here are demonstrations rather than
+shipped behaviour. The patterns they show are covered by the suite above; the
+demo scripts themselves are not.
+
+The full picture is in [`../../README.tests.md`](../../README.tests.md).
 
 ## Key Characteristics
 
@@ -447,9 +465,11 @@ const connectorB = new Connector(clientDbB, route, socketB);
 const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey, { notify: true });
 const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey, { notify: true });
 
-// Both clients: watch DB → sync to filesystem (with cleanTarget for deletions)
-const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey, { cleanTarget: true });
-const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey, { cleanTarget: true });
+// Both clients: watch DB → sync to filesystem.
+// No `cleanTarget`: a deletion travels as a stated fact in the edit chain, and
+// an absence from a received tree never deletes anything.
+const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey);
+const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey);
 
 // Later: cleanup
 stopAtoDb();
@@ -526,10 +546,11 @@ Consider:
 
 ## References
 
-- Main architecture documentation: `../../README.architecture.md`
-- FsAgent implementation: `../fs-agent.ts`
-- Test suite: `../../test/client-server/full-sync-test.spec.ts`
-- Copilot instructions: `../../.github/copilot-instructions.md`
+- Design and rules: [`../../README.architecture.md`](../../README.architecture.md)
+- Usage and configuration: [`../../README.public.md`](../../README.public.md)
+- What the suite proves: [`../../README.tests.md`](../../README.tests.md)
+- `FsAgent` implementation: `../fs-agent.ts`
+- Test suite: `../../test/client-server/` — see [Testing](#testing)
 - @rljson/server package: External dependency providing Server/Client classes
 - @rljson/bs package: Blob storage abstraction (BsMem, BsMulti, BsPeer, BsServer)
 - @rljson/io package: I/O abstraction (IoMem, Socket, SocketMock)

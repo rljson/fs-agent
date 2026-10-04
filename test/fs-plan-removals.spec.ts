@@ -237,3 +237,65 @@ describe('planRemovals', () => {
     });
   });
 });
+
+describe('unannounced local work', () => {
+  // A stated removal is re-collected by every later walk, so it keeps arriving
+  // after it was first applied. If this node re-creates the path meanwhile,
+  // that creation has NO `localTimeIds` entry yet — claims are recorded by the
+  // push, which has not happened — so the recency rule cannot see it.
+  //
+  // Measured as `I7b`: the re-created file was deleted under its own author,
+  // three seconds after the write.
+  const base = {
+    removed: ['flip.txt'],
+    held: new Set(['anchor.txt', 'flip.txt']),
+    minFiles: 100,
+    maxRatio: 0.3,
+  };
+
+  it('keeps a path this node holds and has never announced', () => {
+    const plan = planRemovals({
+      ...base,
+      timeId: '9000:zzz',
+      localTimeIds: new Map(),
+      unannounced: new Set(['flip.txt']),
+    });
+    expect(plan.apply).toEqual([]);
+    expect(plan.staler).toEqual(['flip.txt']);
+  });
+
+  it('outranks even a removal with a LATER timeId', () => {
+    // Deliberate, and the reason is not recency: no removal can be about a
+    // file no peer has ever seen. A later `timeId` on the removal does not
+    // make it a statement about this node's unannounced work.
+    const plan = planRemovals({
+      ...base,
+      timeId: '99999999:zzz',
+      localTimeIds: new Map(),
+      unannounced: new Set(['flip.txt']),
+    });
+    expect(plan.staler).toEqual(['flip.txt']);
+  });
+
+  it('applies the removal for a path that IS announced', () => {
+    // The ordinary case must not change: a peer deletes a file this node holds
+    // and has told the network about, and it goes.
+    const plan = planRemovals({
+      ...base,
+      timeId: '9000:zzz',
+      localTimeIds: new Map(),
+      unannounced: new Set(),
+    });
+    expect(plan.apply).toEqual(['flip.txt']);
+  });
+
+  it('changes nothing when the set is omitted', () => {
+    // Every existing caller and every test above passes no set at all.
+    const plan = planRemovals({
+      ...base,
+      timeId: '9000:zzz',
+      localTimeIds: new Map(),
+    });
+    expect(plan.apply).toEqual(['flip.txt']);
+  });
+});

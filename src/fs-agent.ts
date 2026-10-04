@@ -4743,11 +4743,39 @@ export class FsAgent {
     const held = new Set(
       this._getFileContentMap(this._scanner.tree ?? { rootHash: '', trees: new Map() }).keys(),
     );
+    // WHAT THIS NODE HOLDS AND NOBODY HAS HEARD OF.
+    //
+    // `_announcedContent` is what peers know this node has. A path on disk and
+    // absent from it is local work made since the last announcement — and no
+    // peer's removal can be about a file no peer has ever seen. Without this
+    // the removal wins, because a local creation has no `_localPathTimeIds`
+    // entry until the PUSH records one, and the push has not happened yet.
+    // See `RemovalQuestion.unannounced` and `I7b`.
+    // AND ONLY ONCE THIS NODE HAS SPOKEN AT ALL. `_announcedContent` is empty
+    // both for a node that has announced nothing and for one that announced an
+    // empty folder, so before the first announcement "held but never
+    // announced" means EVERY path — and every stated removal would be refused.
+    // Measured immediately: `applies a deletion the sender STATES` and
+    // `applies a stated deletion on a transport that carries no ancestry` both
+    // went red, because their fixtures apply a removal before the agent has
+    // ever pushed.
+    //
+    // This is the same confusion `_hasAnnounced` was introduced for on the
+    // push side — "have I spoken" is not "is what I said empty" — and it is
+    // worth stating twice because it looks like a size check both times.
+    const unannounced = new Set<string>();
+    if (this._hasAnnounced) {
+      for (const path of held) {
+        if (!this._announcedContent.has(path)) unannounced.add(path);
+      }
+    }
+
     const plan = planRemovals({
       removed: incoming.removed,
       timeId: incoming.timeId,
       localTimeIds: this._localPathTimeIds,
       held,
+      unannounced,
       minFiles: MASS_DELETE_MIN_FILES,
       maxRatio: MASS_DELETE_MAX_RATIO,
     });
@@ -6469,17 +6497,45 @@ export class FsAgent {
     // Create Route from treeKey
     const route = Route.fromFlat(`/${treeKey}`);
 
-    // Create Connector with centralized SyncConfig and ClientIdentity
+    // THE INTEGRATION PATH GETS THE FULLY TESTED MODE, by default.
+    //
+    // `fromClient` is how a real client joins a real hub, and it is the only
+    // configuration that is integrated into the product and measured in the
+    // lab. So it defaults to that configuration rather than to the primitive
+    // one, and a caller's own values still win — the spread is after.
+    //
+    // What the weak alternative costs, and why it must not be the default
+    // here: without `causalOrdering` the wire carries no predecessor refs, so
+    // the merge gate in `processRef` cannot fire and a conflicting edit to one
+    // file is never reconciled. Without `resolveConflicts` the resolver is
+    // never constructed at all. A client set up that way runs, logs one
+    // warning, and quietly keeps less than the package promises — which is
+    // exactly what the old README example did.
+    //
+    // Both are no-ops for the One Client, which passes all three explicitly
+    // (`src/config/fs-sync-options.ts`, and both `sl-node` call sites). They
+    // are here for the next integrator.
+    //
+    // `new FsAgent(...)` keeps the primitive defaults: it is the building
+    // block, it is what every test in this package constructs, and a hub that
+    // wants to relay without arbitrating uses it.
     const connector = new Connector(
       db,
       route,
       socket,
-      options?.syncConfig,
+      {
+        causalOrdering: true,
+        includeClientIdentity: true,
+        ...options?.syncConfig,
+      },
       options?.clientIdentity,
     );
 
     // Create FsAgent with client's blob storage
-    const agent = new FsAgent(filePath, client.bs, options);
+    const agent = new FsAgent(filePath, client.bs, {
+      resolveConflicts: true,
+      ...options,
+    });
 
     // Add simplified sync methods
     const enhancedAgent = agent as any;
