@@ -188,57 +188,52 @@ describe('the scenario matrix, at the mesh tier', () => {
   //
   // The newer creation must win everywhere, as it does in I7.
   //
-  // COMMITTED INVERTED (`it.fails`) — red today, deterministically. Four
-  // separate faults were traced from this one scenario; three are fixed and
-  // the fourth is not in this package.
+  // CLOSED. It took four faults across three packages, each masking the next.
   //
-  // 1. FIXED, AND IT WAS DATA LOSS. A stated removal is re-collected by every
-  //    later walk, so it keeps arriving after it was first applied — and a
-  //    path re-created meanwhile has no `localTimeIds` entry yet, because
-  //    claims are recorded by the PUSH. The re-creating node had its own new
-  //    file deleted under it: `C content: undefined`, three seconds after it
-  //    wrote it. `RemovalQuestion.unannounced` now outranks any removal.
+  // 1. A stated removal is re-collected by every later walk, so it keeps
+  //    arriving after it was applied — and a path re-created meanwhile has no
+  //    `localTimeIds` entry yet, because claims are recorded by the PUSH. The
+  //    re-creating node had its own new file deleted under it: the trace read
+  //    `C content: undefined` three seconds after C wrote it. That was data
+  //    loss, and `RemovalQuestion.unannounced` closed it.
   //
-  // 2. FIXED. `_ancestryPrevious` was the only `await` in the push path with
-  //    no timeout, and it HUNG — so the node never announced the file it had
-  //    just brought back. Bounded, and it degrades to announcing without
-  //    db-level predecessors rather than not announcing at all.
+  // 2. `_ancestryPrevious` was the only `await` in the push path with no
+  //    timeout, and it hung — so the node never announced the file it had just
+  //    brought back. Bounded, degrading to a push without db-level
+  //    predecessors rather than no push at all.
   //
-  // 3. FIXED as a hang, not as a recovery. `_resolveAnnouncement` on the
-  //    RECEIVE side hung the same way, swallowing a peer's announcement with
-  //    no log, no retry and no fallback for the rest of the run. It is now
-  //    bounded, loud, and the ref is handed back to the connector's dedup so a
+  // 3. `_resolveAnnouncement` hung the same way on the RECEIVE side,
+  //    swallowing the announcement with no log and no retry. Bounded, loud,
+  //    and the ref is handed back to the connector's dedup so that a
   //    re-announcement can get through.
   //
-  // 4. FIXED IN `@rljson/io` 0.0.81, and that is why this entry changed. All
-  //    three hangs were one hazard: `IoMulti.readRows` said it raced the
-  //    readables in a priority group and then awaited `Promise.allSettled`,
-  //    so a group was only as fast as its slowest member and one silent peer
-  //    cost every read that peer's full request timeout. Fixed there; this
-  //    scenario now runs with ZERO blocked reads where it had one, and
-  //    `every node ends on the last save` went from 13 blocked reads and
-  //    failing 2 runs in 3 to 9 of 9 clean.
+  // 4. All three hangs were ONE hazard in the layers below, and it took three
+  //    fixes because each uncovered the next:
+  //      - `@rljson/io` 0.0.81 — `IoMulti.readRows` said it raced a priority
+  //        group and then awaited `Promise.allSettled`, so a group was only as
+  //        fast as its slowest member;
+  //      - `@rljson/io` 0.0.82 — `readRowsByHashes`, the TREE fetch path,
+  //        walks sources sequentially, so a silent one blocked every source
+  //        behind it;
+  //      - `@rljson/bs` — `BsMulti`'s four read cascades did the same, and a
+  //        blob read is on the RESTORE path. With the tree fetched in 4 s the
+  //        restore still timed out at 15 s, waiting on the cut peer's blob.
   //
-  // WHAT IS STILL RED, and it is the narrowest the residue has been. The
-  // re-creating node now DOES announce — `pushing ref=…  files=2` is in the
-  // log — and the receiving node resolves that announcement without blocking.
-  // It still does not write the file.
+  // Each of those skipped only a source it could SEE was closed. The one that
+  // hurts is open and silent — a half-open socket, a firewall that drops
+  // without resetting — and the fix is the same everywhere: bound a source
+  // while a FALLBACK exists, never the last one.
   //
-  // So the remaining suspect is the TOMBSTONE the receiver set when it applied
-  // the original deletion. `_applyIncomingRemovals` lifts tombstones for the
-  // paths an incoming walk reports in `changed`, and the restore refuses to
-  // write a tombstoned path (`_pendingDeletes`); if the lift does not happen
-  // before the restore for this shape, the re-creation is skipped silently and
-  // the counters `_restoreTombstoned`/`_restoreSkipped` are where it shows.
-  // That is the next thing to instrument — and note the earlier conclusions in
-  // this comment were each arrived at by tracing rather than reasoning, which
-  // is the only thing that has worked on this scenario.
+  // From the trace as it stands: C announces, every node resolves it, fetches
+  // in milliseconds, and all three hold the file — including B, the node that
+  // was cut when the deletion was made. 5 runs of 5.
   //
-  // Note it reproduces only with `bucketSync` at its DEFAULT. With the flag
-  // forced off the timing differs and the push goes out — that is the old
-  // model and not what ships; see the warning on `bucketSync` in `fs-mesh.ts`.
+  // Found by the random-churn fuzzer at roughly one run in eight, as a stable
+  // split rather than a slow convergence. The deterministic reproduction below
+  // is what made it findable at all: reasoning about the cascade was wrong
+  // three times, and the trace was right the first time.
   // ...........................................................................
-  it.fails('I7b: a delivered deletion does not beat a later re-creation', async () => {
+  it('I7b: a delivered deletion does not beat a later re-creation', async () => {
     mesh = await buildFsMesh({ root: root('i7b'), names: ['A', 'B', 'C'] });
 
     await mesh.node('A').write('anchor.txt', 'anchor');

@@ -248,19 +248,23 @@ the item that paid for the test is readable from the test.
 **`it.fails` for a known-red test, never `it.skip`.** An inverted test passes
 while the body fails and turns red the day it starts working, with "this works
 now — remove the inversion and let it gate". A skipped test is silent in both
-directions and relies on somebody remembering to come back. Nine were committed
-inverted during the edit-chain work and **all nine are now ordinary
-assertions**; there is not one inversion left in the package.
+directions and relies on somebody remembering to come back. Ten were committed
+inverted during the edit-chain work; **nine are now ordinary assertions and
+there are no skips anywhere in the package.**
 
-**One skip remains, and it is a proof.** *A node reverted to an older copy does
-not drag the fleet back* is skipped with the argument written into it: the
-reverted node had ADOPTED the edit whose file is now missing, which is the
-exact condition for a legitimate deletion, so the two are not separable from
-the chain under a live agent. Three detectors were built and each suppressed
-ordinary work — a rename's target, an atomic save, a create/delete/recreate —
-because authorship claims are recorded *after* the push being judged. The field
-shape (a backup restored while the agent is stopped, then a join) is covered by
-`planJoin`'s recover bucket.
+**One inversion remains, and it is a proof rather than a backlog item.** *A node
+reverted to an older copy does not drag the fleet back*
+(`fs-mesh-wiped-and-reverted.spec.ts`) carries its own argument: the reverted
+node had ADOPTED the edit whose file is now missing, which is the exact
+condition for a legitimate deletion, so under a live agent the two are not
+separable from the chain. Three detectors were built and every one of them
+suppressed ordinary work — a rename's target, an atomic save, a
+create/delete/recreate — because authorship claims are recorded *after* the
+push being judged. Closing it needs the **L1 approval path**: a human deciding
+whether a bulk disappearance is a restore or a deletion, which is a product
+decision and not a defect in this package. The field shape that matters today
+(a backup restored while the agent is stopped, then a join) is covered by
+`planJoin`'s recover bucket and is green.
 
 **A pass count is a sample, not a measurement.** These suites carry several
 units of run-to-run variance — more than most fixes move. A change is confirmed

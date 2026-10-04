@@ -350,7 +350,33 @@ describe('invariants over the route, not the destination', () => {
         timeoutMs: 120_000,
         stableMs: 6_000,
       });
-      const story = `seed ${seed}, ${writes} writes\n  ${log.join('\n  ')}`;
+      // WHO disagreed, and what each of them thinks the fleet is at.
+      //
+      // Without this a failure reads `applied 7 peer deletions` twice with
+      // nothing saying which node said it, and the only way forward is to
+      // guess. Each node's anti-entropy status is the comparable fact: the ref
+      // it last heard, the ref it holds, and whether it believes those differ.
+      // A 2-2 split where both pairs report `diverged=false` is a different
+      // defect from one where two nodes know they are behind.
+      const perNode = await Promise.all(
+        names.map(async (name) => {
+          const node = mesh.node(name);
+          const ae = node.agent.antiEntropyStatus;
+          const tree = node.agent.getTree();
+          return (
+            `  ${name}: ${(await node.files()).length} files` +
+            `  treeRef=${tree ? 'present' : 'none'}` +
+            `  diverged=${ae?.diverged ?? 'n/a'}` +
+            `  hub=${ae?.hubRef?.slice(0, 8) ?? 'none'}` +
+            `  local=${ae?.localRef?.slice(0, 8) ?? 'none'}` +
+            `  differing=[${ae?.differingPaths?.join(', ') ?? ''}]`
+          );
+        }),
+      );
+
+      const story =
+        `seed ${seed}, ${writes} writes\n  ${log.join('\n  ')}\n` +
+        `state after healing:\n${perNode.join('\n')}`;
       expect(
         result.converged,
         `did not converge after healing.\n${story}\n` +
@@ -387,46 +413,57 @@ describe('invariants over the route, not the destination', () => {
     }, 300_000);
   }
   // ...........................................................................
-  // ANNOUNCEMENT LOSS FREEZES THE FLEET — measured, open, and skipped so it is
-  // visible rather than absent.
+  // ANNOUNCEMENT LOSS USED TO FREEZE THE FLEET. Closed, and this test is the
+  // regression guard — keep it asserting CONTENT, because that is the only
+  // reason it ever caught anything.
   //
   // One writer saves a document eight times while two receivers are cut and
-  // healed underneath. Measured, in under ten seconds:
+  // healed underneath. As first measured, in under ten seconds:
   //
   //   WRITER holds: v8     AE: diverged=false hub=I8gAs19q local=I8gAs19q
   //   B holds:      v2     AE: diverged=false hub=7I0QklQj local=7I0QklQj
   //   C holds:      v2     AE: diverged=false hub=7I0QklQj local=7I0QklQj
   //
-  // The receivers are SIX VERSIONS BEHIND and every health signal says fine.
+  // The receivers were SIX VERSIONS BEHIND and every health signal said fine.
   //
-  // THE MECHANISM, and it is not a race. The anti-entropy decides by comparing
-  // this node's state against THE LAST HUB REF IT HEARD. B never heard about
-  // v3 onwards, so its idea of the hub is still v2, its own state is v2, and
-  // the two agree — `diverged=false`, zero repairs. The repair mechanism's own
-  // input is the thing that failed, so the harder the transport fails the
-  // healthier the fleet reports itself. A dropped announcement is never
-  // retried and the periodic beacon that should cover it is suppressed by the
-  // same dedup it was meant to bypass.
+  // THE MECHANISM, and it was not a race. The anti-entropy decided by
+  // comparing this node's state against THE LAST HUB REF IT HEARD. B never
+  // heard about v3 onwards, so its idea of the hub was still v2, its own state
+  // was v2, and the two agreed — `diverged=false`, zero repairs. The repair
+  // mechanism's own input was the thing that failed, so the harder the
+  // transport failed the healthier the fleet reported itself.
   //
-  // `converged()` passes throughout, because it compares FILE LISTS and
-  // `doc.txt` is present everywhere whatever version it holds. That is why no
-  // test in this repo had ever caught it: nothing compared content across
-  // nodes after a run.
+  // THE FIX, and it was a design decision rather than a patch: anti-entropy
+  // that only ever LISTENS cannot notice silence, so it now ASKS. See
+  // `ANTI_ENTROPY_ASK_MS` — every two seconds a node reads its OWN database
+  // for the newest entry the fleet has replicated there, instead of waiting to
+  // be told about it. That costs nothing on the wire, and it closes the window
+  // that matters: the rows are present and only the announcement that would
+  // have triggered the repair was dropped. It cannot help while NOTHING
+  // arrives — no local source can — and that is the honest limit of it.
   //
-  // NOT AN ARTEFACT OF THE HARNESS, which is the first thing to ask. `cut()`
+  // WHY NO TEST HAD CAUGHT IT. `converged()` compares FILE LISTS, and
+  // `doc.txt` is present everywhere whatever version it holds. Nothing in this
+  // repo compared content across nodes after a run. The assertions below do,
+  // and that is the point of them.
+  //
+  // NOT AN ARTEFACT OF THE HARNESS, which was the first thing to ask. `cut()`
   // models a transport that reports success and delivers nothing, and the
   // relay is already recorded as dropping broadcasts under load. A clean
   // DISCONNECT is a different and gentler fault: it triggers a reconnect,
-  // which resets the dedup and re-announces. Silent loss is the one with no
-  // recovery path.
+  // which resets the dedup and re-announces. Silent loss is the one that had
+  // no recovery path.
   //
-  // It is also not a regression: src from before this session's commits
-  // behaves identically.
-  //
-  // THE FIX IS A DESIGN DECISION, which is why this is reported rather than
-  // patched. Anti-entropy that only ever LISTENS cannot notice silence. It
-  // would have to ASK — periodically fetch the hub's current state rather than
-  // wait to be told — and that changes who drives the protocol.
+  // HOW IT IS MEASURED, and solo runs are not the answer. This test once
+  // passed 8 of 8 on its own and then failed inside a FULL run, because
+  // `converged()` compared file NAMES and returned the moment `doc.txt`
+  // existed everywhere — so the version assertion was sampled a moment after a
+  // convergence that had never looked at content. `converged()` now compares
+  // content (see `fs-mesh.ts`), which closes that sampling window; the
+  // evidence that counts for this one is therefore the full gate, not this
+  // file alone. Solo after the three read-bound fixes (io 0.0.81, io 0.0.82,
+  // bs 0.0.28): 8 of 8, about 11 s each, where it had been failing 2 runs in 3
+  // while the reads could still block.
   // ...........................................................................
   it('every node ends on the last save', async () => {
     mesh = await buildFsMesh({
