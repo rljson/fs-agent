@@ -8,6 +8,66 @@ found in the LICENSE file in the root of this package.
 
 # Architecture
 
+How `@rljson/fs-agent` keeps a folder the same on several machines, and why it
+is built the way it is. For the API and the options, read
+[README.public.md](README.public.md); for what is proven and how, read
+[README.tests.md](README.tests.md).
+
+## The design in one page
+
+**There is no master copy.** Every machine watches its own folder and announces
+what changed. A hub relays and never arbitrates — it holds no opinion about
+what the folder should contain. That is the constraint everything else follows
+from: a decision has to be reachable, identically, on every machine, from data
+every machine has.
+
+**A folder is a tree, identified by its content.** The scanner produces an
+RLJSON tree whose ref is a content hash. Two machines holding the same bytes
+compute the same ref — which requires a canonical child order and requires
+mtime to be *outside* the identity, because mtimes do not survive a restore and
+on Windows regularly do not.
+
+**A change is an edit, in one shared chain.** The chain records what changed,
+what was removed, when, and which state it followed. It is identical on every
+machine, written only where the change was made, and adopted — never re-authored
+— by a receiver. **The filesystem is an event source only.** The watcher says
+something happened; what it means is answered from the chain.
+
+**An absence is not a deletion.** This is the whole reason the chain exists. A
+tree lacks a path because the sender removed it, or because the sender never
+had it, and a content hash cannot distinguish them. Four separate rules were
+built to infer it and all four were withdrawn, costing 155 files of measured
+drift across four machines and a file deleted from 3 642 that came back moments
+later. A removal is therefore **stated**, by the machine that performed it, and
+nothing is pruned on a peer's authority.
+
+**What is transferred is a reference, not a payload.** A machine announces a
+ref; a machine that does not hold that state fetches what it needs. That makes
+a receiver's cost proportional to what actually changed rather than to how long
+it was away.
+
+**Everything is bounded.** Every async step has a timeout, every growing
+structure has a cap, and every walk has a budget — because an unbounded step is
+a silent hang and an unbounded list is tomorrow's memory ceiling.
+
+## How to read this document
+
+| if you want | read |
+| --- | --- |
+| why refs rather than payloads | [Pull-Based Reference Architecture](#pull-based-reference-architecture) |
+| the rules that must not be broken | [Architectural Rules](#architectural-rules-do-not-violate) |
+| a change's journey, end to end | [Data Synchronization Flow](#data-synchronization-flow-how-it-works) |
+| why a node does not echo itself | [Bounce-Back Prevention](#bounce-back-prevention) |
+| how a lost message heals | [Anti-Entropy](#anti-entropy-srcfs-anti-entropyts) |
+| why two folders agree on one ref | [One Folder, One Ref](#one-folder-one-ref--the-canonical-child-order) |
+| how a divergence is repaired without replacing a folder | [Additive Reconciliation](#additive-reconciliation-fs-manifestts--fs-bucket-syncts) |
+| how a deletion travels | [A Delete Travels as a Fact](#a-delete-travels-as-a-fact-collectremovals--planremovals) |
+| what a restart remembers | [Tombstone Log](#tombstone-log-_pendingdeletes--fsagent-statejson) |
+| the history itself | [Edit Chain](#edit-chain-srcfs-edit-chaints) |
+| what a joining machine does | [Joining a Network](#joining-a-network-planjoin) |
+| who is recorded as having changed a file | [Authorship](#authorship-a-node-claims-only-what-it-changed) |
+| which files are skipped | [Ignore Matching](#ignore-matching-srcfs-ignorets) |
+
 ## Pull-Based Reference Architecture
 
 ### Why References Are Required
@@ -746,12 +806,20 @@ version of both at once. The same scenarios run 5 of 8 without it.
 
 ## Rolling Out: what a peer can notice
 
-This branch makes two changes a peer can see, and they are not equally hard.
+This release makes two changes a peer can see, and they are not equally hard.
 
-**The canonical child order changes every tree ref.** Unavoidable, and not
-destructive: `_treesHaveEquivalentContent` sees the two trees as the same
-folder, so no data moves. It shows as a red divergence flag during the rollout
-window — §2.1b's symptom — and clears once every node sorts.
+**Every tree ref in the fleet changes.** Two causes, one effect: content
+identity now fixes a canonical child order, and mtime has left the identity
+altogether — because a modification time does not survive a restore byte for
+byte, and on Windows regularly does not, so while it was in the hash the same
+bytes gave a different ref per machine and a node's deletions were refused by
+everybody.
+
+This is unavoidable and not destructive: `_treesHaveEquivalentContent` sees the
+two trees as the same folder, so no data moves. It shows as a red divergence
+flag during the rollout window — §2.1b's symptom — and clears once every node
+has re-scanned. **Upgrade machines together**, and expect the flag until the
+last one has.
 
 **`~H~` is unintelligible to an older build.** Avoidable, and
 `FsAgentOptions.announceTreeRef` avoids it: a new node speaks the OLD wire
@@ -872,50 +940,60 @@ is what makes one node's history reachable from another's. Consumed once:
 naming it on every later entry would claim to descend from it repeatedly and
 grow every walk for nothing.
 
-## Two Decision Sites, Not One
+## One Decision Site — and the removal of the second
 
-The question *"has the other side seen a state I am in?"* is asked in **two**
-places, and they are not duplicates:
+The question *"has the other side seen a state I am in?"* used to be asked in
+**two** places, and this section used to argue that they were genuinely
+distinct:
 
-| site | question | authorises |
+| site | question | authorised |
 | --- | --- | --- |
 | `antiEntropyDecision` | on divergence, do I push / pull / merge? | a repair |
 | `senderSawMyState` | may this incoming tree **prune my files**? | deletions |
 
-Both read `[currentRef, lastAppliedRef]` against the other side's declared
-predecessors, and both therefore inherit the same ambiguity: one generation of
-ancestry cannot separate "a peer deleted what we added" from "a peer forked
-from an ancestor we share". **A chain consulted for repairs but not for pruning
-leaves the deletion path guessing exactly as it does today.**
+**The second one is gone, rule and enumeration together.** `senderSawMyState`
+and `PruneAuthorityView` were deleted from `fs-anti-entropy.ts`, and the
+enumeration that covered them (level 1's D5) with them.
 
-They are genuinely distinct, which is why narrowing the first in 0.0.84
-correctly left the second alone — and why the second is now a pure exported
-function rather than an expression buried in `syncFromDb`. It can be enumerated
-(`test/fs-anti-entropy-level1.spec.ts`, D5) and it has somewhere for the chain
-to be consulted.
+It was removed rather than fixed because it was the wrong question. Both sites
+read `[currentRef, lastAppliedRef]` against the other side's declared
+predecessors, and both therefore inherited the same ambiguity: one generation
+of ancestry cannot separate "a peer deleted what we added" from "a peer forked
+from an ancestor we share". No rule over that input can be made correct, which
+is why narrowing one of them twice cost a discarded folder the first time and a
+livelock the second.
 
-`senderSawMyState` has two escape hatches, both load-bearing and both measured:
+What replaced it is not a better rule but a different input. **Nothing prunes
+on a peer's authority at all.** A received tree may add and may overwrite; a
+file disappears only when some machine has *stated* its removal in the chain,
+and that statement is applied by `_applyIncomingRemovals` — ordered by
+`timeId`, bounded by the mass-delete guard, and walked back through `previous`
+so a deletion made during a partition is still found.
 
-- **a transport that carries no ancestry** (`causalOrdering` off) always
-  permits the prune — judging silence as "has not seen my state" refused every
-  deletion across twenty tests when it was first tried;
-- **a push declaring no ancestry** is left to the rule above it, because a
-  genuinely fresh client's first push carries no predecessors.
+`senderSawMyState` had two escape hatches, both load-bearing and both measured:
+a transport carrying no ancestry always permitted the prune, and a push
+declaring no ancestry was left to the rule above it. Both are moot — there is
+no prune to authorise. The `causalOrdering` warning survives for a narrower
+reason: the predecessor refs it carries are what let the merge gate fire, so a
+transport without it reconciles no conflicting edit. It is not silent data loss
+any more.
 
-And `lastAppliedRef` counts, not only `currentRef`: after an apply a node
-records `currentRef` from its OWN re-scan, which need not equal the ref the
-tree arrived under — mtimes do not always survive a restore, and on Windows
-they regularly do not. Measured: with `currentRef` alone, three lab runs in
-four converged perfectly on 1 201 files and propagated an added file, and none
-of them could delete one.
+**One decision site remains**, and it is `antiEntropyDecision`, which asks the
+chain first and falls back to heuristics only for a peer the chain cannot speak
+for. See [Deciding From Reachability](#deciding-from-reachability).
 
 ## A Delete Travels as a Fact (`collectRemovals` + `planRemovals`)
 
 A tree records what a folder holds, so a deletion reaches a peer only as an
 **absence** — and an absence is indistinguishable from a state that merely
-predates the file. fs infers the difference from ancestry
-(`senderSawMyState`), which works only while the ancestor can be resolved. A
-partitioned node's cannot, and that is the measured data loss.
+predates the file.
+
+That difference was once inferred from ancestry, which works only while the
+ancestor can be resolved. A partitioned node's cannot, and that is where the
+data loss was measured: 155 files of drift across four machines, and a file
+deleted from 3 642 that was back moments later. Four rules were built on that
+inference and all four were withdrawn; the one that is left is **not to
+infer**. See [One Decision Site](#one-decision-site--and-the-removal-of-the-second).
 
 The chain carries the removal instead, as something the sender **states**.
 
@@ -956,15 +1034,31 @@ removes almost nothing. A missing or malformed `timeId` is **not comparable**,
 never "older": judging silence as untrustworthy refused every deletion across
 twenty tests when it was last tried.
 
-### What this does NOT yet fix
+### What this fixed, and how it was closed
 
-**The deleting node cannot re-announce its own deletion after adopting a peer's
-tree**, so T4 is still a coin flip. `antiEntropyDecision` re-announces only a
-state the node AUTHORED (`_lastPushedRef`), and a node that has applied a peer's
-tree no longer authors its current state — it can only `pull` or `merge`. The
-mechanism here works when a peer does hear the head (measured: *"applied 1 peer
-deletion: doomed.txt"*); what is missing is that the head reliably goes out at
-all. That is a decision-rule problem, not a transport one.
+This section used to read *"the deleting node cannot re-announce its own
+deletion after adopting a peer's tree, so T4 is still a coin flip"*, because
+`antiEntropyDecision` re-announced only a state the node had AUTHORED
+(`_lastPushedRef`) — and a node that has applied a peer's tree no longer
+authors its current state, so it could only `pull` or `merge` and the deletion
+never went out.
+
+Both halves are closed.
+
+**`ahead` no longer requires authorship.** That condition existed only because,
+without a chain, "a state I authored" was the closest available stand-in for "a
+state the other side does not have yet" — and it is a bad one, for exactly the
+case above. Reachability proves the same thing properly, whoever authored it:
+if the chain says the other side is behind, this node pushes.
+
+**And a node that is behind now ASKS**, rather than waiting to be told. That is
+what refills a machine whose folder was wiped, and it is what closed the
+fleet-level invariant *every node ends on the last save*.
+
+T4 — *a delete made while cut off is not resurrected on rejoin* — was a coin
+flip through four work packages and is **8 of 8** under `bucketSync`. It is an
+ordinary assertion in `test/mesh/fs-mesh.spec.ts`; nothing in this package is
+committed inverted any more.
 
 ## Tombstone Log (`_pendingDeletes` + `.fsagent-state.json`)
 
@@ -1138,19 +1232,153 @@ schema without release-locking its host.
 so multiple parents are representable — it is only the manager that will not
 walk them.
 
-### Known limit: one head slot
+### The head, and what used to be a limit
 
-`FsEditChain` tracks a single head, chosen as the tip with the greatest
-`timeId`. Every node keeps its own lineage and chains are never merged, so once
-the walk starts pulling peers' rows this table holds several tips and "the
-greatest" can be somebody else's. `@rljson/mongo-agent` had exactly this bug —
-lost updates root-caused to a single `_lastApplied` slot rather than per-node
-lineages — and fixed it by tracking lineages. Nothing reads this chain yet, so
-the limit is not reachable; the walk must replace it rather than build on it.
+This section used to say *"`FsEditChain` tracks a single head, chosen as the tip
+with the greatest `timeId` … Nothing reads this chain yet, so the limit is not
+reachable; the walk must replace it rather than build on it."*
 
-**Tested by** `test/fs-edit-chain.spec.ts`, including the two properties that
-justify the module: two parents round-trip, and a re-derived tree ref gets a
-new entry identity.
+The chain is now the sync mechanism, so the limit became reachable and the walk
+did replace it. Three things changed:
+
+- **A head is parked per announced tree ref, not held in one slot.** When an
+  announcement arrives, the sender's head is remembered against the tree ref it
+  described (`_announcedHeads`, bounded by `ANNOUNCED_HEAD_MAX`, oldest first)
+  and promoted only when that state is actually applied. The slot version made
+  a node claim a lineage descending from a state it had merely *heard about* —
+  **hearing a head is not holding its state**.
+- **`classify` walks, with a budget.** It answers `behind` / `ahead` / `fork` /
+  `incomplete` by walking `previous`, bounded by `DEFAULT_MAX_WALK`, with a
+  lineage cache. A truncated walk answers `incomplete`, never `fork` — acting
+  on a truncated walk is how a node decides it is ahead of a peer it is behind.
+- **Per-path ancestry, where a branch verdict was wrong.** `lastEditOf` answers
+  "who last edited *this path*" by walking generation by generation and sorting
+  within a generation. Taking the greatest `timeId` was not enough: two edits
+  in the same millisecond break on a random tail, so it could name an entry its
+  own successor had superseded.
+
+`@rljson/mongo-agent` had the single-slot bug too — lost updates root-caused to
+one `_lastApplied` slot rather than per-node lineages — and fixed it the same
+way.
+
+**Tested by** `test/fs-edit-chain.spec.ts` (20), `test/fs-classify.spec.ts`
+(11), `test/fs-collect-removals.spec.ts` (31),
+`test/fs-agent-announced-heads.spec.ts` (the cap) and
+`test/fs-chain-crosses-the-wire.spec.ts` (a peer walking `previous` through
+entries it never held).
+
+## Joining a Network (`planJoin`)
+
+The case the chain exists for, and the one that used to be decided by whatever
+the folder happened to hold.
+
+A joining node used to author a lineage root from its own contents and push it
+as the network's newest claim. That is one defect with two faces: every node
+got its own root, so `classify` answered `fork` to every announcement ever
+made; and a machine restored from a backup pushed a month of deletions back to
+the whole fleet.
+
+**The chain applies first, and the filesystem only then.** A folder with files
+and no history does not speak: it defers its first announcement and asks the
+network for a head, every `JOIN_ASK_INTERVAL_MS`, until a bounded
+`joinWaitMs` expires. That default is **on, on every route** — a joiner that
+cannot be told must ask, and keep asking.
+
+With a head in hand, `planJoin` puts every path in **at most one** of four
+buckets, deciding each against the chain and never against the disk:
+
+| bucket | the path is | action |
+| --- | --- | --- |
+| `write` | in the head, not on disk | write it |
+| `announce` | on disk, never named anywhere in the history | new local work — announce it |
+| `recover` | on disk, and REMOVED by the history | a stale copy: rename aside, say nothing |
+| `conflict` | live on both sides, different bytes | the head's bytes win, the local copy is kept aside |
+
+`recover` is what makes a restored backup safe. The files are moved into
+`.fsagent-recovered/`, which the scanner ignores — because a tree ref carries
+content, so a "kept but not announced" file cannot exist *inside* the synced
+folder. Nothing is resurrected and nothing is destroyed.
+
+If no head arrives within the wait, this folder is the origin of its own
+history and announces normally. An empty head is a **fact**, not an absent
+one: a fleet that has agreed the folder is empty states exactly that, and each
+local path is still judged as new work or as a stale copy. Conflating the two
+is what would make an emptied network un-joinable.
+
+**Tested by** `test/fs-plan-join.spec.ts` (9 decision cases, including that
+every path lands in at most one bucket) and at mesh tier by
+`fs-mesh-matrix.spec.ts` **J4+J5** and **J9** twice — the latter using a
+stopped PROCESS rather than a broken network, because that is what a restart
+is.
+
+## Authorship: a node claims only what it changed
+
+The standing design rule, and the one most easily violated in a single branch:
+**an edit exists only where the change was made.** A receiver adopts and never
+authors. Without it, a machine catching up records itself as the author of
+somebody else's file, and then correctly out-orders the person who actually
+typed.
+
+Four places broke it, and each is now a test:
+
+1. **A merge claimed too much.** `storeMerge` recorded an entry claiming every
+   path whose bytes differed from what that node had last *announced* — so a
+   receiver merging against a late announcement wrote itself down as the author
+   of a file it had never edited, 28 seconds after the real edit. A merge now
+   claims only the paths whose merged bytes differ from **both** inputs: the
+   ones it genuinely synthesised.
+2. **A received path was claimed.** `_recordReceived` records only what
+   actually ARRIVED, measured against the state before the apply — without the
+   before-state, a node's own bytes returning from a peer drop its claim.
+3. **The first local edit was authorless.** "Have I announced before" is not
+   "is what I announced empty": `previous.size === 0` is true both for a node
+   that has never spoken and for one that has announced an empty folder, which
+   is every fresh client. The first real file written on a new node was never
+   claimed.
+4. **A re-derived state got a stale identity.** Returning to a content state is
+   a NEW entry, not the old one.
+
+**The practical rule for anyone adding a guard to the push path:** check
+whether the signal it reads is populated *before* or *after* the push. Claims
+are recorded by `_recordChainEntry` **after** the state being judged, so a node
+is a stranger to its own newest work at that moment — which is why three
+attempts at a restore detector each suppressed ordinary work instead (a
+rename's target, an atomic save, a create/delete/recreate are all unclaimed at
+that instant). And a guard that needs an `await` in the push path is already
+wrong: the yield between "this is what I am announcing" and "this is the entry
+for it" lets another apply land in the middle.
+
+**Tested by** `test/fs-agent-authorship.spec.ts`,
+`fs-agent-no-laundering.spec.ts`, `fs-agent-own-echo.spec.ts`,
+`fs-agent-self-parent.spec.ts`, `fs-agent-inbound-verdict.spec.ts` and
+`fs-agent-stale-reconnect.spec.ts`.
+
+## Ignore Matching (`src/fs-ignore.ts`)
+
+Which files the sync never sees. Glob syntax — `*`, `?`, `**`, folders with
+`/`, anchored at the root, `!` exceptions with last-match-wins,
+case-insensitive, `/` equivalent to `\`.
+
+The rule before was `name === pattern || name.startsWith(pattern)`, which
+cannot express an extension: `*.exe` matched nothing, because no file is called
+`*.exe` and none begins with it.
+
+**The compatibility rule is load-bearing.** A pattern with none of `*`, `?`,
+`/` or `\`, not starting with `!` and not ending with `/` keeps its old
+prefix meaning. That is not courtesy to old configuration files: `~$` and
+`.~lock.` are the Office and LibreOffice lock-file prefixes, and
+`ATOMIC_TMP_PREFIX` (`.fsagent-tmp-`) is how the agent hides its own
+in-progress writes from its own watcher. Read as globs all three would match
+only a file named exactly that, every atomic write would return as a change
+event, and the debounce that batches a push would be reset before it could
+fire — a defect this package has already had.
+
+The matcher is compiled once per agent, because a scan of a real catalogue asks
+this question once per file.
+
+**Tested by** `test/fs-ignore.spec.ts` (28), whose first block is one case per
+pattern that appears in the shipped configuration or in the agent's own list —
+that being the half which can break a running fleet.
 
 ## Known Constraints
 

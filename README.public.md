@@ -8,1054 +8,465 @@ found in the LICENSE file in the root of this package.
 
 # @rljson/fs-agent
 
-> **A powerful filesystem agent that seamlessly synchronizes your file system with RLJSON databases, providing automatic bidirectional sync, tree structures, and content-addressed blob storage.**
+> **Keeps a folder on several machines the same, without a central authority
+> deciding what the folder contains.**
 
-## Overview
+Each machine watches its own folder, writes down what changed, and tells the
+others. There is no master copy: a hub relays, it does not arbitrate. Two
+people editing at once get one agreed result with both versions kept, and a
+machine switched off for a week catches up without replaying the week.
 
-`@rljson/fs-agent` bridges the gap between your filesystem and RLJSON databases. It watches for changes, extracts hierarchical tree structures, stores file content efficiently in blob storage with automatic deduplication, and maintains complete version history. With built-in bidirectional synchronization, your filesystem and database stay perfectly in sync—automatically.
+- [What it is, in one page](#what-it-is-in-one-page)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Starting and stopping](#starting-and-stopping)
+- [Configuration](#configuration)
+- [Ignore patterns](#ignore-patterns)
+- [Reading what the agent is doing](#reading-what-the-agent-is-doing)
+- [Using it without sync](#using-it-without-sync)
+- [What it guarantees — and what it does not](#what-it-guarantees--and-what-it-does-not)
+- [Troubleshooting](#troubleshooting)
+- [Known constraints](#known-constraints)
+- [Further reading](#further-reading)
 
-### Why Use fs-agent?
+---
 
-- 🔄 **Automatic Synchronization**: Changes flow seamlessly between filesystem and database
-- 🌳 **Tree Structures**: Represents directories as RLJSON tree structures with parent-child relationships
-- 💾 **Smart Storage**: Content-addressed blob storage eliminates duplicate file content
-- 📜 **Version History**: Every change is tracked with complete insert history
-- 🔁 **Bidirectional Sync**: Changes in either direction are automatically propagated
-- 🛡️ **Loop Prevention**: Content-based dedup, ref tracking, and debounce prevent infinite sync loops
-- ⏱️ **Timeout Guards**: Every async operation is bounded to prevent silent hangs
-- 🎯 **Debounce**: Rapid filesystem events are coalesced into a single sync cycle
-- ✅ **Type-Safe**: Full TypeScript support with comprehensive type definitions
-- 🧪 **Battle-Tested**: 100% test coverage with 204 tests (SocketMock + Socket.IO)
-- 🧹 **Target Cleanup**: Optional `cleanTarget` restore prunes stale files and directories
+## What it is, in one page
 
-## Installation
+Three things, and the third is the one that matters.
+
+**A folder becomes a tree.** The scanner walks the folder and produces an
+RLJSON tree: one node per directory, one entry per file, each file's bytes in
+content-addressed blob storage. Two files with the same bytes are stored once,
+anywhere in the fleet. The tree has a **ref** — a content hash — and two
+machines holding the same bytes compute the same ref. A file's modification
+time is deliberately *not* part of that identity, because it does not survive a
+restore byte for byte and on Windows regularly does not.
+
+**A change becomes an edit.** Every change a machine makes is written into an
+**edit chain**: what changed, what was removed, when, and which state it
+followed. The chain is one shared history, identical on every machine, and it
+is the only thing that answers a question. The filesystem is an *event source
+only* — the watcher says something happened, and what that means is read from
+the chain.
+
+**That is why a deletion works.** An absence is not a deletion. A tree lacks a
+path because the sender removed it, or because the sender never had it, and a
+content hash cannot tell the two apart. So a removal is **stated** by the
+machine that performed it, and a receiver applies what is stated rather than
+inferring from what is missing. Every attempt to guess it instead cost data —
+see [doc/known-limits.md](doc/known-limits.md).
+
+Consequences worth knowing before you start:
+
+|  |  |
+| --- | --- |
+| **A deletion is a fact, not a gap** | so it survives a partition, a restart, and a peer who never heard about it |
+| **A receiver never claims authorship** | so a machine catching up cannot out-order the person who actually typed |
+| **A conflict keeps both versions** | one wins deterministically on every machine, the loser is kept as a renamed copy, and the conflict is reported |
+| **Nothing is pruned on a peer's authority** | a tree you receive can add and overwrite; only a stated removal deletes |
+| **A joining machine applies the history first** | and a file the history deliberately deleted is moved aside, not resurrected and not destroyed |
+
+---
+
+## Install
 
 ```bash
 npm install @rljson/fs-agent
 ```
 
-## Quick Start
+Peers: `@rljson/rljson`, `@rljson/db`, `@rljson/io`, `@rljson/bs`,
+`@rljson/server`. Node 22 or newer.
 
-### Basic Usage - Automatic Sync
+---
 
-The simplest way to get started is with automatic synchronization:
+## Quick start
+
+**This is the production configuration.** Every option is here for the reason
+named beside it; a setup without them runs, and quietly gives up guarantees you
+probably want.
 
 ```typescript
 import { FsAgent } from '@rljson/fs-agent';
+import { BsMem } from '@rljson/bs';
 import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
-import { BsMem } from '@rljson/bs';
-import { Route, createTreesTableCfg } from '@rljson/rljson';
+import { createTreesTableCfg, Route } from '@rljson/rljson';
 
-// Setup database
+// --- the database the folder is mirrored through -------------------------
 const io = new IoMem();
 await io.init();
 const db = new Db(io);
 
-// Create tree table (must end with "Tree")
+// The table name MUST end in `Tree`. That suffix is what selects the
+// filesystem engine at runtime — it is not a naming convention.
 const treeKey = 'projectFilesTree';
-const treeTableCfg = createTreesTableCfg(treeKey);
-await db.core.createTableWithInsertHistory(treeTableCfg);
+await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
 
-// Create FsAgent
+// --- the agent ----------------------------------------------------------
 const agent = new FsAgent('./my-project', new BsMem(), {
-  ignore: ['node_modules', '.git', 'dist'],
-  maxDepth: 10,
+  ignore: ['node_modules', '.git', 'dist', '*.log'],
+
+  // Reconciles two edits to one file and keeps both versions. The One Client
+  // sets this; a hub deliberately leaves it off to stay a dumb relay. Off,
+  // a conflicting edit is never merged.
+  resolveConflicts: true,
+
+  // Told, not discovered: where a conflict is reported to a user.
+  onConflict: (reports) => console.warn('conflict', reports),
+
+  // So a restart does not re-read and re-hash the whole folder.
+  scanCachePath: '.cache/fs-agent-scan.json',
 });
 
-// Create Connector for socket-based synchronization
+// --- the transport ------------------------------------------------------
 const socket = new SocketMock();
 const route = Route.fromFlat(`/${treeKey}`);
-const connector = new Connector(db, route, socket);
+const connector = new Connector(db, route, socket, {
+  // A REQUIREMENT, not a tuning option: the predecessor refs this puts on
+  // the wire are what let a conflicting edit be merged at all. The agent
+  // warns, once and loudly, if it is missing.
+  causalOrdering: true,
+  includeClientIdentity: true,
+});
 
-// Start syncing
-const stopSync = await agent.syncToDb(db, connector, treeKey);
+// --- start: RECEIVE FIRST, then push ------------------------------------
+// A machine that announces before it can hear speaks about a state it may be
+// about to replace.
+const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
+const stopToDb = await agent.syncToDb(db, connector, treeKey);
 
-// The agent now:
-// ✓ Watches your filesystem for changes
-// ✓ Extracts tree structures from directories
-// ✓ Stores file content in blob storage
-// ✓ Broadcasts changes via Connector
-
-// When you're done:
-stopSync();
+// ... later
+stopToDb();
+stopFromDb();
 agent.dispose();
 ```
 
-### Bidirectional Sync
+### Against a `Client` from `@rljson/server`
 
-Enable two-way synchronization so changes in the database also update the filesystem:
+What the One Client does. `fromClient` builds the `Db`, the `Connector` and the
+blob store from an initialised client and adds two convenience wrappers.
 
 ```typescript
-import { Connector } from '@rljson/db';
-import { Route } from '@rljson/rljson';
-import { SocketMock } from '@rljson/io';
-
-const agent = new FsAgent('./my-project', new BsMem(), {
-  ignore: ['node_modules', '.git', 'dist'],
+const agent = await FsAgent.fromClient(folder, treeKey, client, socket, {
+  ignore,
+  resolveConflicts: true,
+  scanCachePath,
 });
 
-// Create Connector for bidirectional communication
-const socket = new SocketMock();
-const route = Route.fromFlat(`/${treeKey}`);
-const connector = new Connector(db, route, socket);
-
-// Start filesystem → database sync
-const stopToDb = await agent.syncToDb(db, connector, treeKey);
-
-// Start database → filesystem sync (same Connector)
-const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
-
-// Now the agent handles changes in BOTH directions:
-// 1. Filesystem changes → automatically synced to database
-// 2. Database changes → automatically synced to filesystem
-// 3. Loop prevention ensures no infinite sync cycles
-// 4. Both sides stay perfectly synchronized
-
-// Stop syncing
-stopToDb();
-stopFromDb();
+const stopFromDb = await agent.syncFromDbSimple();
+const stopToDb = await agent.syncToDbSimple();
 ```
 
-## Core Concepts
+---
 
-### Tree Structures
+## Starting and stopping
 
-`fs-agent` represents your filesystem as RLJSON tree structures:
+Three calls, and they are not interchangeable.
 
-```typescript
-// Directory hierarchy:
-// my-project/
-//   ├── src/
-//   │   ├── index.ts
-//   │   └── utils.ts
-//   └── package.json
+| call | starts | returns |
+| --- | --- | --- |
+| `syncFromDb(db, connector, treeKey, restoreOptions?)` | receiving — applying what peers announce | a `stop()` |
+| `syncToDb(db, connector, treeKey, storageOptions?)` | sending — watching the folder and announcing | a `stop()` |
+| `dispose()` | — | nothing; **abandons a pending join** |
 
-// Becomes a tree structure where:
-// - Each file/directory is a tree node
-// - Nodes are content-addressed (identified by hash)
-// - Parent-child relationships are preserved
-// - Changes are tracked via insert history
-```
+**Start receiving first.** A machine that pushes before it can receive
+announces a state it may be about to replace, and on an established fleet that
+is how a stale folder becomes the newest claim.
 
-### Blob Storage
+**Each `stop()` stops its own direction** — the watcher, the debounce, the
+poll. Call both.
 
-Files are stored efficiently using content-addressed blob storage:
+**`dispose()` is not the stopper.** It cancels a join this agent is still
+waiting on. A folder that starts with files and no history defers its first
+announcement and asks the network for its state repeatedly until a bounded wait
+expires, and no `stop()` ends that — so a machine shut down mid-join keeps
+asking a transport that is being torn down. Call it last, after both stops.
 
-- **Deduplication**: Identical files are stored only once
-- **Content-Addressed**: Files are identified by their content hash
-- **Efficient**: Only changed files are re-stored
-- **Flexible**: Works with any `Bs` (Blob Storage) implementation
+### What happens in the first few seconds
 
-### Automatic Watching
+Worth knowing, because it looks like a stall and is not.
 
-### Automatic Synchronization (Constructor-based) — REMOVED
+1. **The folder is scanned.** A cold scan of a large catalogue is minutes, not
+   milliseconds. Pass `scanCachePath`.
+2. **If the folder has files but no history, the agent says nothing yet.** It
+   asks the network for its state first (`joinWaitMs`, default 1 500 ms). This
+   is what stops a restored backup pushing a month of deleted files back to the
+   fleet.
+3. **If a head arrives**, the agent reconciles against it: writes what it
+   lacks, keeps its own new work, moves anything the history deliberately
+   deleted into `.fsagent-recovered/`, and keeps a locally edited file as a
+   conflict copy.
+4. **If nothing arrives** within the wait, this folder is the origin of its own
+   history and announces normally.
 
-The `db`, `treeKey` and `bidirectional` constructor options are **gone**. They
-never worked: the constructor started a method that threw
-`'Auto-sync from constructor is not supported'` into a `.catch(() => {})`, so
-passing them did nothing at all and said nothing about it. A `Connector` needs
-a socket, and the constructor has none.
+If your folder *is* the origin — a fixture, a test, a brand-new network — set
+`joinWaitMs: 0` and skip the wait honestly.
 
-Sync is started explicitly, which is the only way it was ever started:
+---
 
-```typescript
-const agent = new FsAgent('./my-project', new BsMem());
-const connector = new Connector(db, route, socket);
-const stopToDb = await agent.syncToDb(db, connector, treeKey);
-const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
-```
+## Configuration
 
-Or, against a `Client` from `@rljson/server`, with `FsAgent.fromClient()` —
-which is what the One Client uses.
+Everything `FsAgentOptions` accepts, its default, and what choosing otherwise
+costs.
 
-### Live Client-Server Demo
+### Sync behaviour
 
-Run the live in-process demo that mirrors changes between two folders using the same approach as our sync tests (SocketMock, IoMem, BsMem):
+| option | default | what it does |
+| --- | --- | --- |
+| `resolveConflicts` | `false` | Reconciles two edits to one file, keeping the loser as a renamed copy. **Set it to `true` on a client.** The default is `false` because a hub relays and must not arbitrate. Off, conflicting edits are never merged |
+| `onConflict` | — | Called with the conflict reports. Without it a conflict is resolved and nobody is told |
+| `joinWaitMs` | `1500` | How long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
+| `bucketSync` | `true` | Repairs a divergence by comparing manifests and fetching only what is missing, instead of replacing a folder. Defaults to `false` only when `announceTreeRef` is on |
+| `announceTreeRef` | `false` | Announces plain tree refs instead of chain refs — the **old wire format**, for rolling out into a fleet that has not upgraded. Turn it off once every machine has |
+| `antiEntropy` | `DEFAULT_ANTI_ENTROPY` | The periodic comparison that heals a lost announcement. A machine that is behind **asks**, rather than waiting to be told |
+| `syncConfig` | — | Forwarded to every `Connector` the agent builds. `causalOrdering: true` belongs here |
+| `clientIdentity` | — | Who this machine is, on the wire |
 
-```bash
-pnpm exec vite-node src/client-server/live-client-server.ts
-```
+### Scanning
 
-It wipes and recreates `demo/live-client-server/folder-a` and `demo/live-client-server/folder-b`, seeds sample files, and keeps them in sync until you press Ctrl+C. Pass `--keep-existing` to skip the reset.
+| option | default | what it does |
+| --- | --- | --- |
+| `ignore` | `[]` | Patterns not to sync — see [Ignore patterns](#ignore-patterns) |
+| `maxDepth` | unlimited | Stop descending after N levels |
+| `followSymlinks` | `false` | Follow links out of the folder. Leave it off unless you mean it |
+| `scanCachePath` | — | Where to persist file hashes between runs. **Pass this.** Without it every restart re-reads and re-hashes the whole folder |
 
-## API Reference
+### Timeouts (`timeouts`)
 
-### FsAgent
+Every async step is bounded, because an unbounded one is a silent hang.
 
-Main class that orchestrates filesystem operations.
-
-#### Constructor
-
-```typescript
-new FsAgent(rootPath: string, bs?: Bs, options?: FsAgentOptions)
-```
-
-**Parameters:**
-
-- `rootPath` - Root directory to monitor
-- `bs` - Blob storage instance (defaults to `BsMem`)
-- `options` - Configuration options
-
-**Options:**
-
-```typescript
-interface FsAgentOptions {
-  // Scanning options
-  ignore?: string[]; // Patterns to ignore (e.g., ['node_modules', '*.log'])
-  maxDepth?: number; // Maximum directory depth to scan
-  followSymlinks?: boolean; // Whether to follow symbolic links (default: false)
-
-  // Deprecated options (will throw error if used)
-  // Use syncToDb()/syncFromDb() methods with Connector instead
-  db?: Db; // DEPRECATED
-  treeKey?: string; // DEPRECATED
-  bidirectional?: boolean; // DEPRECATED
-  storageOptions?: StoreFsTreeOptions; // DEPRECATED
-  restoreOptions?: RestoreOptions; // DEPRECATED
-}
-  maxDepth?: number; // Maximum directory depth (default: 10)
-  followSymlinks?: boolean; // Follow symbolic links (default: false)
-
-  // Automatic sync options
-  db?: Db; // Database instance for auto-sync
-  treeKey?: string; // Tree table key for storage
-  storageOptions?: {
-    // Options for database storage
-    includeBlobs?: boolean; //   Include blob data in tree (default: true)
-  };
-
-  // Bidirectional sync
-  bidirectional?: boolean; // Enable database → filesystem sync (default: false)
-
-    // Restore options applied when syncing from DB (e.g., cleanTarget)
-    restoreOptions?: RestoreOptions;
-}
-```
-
-#### Properties
-
-```typescript
-agent.rootPath: string          // Root directory path
-agent.bs: Bs                    // Blob storage instance
-agent.scanner: FsScanner        // File scanner instance
-agent.adapter: FsBlobAdapter    // Blob adapter instance
-```
-
-#### Methods
-
-##### `extract(): Promise<FsTree>`
-
-Extracts the current filesystem as a tree structure.
-
-```typescript
-const tree = await agent.extract();
-// Returns: { rootHash: string, trees: Map<string, Tree> }
-```
-
-##### `restore(tree: FsTree, targetPath?: string, options?: RestoreOptions): Promise<void>`
-
-Restores a tree structure to the filesystem. Use `options.cleanTarget` to remove files and directories that are not part of the tree (helpful for propagating renames or deletions):
-
-```typescript
-await agent.restore(tree, './restore-location', { cleanTarget: true });
-```
-
-##### `storeInDb(db: Db, treeKey: string, options?: StoreFsTreeOptions): Promise<void>`
-
-Manually stores the current filesystem state in the database.
-
-```typescript
-await agent.storeInDb(db, 'myFilesTree', { includeBlobs: true });
-```
-
-##### `syncToDb(db: Db, connector: Connector, treeKey: string, options?: StoreFsTreeOptions): Promise<() => void>`
-
-Starts watching filesystem and syncing to database using Connector for socket-based broadcasts.
-
-```typescript
-import { Connector } from '@rljson/db';
-import { Route } from '@rljson/rljson';
-import { SocketMock } from '@rljson/io';
-
-const socket = new SocketMock();
-const route = Route.fromFlat(`/${treeKey}+`);
-const connector = new Connector(db, route, socket);
-
-const stopSync = await agent.syncToDb(db, connector, 'myFilesTree');
-// Later: stopSync();
-```
-
-##### `syncFromDb(db: Db, connector: Connector, treeKey: string, restoreOptions?: RestoreOptions): Promise<() => void>`
-
-Starts listening to database changes via Connector and syncing to filesystem.
-
-```typescript
-import { Connector } from '@rljson/db';
-import { Route } from '@rljson/rljson';
-import { SocketMock } from '@rljson/io';
-
-const socket = new SocketMock();
-const route = Route.fromFlat(`/${treeKey}+`);
-const connector = new Connector(db, route, socket);
-
-const stopSync = await agent.syncFromDb(db, connector, 'myFilesTree', {
-  cleanTarget: true // Optional: remove files not in tree
-});
-// Later: stopSync();
-```
-
-##### `dispose(): void`
-
-Stops all syncing and cleans up resources.
-
-```typescript
-agent.dispose();
-```
-
-##### `static fromClient(filePath, treeKey, client, socket, options?): Promise<FsAgent>`
-
-Factory method that creates an FsAgent wired to a `@rljson/server` Client. Returns an enhanced agent with simplified sync methods:
-
-```typescript
-import { Client } from '@rljson/server';
-
-const agent = await FsAgent.fromClient(
-  './my-project',
-  'sharedTree',
-  client,
-  socket,
-  { ignore: ['node_modules', '.git'] },
-);
-
-// Simplified sync (no need to manage Db/Connector manually)
-const stopToDb = await agent.syncToDbSimple({ notify: true });
-const stopFromDb = await agent.syncFromDbSimple({ cleanTarget: true });
-
-// Stop when done
-stopToDb();
-stopFromDb();
-```
-
-**Reconnect handling:** When the Client supports `onDisconnect` / `onReconnect` (available since `@rljson/server` ≥ 0.0.10), `fromClient()` automatically:
-
-- **Pauses** the filesystem watcher on disconnect (prevents futile sync attempts while the server is unreachable)
-- **Resumes** the watcher on reconnect (the server's bootstrap message triggers a catch-up sync via the Connector)
-
-No application code is needed — the wiring is built into `fromClient()`. Clients created with older server versions that lack these methods continue to work without interruption.
-
-### FsScanner
-
-Low-level filesystem scanner (usually accessed via `agent.scanner`).
-
-#### Methods
-
-```typescript
-// Scan filesystem once
-const tree = await scanner.scan();
-
-// Start watching for changes
-await scanner.watch();
-
-// Register change callback
-scanner.onChange(async (change) => {
-  console.log(change.type, change.path);
-});
-
-// Pause/resume watching (for loop prevention)
-scanner.pauseWatch();
-scanner.resumeWatch();
-
-// Get root tree
-const rootTree = scanner.getRootTree();
-```
-
-## Advanced Usage
-
-### Manual Sync Control
-
-If you need fine-grained control over synchronization:
-
-```typescript
-import { Connector } from '@rljson/db';
-import { Route } from '@rljson/rljson';
-import { SocketMock } from '@rljson/io';
-
-const agent = new FsAgent('./my-project', new BsMem());
-
-// Create Connector for synchronization
-const treeKey = 'myFilesTree';
-const socket = new SocketMock();
-const route = Route.fromFlat(`/${treeKey}`);
-const connector = new Connector(db, route, socket);
-
-// Start filesystem → database sync
-const stopToDb = await agent.syncToDb(db, connector, treeKey);
-
-// Start database → filesystem sync
-const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
-
-// Stop when needed
-stopToDb();
-stopFromDb();
-```
-
-### Custom Blob Storage
-
-Use any blob storage implementation:
-
-```typescript
-import { BsSql } from '@rljson/bs-sql';
-
-// SQL-backed blob storage
-const sqlBs = new BsSql(myDatabase);
-const agent = new FsAgent('./my-project', sqlBs);
-```
-
-### Ignore Patterns
-
-Control what gets scanned and synced:
-
-```typescript
-const agent = new FsAgent('./my-project', new BsMem(), {
-  ignore: [
-    'node_modules',
-    '.git',
-    'dist',
-    'coverage',
-    '*.log',
-    '.DS_Store',
-    'tmp/**',
-  ],
-});
-```
-
-### Limited Depth Scanning
-
-Control how deep to traverse directories:
-
-```typescript
-const agent = new FsAgent('./my-project', new BsMem(), {
-  maxDepth: 3, // Only scan 3 levels deep
-});
-```
-
-### Extract and Restore
-
-Work with tree structures directly:
-
-```typescript
-// Extract current state
-const tree = await agent.extract();
-
-// Trees are content-addressed
-console.log('Root hash:', tree.rootHash);
-console.log('Total nodes:', tree.trees.size);
-
-// Restore to a different location
-await agent.restore(tree, './backup-location');
-
-// Or restore from database
-const dbAdapter = new FsDbAdapter(db, 'myFilesTree');
-const treeFromDb = await dbAdapter.loadFsTree('abc123'); // tree hash
-await agent.restore(treeFromDb, './restore-here');
-```
-
-### Version History
-
-Access historical versions via insert history:
-
-```typescript
-import { Route } from '@rljson/rljson';
-
-// Get insert history for the tree
-const route = Route.fromFlat(`${treeKey}/`);
-const historyResult = await db.getInsertHistory(route, {});
-
-// historyResult contains all versions with timestamps
-for (const entry of historyResult.history) {
-  const treeRef = entry.treeRef;
-  const timestamp = entry.insertedAt;
-
-  // Load and restore specific version
-  const tree = await agent.loadFromDb(db, treeKey, treeRef);
-  await agent.restore(tree, `./version-${timestamp}`);
-}
-```
-
-### Change Detection
-
-React to specific filesystem changes:
-
-```typescript
-agent.scanner.onChange(async (change) => {
-  switch (change.type) {
-    case 'add':
-      console.log('File added:', change.path);
-      break;
-    case 'change':
-      console.log('File modified:', change.path);
-      break;
-    case 'unlink':
-      console.log('File deleted:', change.path);
-      break;
-    case 'addDir':
-      console.log('Directory created:', change.path);
-      break;
-    case 'unlinkDir':
-      console.log('Directory deleted:', change.path);
-      break;
-  }
-});
-```
-
-## Error Handling
-
-`fs-agent` provides robust error handling with clear error messages:
-
-```typescript
-try {
-  const agent = new FsAgent('./nonexistent', new BsMem());
-} catch (error) {
-  // Error: Root path "./nonexistent" does not exist. Cannot scan non-existent directory.
-}
-```
-
-### Common Error Scenarios
-
-1. **Missing Root Path**: Clear error if directory doesn't exist
-2. **Database Failures**: Errors include context about what operation failed
-3. **Invalid Tree Data**: Validation errors explain what's wrong
-4. **Sync Failures**: Non-fatal errors logged, syncing continues
-5. **Loop Detection**: Automatic prevention via pause/resume
-
-## Examples
-
-### Example 1: Simple Project Sync
-
-```typescript
-import { FsAgent } from '@rljson/fs-agent';
-import { Connector, Db } from '@rljson/db';
-import { IoMem, SocketMock } from '@rljson/io';
-import { BsMem } from '@rljson/bs';
-import { Route, createTreesTableCfg } from '@rljson/rljson';
-
-async function syncProject() {
-  // Setup
-  const io = new IoMem();
-  await io.init();
-  const db = new Db(io);
-
-  const treeKey = 'projectTree';
-  const treeTableCfg = createTreesTableCfg(treeKey);
-  await db.core.createTableWithInsertHistory(treeTableCfg);
-
-  // Create agent
-  const agent = new FsAgent('./src', new BsMem(), {
-    ignore: ['*.tmp'],
-  });
-
-  // Create Connector and start syncing
-  const socket = new SocketMock();
-  const route = Route.fromFlat(`/${treeKey}+`);
-  const connector = new Connector(db, route, socket);
-  const stopSync = await agent.syncToDb(db, connector, treeKey);
-
-  // Clean up when done
-  process.on('SIGINT', () => {
-    stopSync();
-    agent.dispose();
-    process.exit();
-  });
-}
-```
-
-### Example 2: Backup and Restore
-
-```typescript
-async function backupAndRestore() {
-  // Create agent
-  const agent = new FsAgent('./my-data', new BsMem());
-
-  // Extract current state
-  const backup = await agent.extract();
-  console.log('Backed up', backup.trees.size, 'nodes');
-
-  // ... later, restore from backup
-  await agent.restore(backup, './my-data-restored');
-}
-```
-
-### Example 2b: Clean Restore (remove stale files)
-
-```typescript
-async function cleanRestore() {
-  const agent = new FsAgent('./source', new BsMem());
-  const snapshot = await agent.extract();
-
-  // Restore to target and prune anything not in the snapshot
-  await agent.restore(snapshot, './target', { cleanTarget: true });
-}
-```
-
-### Example 3: Bidirectional Sync
-
-Two folders kept in step through one database. This example used to pass `db`,
-`treeKey` and `bidirectional: true` to the constructor and describe the result
-as working; it never did — see **Automatic Synchronization (Constructor-based)
-— REMOVED** above. Each direction is started explicitly, and each returns the
-function that stops it.
-
-```typescript
-async function bidirectionalSync() {
-  const io = new IoMem();
-  await io.init();
-  const db = new Db(io);
-
-  const treeKey = 'sharedTree';
-  await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-  const route = Route.fromFlat(`/${treeKey}`);
-
-  // One socket pair, so the two agents can hear each other.
-  const [socketA, socketB] = createSocketPair();
-
-  const alice = new FsAgent('./alice', new BsMem());
-  const bob = new FsAgent('./bob', new BsMem());
-
-  // `causalOrdering` is a REQUIREMENT, not a tuning option: the predecessor
-  // refs it puts on the wire are what let a conflicting edit to one file be
-  // merged. The agent warns, once and loudly, if it is missing.
-  const syncCfg = { causalOrdering: true, includeClientIdentity: true };
-  const connectorA = new Connector(db, route, socketA, syncCfg);
-  const connectorB = new Connector(db, route, socketB, syncCfg);
-
-  const stops = [
-    // RECEIVE FIRST, then push — a node that announces before it can hear
-    // speaks about a state it may be about to replace.
-    await alice.syncFromDb(db, connectorA, treeKey),
-    await bob.syncFromDb(db, connectorB, treeKey),
-    await alice.syncToDb(db, connectorA, treeKey),
-    await bob.syncToDb(db, connectorB, treeKey),
-  ];
-
-  // Now:
-  // - a change in ./alice reaches ./bob, and the other way round;
-  // - a DELETION travels too, because it is written down in the edit chain
-  //   rather than inferred from a file being absent from a tree;
-  // - stopping is explicit: `stops.forEach((stop) => stop())`.
-}
-```
-
-### Example 4: Custom Change Handling
-
-```typescript
-async function customHandling() {
-  const agent = new FsAgent('./watched', new BsMem());
-
-  let changeCount = 0;
-
-  agent.scanner.onChange(async (change) => {
-    changeCount++;
-
-    if (change.type === 'add' && change.path.endsWith('.ts')) {
-      console.log(`New TypeScript file: ${change.path}`);
-      // Could trigger build, linting, etc.
-    }
-
-    if (changeCount % 10 === 0) {
-      console.log(`Processed ${changeCount} changes`);
-    }
-  });
-}
-```
-
-## Best Practices
-
-### 1. Use Ignore Patterns
-
-Always ignore build artifacts, dependencies, and temporary files:
-
-```typescript
-{
-  ignore: [
-    'node_modules',
-    '.git',
-    'dist',
-    'build',
-    'coverage',
-    '*.log',
-    '.DS_Store',
-    'tmp',
-  ];
-}
-```
-
-### 2. Dispose When Done
-
-Always clean up resources:
-
-```typescript
-const agent = new FsAgent(path, bs, options);
-
-try {
-  // Use agent...
-} finally {
-  agent.dispose();
-}
-```
-
-### 3. Use Bidirectional Sync Carefully
-
-Bidirectional sync is powerful but consider:
-
-- Multiple agents sharing the same `treeKey` will sync to each other
-- Loop prevention is automatic but adds slight latency
-- Best for collaborative scenarios or distributed systems
-
-### 4. Monitor Depth
-
-Use `maxDepth` for deep directory structures:
-
-```typescript
-{
-  maxDepth: 5,  // Prevents extremely deep recursion
-}
-```
-
-### 5. Handle Errors
-
-Wrap agent creation in try-catch for better error handling:
-
-```typescript
-try {
-  const agent = new FsAgent(userProvidedPath, bs, options);
-} catch (error) {
-  console.error('Failed to create agent:', error.message);
-}
-```
-
-## Timeout & Debounce Configuration
-
-Every async operation in FsAgent is guarded by a timeout to prevent silent hangs.
-Rapid filesystem events are debounced to coalesce into a single sync cycle.
-
-```typescript
-const agent = new FsAgent('./my-project', bs, {
-  timeouts: {
-    dbQuery: 10_000,      // Single db.get() query (default: 10s)
-    fetchTree: 20_000,    // Fetching an entire tree from the DB (default: 20s)
-    extract: 15_000,      // Filesystem extract/scan (default: 15s)
-    restore: 15_000,      // Filesystem restore (default: 15s)
-    syncCallback: 25_000, // Overall syncFromDb callback (default: 25s)
-    debounceMs: 300,      // Coalesce rapid FS events (default: 300ms)
-    processRefRetries: 3,       // Retry failed refs before dropping (default: 3)
-    processRefRetryDelayMs: 5_000, // Base delay between retries (default: 5s)
-  },
-});
-```
-
-### processRef Retry Behavior
-
-When `syncFromDb` receives a tree ref and fails to process it (e.g. `db.get`
-times out because the IoPeer transport hasn't connected yet), the ref is
-retried up to `processRefRetries` times with increasing delay
-(`attempt * processRefRetryDelayMs`). This prevents a single transient
-timeout from permanently breaking the sync pipeline.
-
-## Anti-Entropy — healing a lost message
-
-Every change reaches a peer as exactly one message. If that message is lost —
-a push the hub never received, a forward a peer never received, an apply that
-gave up — nothing would ever send it again, and two machines would sit on two
-states for good. The anti-entropy notices and repairs that, with nobody doing
-anything.
-
-It is driven by the hub's periodic announcement of its state, so the server
-must send one. Use the **state beacon** (`@rljson/server` 0.0.67+): it goes on
-its own event, which the connector never processes, so it costs nothing in
-the apply path. The bootstrap heartbeat works too, but a periodic heartbeat
-is delivered into every agent's apply path and has been measured
-net-harmful in production.
-
-```typescript
-const server = new Server(route, io, bs, {
-  syncConfig: { causalOrdering: true, includeClientIdentity: true },
-  stateBeaconMs: 30_000,
-});
-
-const agent = new FsAgent('./my-project', bs, {
-  antiEntropy: {
-    enabled: true,        // default: true
-    graceMs: 10_000,      // how long this node may sit still, out of step, before a repair (default: 10s)
-    maxBackoffMs: 300_000 // cap for repeated repairs of one divergence (default: 5 min)
-  },
-});
-```
-
-Each announcement carries the hub's tree ref — a content hash of the whole
-folder, so comparing it with our own is the per-folder checksum comparison —
-plus who produced it and what it descends from. A divergence that outlives
-`graceMs` while nothing is applying is repaired:
-
-| Hub state | Repair |
-|---|---|
-| an earlier push of ours, or what our push was made from | **push** — re-announce our state |
-| made from the state we are in | **pull** — apply it, deletions included |
-| neither can be shown | **merge** — apply it; if that makes no progress, additively |
-
-Every repair goes through the ordinary apply and push paths, with their
-ancestry and mass-delete rules; the anti-entropy never deletes anything
-itself. Without a beacon or heartbeat it never fires. `agent.antiEntropyStatus`
-reports whether this node and the hub agree, since when they have not, and
-the last repair — a lasting divergence is the one trace a lost message leaves.
-
-## `senderSawMyState` — may a peer delete my files?
-
-Exported because it is the second of two places the sync asks *"has the other
-side seen a state I am in?"* — `antiEntropyDecision` chooses a repair, this
-authorises deletions.
-
-```typescript
-import { senderSawMyState } from '@rljson/fs-agent';
-
-senderSawMyState({
-  currentRef,            // the state my folder is in
-  lastAppliedRef,        // the last incoming state I applied
-  senderPredecessors,    // what the incoming push says it descends from
-  ancestryIsCarried,     // syncConfig.causalOrdering
-});
-```
-
-`true` means the sender has demonstrably seen a state this node is in, so
-anything absent from its tree is absent because it removed it. `false` means the
-push may add but must not prune.
-
-Both escape hatches return `true`: a transport that carries no ancestry, and a
-push that declares none — the latter is handled by a separate rule, because a
-fresh client's first push has no predecessors.
-
-## Additive reconciliation (`bucketSync`)
-
-By default, a divergence is repaired by replacing a folder — one side wins. With
-`bucketSync: true` the two sides compare manifests instead and each fetches what
-it is missing, so **neither side's work can be discarded**.
-
-```typescript
-new FsAgent(folder, bs, { bucketSync: true });
-```
-
-Deletions travel as facts rather than absences, so a deleted file stays deleted
-and a file the other side simply has not got yet is never pruned. A genuine edit
-conflict — both sides changed the same file — is reported rather than resolved.
-
-**On by default.** `bucketSync: false` returns to the old whole-folder repair,
-which is kept only as an escape hatch.
-
-A same-file edit conflict is resolved by a rule both machines compute from what
-they already have — the greater blob id wins — so they converge in one round
-with no coordination. Arbitrary, and the same arbitrary answer on every node,
-unlike "whichever advertisement arrived last". The losing content is still
-reported, and preserved as a conflict copy where `resolveConflicts` is on.
-
-## Deletions are remembered
-
-A deleted file is simply absent from the next tree, so nothing in the content
-says the absence was deliberate. `FsAgent` keeps a **tombstone log** — the paths
-deleted on this machine — in `.fsagent-state.json` beside the folder's ref, and
-reloads it on start. A restore never re-creates a path in it, so a peer that has
-not yet heard about a deletion cannot undo it.
-
-A tombstone is dropped the moment the path is created again locally, so a file
-can always be re-added.
-
-Nothing to configure. Two things worth knowing:
-
-- **It stops a node undoing its OWN deletion. It does not yet make the deletion
-  win on a peer that never heard it** — that peer keeps the file until the two
-  reconcile some other way. See `doc/known-limits.md`.
-- **The log is not bounded.** Deleting a very large folder records one entry per
-  file.
-
-## Edit Chain — a provable history
-
-`FsEditChain` records what a folder state was made from. A tree ref is a content
-hash, so a folder that returns to an earlier state re-derives that state's ref
-and no amount of comparing refs can say whether it moved back or never left. A
-chain entry has its own identity, and carries the one thing a tree cannot: what
-was **removed**.
-
-```typescript
-import { FsEditChain } from '@rljson/fs-agent';
-
-const chain = new FsEditChain(db, 'fileTree');
-await chain.init(); // creates its own tables; safe on every start
-
-const entry = await chain.append({
-  treeRef,
-  changed: ['reports/q3.xlsx'],
-  removed: ['reports/q2.xlsx'],
-});
-// entry.head    → this entry's ref
-// entry.previous → what it was made from ([] for a lineage root)
-// entry.timeId  → '<millis>:<nanoid>', a fleet-wide order
-
-await chain.entry(entry.head); // reads it back, undefined if unresolvable
-```
-
-A **merge** entry passes `previous` explicitly with both parents:
-
-```typescript
-await chain.append({ treeRef: merged, previous: [ours, theirs] });
-```
-
-`FsAgent` writes this for you: one entry per state it pushes, with `removed`
-filled in from what that push deleted. It is best-effort — a history that
-cannot be written never stops a folder syncing — and it needs no setup, because
-the agent creates its own tables on the first `syncToDb`.
-
-**Announcements carry the head**, marked `~H~`, rather than the tree ref — so a
-receiver can resolve any announcement to a chain entry and walk its ancestry. A
-tree ref is a content hash and never starts with `~`, so both forms travel on
-one channel unambiguously, and a ref without the marker is used exactly as
-before.
-
-The predecessors on the payload stay tree refs. A receiver that resolves the
-head gets the chain's own `previous` in the entry.
-
-**Nothing decides anything from the chain yet.** It is written and announced so
-that a fleet accumulates real ancestry before behaviour depends on it.
-
-**Rolling out.** A node on an older build cannot resolve a `~H~` ref and will
-ignore the announcement, so deploy with `announceTreeRef: true` — a new node
-then speaks the old wire format while still keeping and resolving its chain —
-and turn it off once the fleet is past the old build.
-
-One change cannot be switched off: the scan now emits a canonical child order,
-so every tree ref changes once. It is not destructive (the apply path sees the
-two trees as the same folder and moves no data), but the divergence flag reads
-red until every node sorts.
-
-| | |
+| field | default |
 | --- | --- |
-| `init()` | creates `<treeKey>Edits` / `MultiEdits` / `EditHistory`, adopts the existing tip |
-| `head` | the entry this node's lineage ends at, or `undefined` |
-| `append(opts)` | writes one entry, returns it |
-| `entry(head)` | reads one back; `undefined` when this node cannot resolve it |
-| `createFsChainTables(db, treeKey)` | the table creation on its own |
+| `dbQuery` | 10 000 ms |
+| `fetchTree` | 20 000 ms |
+| `extract` | 15 000 ms |
+| `restore` | 15 000 ms |
+| `syncCallback` | 25 000 ms |
+| `debounceMs` | 300 ms |
+| `processRefRetries` | 3 |
+| `processRefRetryDelayMs` | 5 000 ms |
+| `recoveryRetries` | 10 |
 
-## Bounce-Back Prevention
+`debounceMs` coalesces a burst of filesystem events into one sync cycle. Raise
+it on a folder under constant churn, lower it to make a single save feel
+immediate. A large catalogue wants a larger `extract` and `restore` than the
+defaults.
 
-Bidirectional sync can cause infinite loops when both clients detect each
-other's restores as changes. FsAgent prevents this with three layers:
+### `restoreOptions.cleanTarget` — read this before setting it
 
-1. **Ref tracking** (`_lastSentRef`): Skips re-broadcast if the stored tree
-   produces the same ref as the last one we sent.
-2. **Content-key dedup** (`_lastSentContentKey`): Compares file paths + blobIds
-   (ignoring mtimes) to detect identical content with different tree hashes.
-3. **Content comparison before restore**: `syncFromDb` compares the incoming
-   tree's content with the current filesystem and skips restore if identical.
+`cleanTarget: true` makes `restore()` prune anything not in the tree. **The
+sync path ignores it and always applies additively**, because pruning on a
+received tree is precisely how an absence becomes a deletion. It is honoured
+only by a direct `restore()` call, where *you* are asserting the tree is the
+whole truth. Passing it to `syncFromDb` is harmless and has no effect.
 
-## Performance
+---
 
-- **Efficient Scanning**: Only scans changed directories
-- **Deduplication**: Identical files stored once
-- **Content-Addressed**: Fast lookups via hashes
-- **Optimized Watching**: Uses native filesystem events
-- **Smart Sync**: Only syncs when changes detected
-- **Debounced Events**: Rapid changes coalesced into single operations
-- **Bounded Operations**: All async operations time out to prevent hangs
+## Ignore patterns
+
+Glob syntax, matched case-insensitively, with `/` and `\` equivalent in both
+the path and the pattern.
+
+|  |  |
+| --- | --- |
+| `*` | any run of characters within one path segment |
+| `?` | one character within one segment |
+| `**` | crosses separators. A leading `**/` also matches at the root, so `**/tmp` means `tmp` anywhere |
+| `/` in the pattern | matches the whole path, **anchored at the folder root** — `build/out.txt` is the top-level one, not every `build` |
+| trailing `/` | names a directory, and covers its contents |
+| leading `!` | an exception, rescuing what an earlier line ignored |
+
+**Order matters: the last matching line decides.** `['*.log', '!keep.log']`
+keeps `keep.log`; reversed, it does not. A scan does not descend into an
+ignored directory, so an `!` line cannot rescue a file inside one.
+
+Blank lines and `#` comments are allowed.
+
+### The compatibility rule
+
+**A pattern containing none of `*`, `?`, `/` or `\`, not starting with `!` and
+not ending with `/` keeps its older meaning: equal to, or a prefix of, any path
+segment.**
+
+That is deliberate and load-bearing, not politeness to old configuration files.
+`~$` is Word's lock-file prefix and `.~lock.` is LibreOffice's — neither is a
+fixed name — and `.fsagent-tmp-` is how this agent hides its own in-progress
+writes from its own watcher. Read as globs they would match only a file named
+exactly that.
+
+```typescript
+ignore: [
+  'node_modules',    // prefix: also matches anything starting with it
+  '~$',              // every Word lock file
+  '*.log',           // every log file, at any depth
+  'build/',          // the top-level build folder and its contents
+  '**/tmp',          // tmp anywhere
+  '!build/keep.txt', // ...except this one
+]
+```
+
+`compileIgnore` is exported, so a UI can validate or preview a list before
+saving it:
+
+```typescript
+import { compileIgnore } from '@rljson/fs-agent';
+
+const matcher = compileIgnore(patterns);
+matcher.ignores('src/server.log'); // true
+```
+
+---
+
+## Reading what the agent is doing
+
+|  |  |
+| --- | --- |
+| `agent.stageTimings` | milliseconds per stage of the **last** cycle — scan, hash, store, announce, fetch, write, re-derive. A total says a run was slow; this says where |
+| `agent.antiEntropyStatus` | whether this machine agrees with the hub, and what it last did about it |
+| `agent.scanner.onChange(cb)` | every filesystem event the scanner accepted |
+| `onConflict` | conflicts, as they are resolved |
+| `SYNC_ERROR_FILE` | `.sync-errors.log` in the folder: a keyed, append-only record of every refusal and failure — a locked file, an unfetchable blob, an impossible path, a refused mass deletion |
+| `.fsagent-conflicts.json` | resolved conflicts, bounded |
+| `.fsagent-recovered/` | files a join kept but deliberately did not announce |
+| `.fsagent-state.json` | what this machine remembers deleting, across restarts |
+
+All of these live inside the synced folder and all are ignored by the scanner —
+otherwise the notification would itself be content, propagate, and be rewritten
+by every peer.
+
+---
+
+## Using it without sync
+
+The scanner and the tree are useful on their own.
+
+```typescript
+const agent = new FsAgent('./folder', new BsMem());
+
+// Folder -> tree (+ blobs)
+const tree = await agent.extract();
+
+// Tree -> folder, additively
+await agent.restore(tree, './elsewhere');
+
+// Tree -> folder, exactly: prune anything not in the tree
+await agent.restore(tree, './elsewhere', { cleanTarget: true });
+```
+
+A restore writes only what differs. Re-restoring the same tree over a folder
+that already matches writes nothing — which is what keeps one new file from
+rewriting a whole catalogue.
+
+---
+
+## What it guarantees — and what it does not
+
+**It does:**
+
+- converge — every machine ends on the same content, or reports why not;
+- never lose a user's edit to a merge, a catch-up or a reconnect;
+- propagate a deletion made while partitioned, stopped, or unheard-of by a
+  peer, and keep it deleted;
+- keep both sides of a conflict, and say there was one;
+- survive a locked file, an impossible path, a full disk, a vanishing entry, a
+  wrong clock and a peer on the previous wire format — each failing only
+  itself;
+- cost one blob to catch up on twenty missed saves of one file, not twenty.
+
+**It does not:**
+
+- **split a large file into blocks.** A file transfers whole. With the largest
+  real file at 92 % of the transport limit this is the live ceiling — V1 in
+  [doc/q3-backlog-status.md](doc/q3-backlog-status.md);
+- **let you approve a mass deletion.** One that looks like a loss is refused
+  and reported; there is no override yet (L1);
+- **collect garbage.** Every superseded version stays on every machine (L2);
+- **promise a latency.** Nothing in the suite asserts an arrival deadline, so
+  nothing here should be read as one;
+- **repair a folder reverted under a running agent.** Restoring a backup while
+  the agent is stopped is handled; doing it underneath a live one is not
+  decidable from the history, and the reasoning is in the test.
+
+---
 
 ## Troubleshooting
 
-### Agent not syncing changes
+**Nothing syncs and the log says `carries no ancestry`.**
+`syncConfig.causalOrdering` is not `true`, so conflicting edits will not be
+merged. Set it on the `Connector`.
 
-Make sure you've called `syncToDb()` with a Connector:
+**A conflict happened and nobody was told.** `resolveConflicts` defaults to
+`false`. Set it `true` and pass `onConflict`.
 
-```typescript
-import { Connector } from '@rljson/db';
-import { Route } from '@rljson/rljson';
-import { SocketMock } from '@rljson/io';
+**An ignore pattern does nothing.** With no `*`, `?` or `/` it is a *prefix*,
+not a glob: `exe` ignores files starting with `exe`, while `*.exe` is what
+ignores the extension. Check it with `compileIgnore`.
 
-const agent = new FsAgent(path, bs);
+**A deletion is slow rather than lost.** A removal travels as a statement, and
+a walk that cannot complete yet does nothing and waits for the next
+announcement. The failure mode is *delayed*, not *silently dropped*, and that
+is deliberate.
 
-// Create Connector and start syncing
-const socket = new SocketMock();
-const route = Route.fromFlat(`/${treeKey}+`);
-const connector = new Connector(db, route, socket);
-const stopSync = await agent.syncToDb(db, connector, treeKey);
-```
+**A whole-folder deletion was refused.** The mass-delete guard.
+`.sync-errors.log` names the count and the threshold. There is no override yet.
 
-### Bidirectional sync not working
+**A machine sits empty after its folder was wiped.** Above a hundred files the
+agent recognises the loss and re-joins. Between eleven and ninety-nine it
+announces the emptiness, the fleet correctly refuses it, and that machine is
+not refilled — no data is lost anywhere, but it needs a restart. J10b in
+[doc/scenario-matrix.md](doc/scenario-matrix.md).
 
-Ensure you've started both `syncToDb()` and `syncFromDb()` with the same Connector:
+**The first start takes minutes.** A cold scan reads and hashes every file.
+Pass `scanCachePath`.
 
-```typescript
-const connector = new Connector(db, route, socket);
+**Files appear in `.fsagent-recovered/`.** A join found files the shared
+history had deliberately deleted. They are kept, not announced and not
+destroyed. Usually it means that folder was restored from a backup.
 
-// Start both directions
-const stopToDb = await agent.syncToDb(db, connector, treeKey);
-const stopFromDb = await agent.syncFromDb(db, connector, treeKey);
-```
+**A big restore times out.** Blob transfer is streamed, but a 15-second
+`restore` budget is not enough for a catalogue. Raise `timeouts.restore` and
+`timeouts.extract`.
 
-### High memory usage
+---
 
-Reduce scan depth or add more ignore patterns:
+## Known constraints
 
-```typescript
-{
-  maxDepth: 3,
-  ignore: ['large-directory/**'],
-}
-```
+**macOS Finder paste and rename.** Sync relies on Node's `fs.watch` (FSEvents
+on macOS), which is reliable for programmatic operations and ordinary editor
+saves — but Finder's paste and in-place rename do not always emit an event. A
+periodic safety rescan catches these, so the gap is the rescan interval rather
+than forever. See [doc/safety-rescan.md](doc/safety-rescan.md).
 
-### Files not appearing
+**Windows file locks are covered on one machine only.** The behaviour is right
+— a locked file blocks itself and nothing else, and a half-applied state is not
+advertised — but no mesh test runs on Windows, so this wants a Windows CI
+runner.
 
-Check ignore patterns aren't too broad:
+**An upgrade changes every tree ref in the fleet.** Content identity now
+excludes mtime and fixes a canonical child order, so the same bytes hash
+differently than in older releases. Nothing is destroyed, but the fleet reads
+divergent until every machine has re-scanned. **Upgrade machines together.**
 
-```typescript
-// Bad: ignores everything
-ignore: ['*'];
+---
 
-// Good: specific patterns
-ignore: ['node_modules', '*.log'];
-```
+## Further reading
 
-## Known Constraints
+| document | what is in it |
+| --- | --- |
+| [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, additive reconciliation, anti-entropy |
+| [README.tests.md](README.tests.md) | the 806 scenarios this package ships, by what they prove |
+| [doc/scenario-matrix.md](doc/scenario-matrix.md) | every way a folder and a history can disagree, and which tier proves it |
+| [doc/known-limits.md](doc/known-limits.md) | what has been measured and accepted, and what was closed |
+| [doc/q3-backlog-status.md](doc/q3-backlog-status.md) | the open quality and stability items |
+| [doc/lab-recipe-coverage.md](doc/lab-recipe-coverage.md) | which lab recipes are answered here, and which need real machines |
+| [doc/conflict-resolution-design.md](doc/conflict-resolution-design.md) | how a winner is chosen and a copy is named |
 
-### macOS Finder paste and rename
-
-Bidirectional sync relies on Node.js `fs.watch` (FSEvents on macOS) to detect
-filesystem changes. This works reliably for **programmatic** file operations:
-
-- ✅ `writeFile`, `copyFile`, `rename` from Node.js or shell commands
-- ✅ Editor saves (VS Code, Vim, etc.)
-- ✅ Terminal commands (`echo`, `cp`, `mv`, `touch`, etc.)
-- ✅ Application-generated file changes
-
-However, **macOS Finder's paste-and-rename workflow** generates rapid,
-non-atomic, multi-step event sequences (create temporary file → write → rename →
-delete temporary) that FSEvents may coalesce, reorder, or split unpredictably.
-This can cause intermediate states to be scanned and broadcast before the
-operation completes, leading to sync conflicts.
-
-**This is a known limitation of filesystem watching on macOS and is not
-supported.** If you need to add or rename files in synced folders, use
-programmatic operations or terminal commands instead of Finder drag-and-drop or
-paste-and-rename.
-
-## Related Packages
-
-- `@rljson/db` - RLJSON database
-- `@rljson/bs` - Blob storage interface
-- `@rljson/rljson` - Core RLJSON library
-- `@rljson/io` - I/O abstractions
+Related packages: `@rljson/rljson` (trees), `@rljson/db` (database and
+`Connector`), `@rljson/io` (sockets and storage), `@rljson/bs` (blobs),
+`@rljson/server` (hub and client), `@rljson/mongo-agent` (the same idea for
+documents).
 
 ## License
 
-See [LICENSE](LICENSE) file.
-
-## More Information
-
-- [Example Code](src/example.ts)
-- [Architecture](README.architecture.md)
-- [Contributors](README.contributors.md)
+See [LICENSE](LICENSE).
