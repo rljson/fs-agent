@@ -373,8 +373,8 @@ rewriting a whole catalogue.
 
 - converge — every machine ends on the same content, or reports why not;
 - never lose a user's edit to a merge, a catch-up or a reconnect;
-- propagate a deletion made while partitioned, stopped, or unheard-of by a
-  peer, and keep it deleted;
+- propagate a deletion made while partitioned or unheard-of by a peer, and
+  keep it deleted;
 - keep both sides of a conflict, and say there was one;
 - survive a locked file, an impossible path, a full disk, a vanishing entry, a
   wrong clock and a peer on the previous wire format — each failing only
@@ -393,7 +393,27 @@ rewriting a whole catalogue.
   nothing here should be read as one;
 - **repair a folder reverted under a running agent.** Restoring a backup while
   the agent is stopped is handled; doing it underneath a live one is not
-  decidable from the history, and the reasoning is in the test.
+  decidable from the history, and the reasoning is in the test;
+- **promise that a deletion made while the agent was NOT RUNNING propagates.**
+  **Delete files with the client running.** One deleted while it is stopped may
+  come back from the history on the next sync.
+
+  This is a deliberate trade, and the reason is worth knowing. A removal is
+  only ever announced for a file the agent WATCHED being deleted. It used to be
+  announced for any file missing from the folder — which is the same "an
+  absence is a deletion" inference the edit chain exists to remove, surviving
+  on the sending side: the receiver stopped guessing, and the sender went on
+  guessing on its behalf. The chain then carried that guess as a stated,
+  ordered, authoritative removal, and every peer obeyed it — correctly, because
+  obeying a stated removal is the whole design. A node whose idea of its own
+  last state had drifted could therefore tell the entire fleet to delete files
+  nobody had touched.
+
+  So the asymmetry is chosen on purpose: a file that comes back is visible and
+  recoverable — delete it again with the client running and it propagates
+  properly — while a file deleted across every machine on a mistaken statement
+  is neither. In practice the offline case is often still caught, but it is not
+  promised here, and nothing in this package should be read as promising it.
 
 ---
 

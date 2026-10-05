@@ -4327,8 +4327,40 @@ export class FsAgent {
       for (const [path, hash] of content) {
         if (previous.get(path) !== hash) changed.push(path);
       }
+
+      // A REMOVAL MAY ONLY BE STATED IF THIS NODE WATCHED IT HAPPEN.
+      //
+      // The absence of a path from the folder used to be enough. That is the
+      // same inference the chain exists to remove — "an absence is not a
+      // deletion" — surviving on the SENDING side: the receiver stopped
+      // guessing and the sender went on guessing for it, and the chain then
+      // carried the guess as a stated, ordered, authoritative fact that every
+      // peer obeyed. Correctly, because obeying a stated removal is the whole
+      // design.
+      //
+      // So the statement is now intersected with what the watcher actually
+      // saw. `_pendingDeletes` holds the paths this node observed being
+      // deleted, limited to ones peers already knew about, and persisted
+      // across a restart. A baseline that has drifted can now cost a MISSED
+      // announcement, which the next sync repairs, instead of a deletion
+      // nobody performed, which nothing repairs.
+      //
+      // The baseline still provides "state it exactly once": a path drops out
+      // of `_announcedContent` as soon as the push carrying its removal is
+      // recorded, so it is never re-stated — and re-stating an old removal is
+      // precisely how a delivered deletion beats a later re-creation (I7b).
+      //
+      // THE PRICE, accepted deliberately: a deletion performed while the agent
+      // was NOT RUNNING is invisible — no watcher saw it — so the file comes
+      // back from the chain on the next sync. That is a visible, recoverable
+      // annoyance; the user deletes it again with the agent running and it
+      // propagates properly. The alternative is an unrecoverable one. See
+      // `README.public.md` and J9's destructive half, which this withdraws.
       for (const path of previous.keys()) {
-        if (!content.has(path)) removed.push(path);
+        if (content.has(path)) continue;
+        const absolute = join(this._rootPath, ...path.split('/'));
+        if (!this._pendingDeletes.has(absolute)) continue;
+        removed.push(path);
       }
     }
     this._announcedContent = content;
