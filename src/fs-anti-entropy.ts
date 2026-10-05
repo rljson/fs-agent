@@ -460,12 +460,29 @@ export class FsAntiEntropy {
    * beacon — and so a mixed-version fleet does not spend its rollout window
    * showing red.
    *
-   * **Keyed on the PAIR, and that is the whole correctness of it.** The thing
-   * proven is "the hub's ref X describes the same content as the state I am
-   * in" — a statement about two sides, true only while neither moves. Keyed on
-   * X alone it survived this node changing underneath it, so a later
-   * announcement of X cleared the divergence without any content check at all,
-   * for ever.
+   * **KNOWN UNSOUND, and deliberately left so for now — do not "fix" this in
+   * isolation.** The thing proven is "the hub's ref X describes the same
+   * content as the state I am in", a statement about two sides that is true
+   * only while neither moves. Keyed on X alone it survives this node changing
+   * underneath it, so a later announcement of X clears the divergence with no
+   * content check at all, for ever. Measured: all four nodes of a churn run
+   * reporting `diverged=false` while their own `differingPaths` named
+   * `two.txt`, with the content genuinely different.
+   *
+   * Keying it on the pair (`${hubRef}@${localRef}`) fixes that, and was
+   * written, measured and then REVERTED — because it turns the divergence
+   * detector back on and the repair behind it is not safe yet. With the memo
+   * corrected, I7b (*a delivered deletion does not beat a later re-creation*)
+   * went from 5 of 5 to 0 of 6: the anti-entropy decided `pull` for a node
+   * that was AHEAD and merged its freshly re-created file away. Bucket
+   * envelopes reaching `observe` was one input (fixed separately, in
+   * `fs-agent.ts`); it was not the only one.
+   *
+   * So the trade, stated plainly: this memo makes the fleet UNDER-REPORT
+   * divergence, and correcting it makes the fleet LOSE FILES. Under-reporting
+   * is the safer of the two until the repair can tell "I am ahead" from "I am
+   * behind" without a chain verdict. The guard for the real behaviour is in
+   * `test/fs-anti-entropy.spec.ts`, inverted, with the measurement in it.
    *
    * Measured: all four nodes of a churn run reporting `diverged=false` while
    * their own `differingPaths` named `two.txt`, stable, with the content
@@ -483,15 +500,6 @@ export class FsAntiEntropy {
    */
   private readonly _contentAgreed = new Set<string>();
 
-  /**
-   * The key under which an agreement is remembered: hub ref AND local ref.
-   * @param hubRef - The ref the hub announced.
-   * @param localRef - The state this node was in when the two were compared.
-   * @returns The pair key.
-   */
-  private static _agreementKey(hubRef: string, localRef: string): string {
-    return `${hubRef}@${localRef}`;
-  }
 
   /**
    * Hub refs a content check is already running for.
@@ -531,9 +539,7 @@ export class FsAntiEntropy {
   private _checkContent(ref: string): void {
     if (!this._deps.sameContent) return;
     if (
-      this._contentAgreed.has(
-        FsAntiEntropy._agreementKey(ref, this._deps.view().currentRef ?? ''),
-      ) ||
+      this._contentAgreed.has(ref) ||
       this._contentChecking.has(ref)
     ) {
       return;
@@ -562,13 +568,7 @@ export class FsAntiEntropy {
    * @param ref - The hub ref that was compared.
    */
   agreedOn(ref: string): void {
-    // The local side read from the VIEW, not from `_localRef`: that field is
-    // only set while an announcement is being judged, and a bucket round can
-    // finish before the beacon that would have reported the divergence ever
-    // arrives. The view is the state this agreement is actually about.
-    this._contentAgreed.add(
-      FsAntiEntropy._agreementKey(ref, this._deps.view().currentRef ?? ''),
-    );
+    this._contentAgreed.add(ref);
     // Agreement means there is nothing to list, and a stale list is worse than
     // none: it is what a UI shows somebody.
     this._differingPaths = [];
@@ -623,11 +623,7 @@ export class FsAntiEntropy {
 
     // A ref already proven content-equivalent is not a divergence, however
     // different the two hashes look. (`unknown` has already returned above.)
-    if (
-      this._contentAgreed.has(
-        FsAntiEntropy._agreementKey(hubRef, view.currentRef as string),
-      )
-    ) {
+    if (this._contentAgreed.has(hubRef)) {
       this._key = null;
       this._divergedSince = null;
       this._attempts = 0;

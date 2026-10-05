@@ -6349,25 +6349,21 @@ export class FsAgent {
     const antiEntropy = new FsAntiEntropy(this._antiEntropyOptions, {
       view: () => ({
         origin: connector.origin,
-        // THE FOLDER, not the memory of it.
+        // `_currentRef`, deliberately: a state this node HAS ESTABLISHED.
         //
-        // `_currentRef` is the state this node last ESTABLISHED — adopted or
-        // announced — and after an apply that left extra files behind it names
-        // a state the folder is no longer in. Every signal the anti-entropy
-        // computes is then derived from that one stale value: `hub.ref ===
-        // currentRef` answers `in-sync`, so no repair is attempted, and
-        // nothing else ever re-checks.
+        // Reporting the scan's live root hash here instead was tried and is
+        // wrong. It makes a node's OWN unannounced work look like divergence,
+        // so the anti-entropy repairs TOWARDS the hub and deletes it — which
+        // is the `fork-is-not-a-lag` defect this package already fixed and
+        // reverted once (`revert(anti-entropy): restore lastAppliedRef as a
+        // state we are in`, 0.0.85). Measured again: I7b, *a delivered
+        // deletion does not beat a later re-creation*, went from 5 of 5 to 0
+        // of 6 — the re-creating node's own file was repaired away.
         //
-        // Measured on the churn fuzzer: one node holding 7 files and
-        // reporting a 4-file ref, identical to the hub's, with
-        // `diverged=false` — permanently. Its scanner tree was correct and
-        // current the whole time; only the remembered ref was wrong.
-        //
-        // The scan's own root hash cannot be stale by construction: it is
-        // whatever the last scan of this folder produced. Falling back to
-        // `_currentRef` covers the window before the first scan, where there
-        // is no folder state to report yet.
-        currentRef: this._scanner.tree?.rootHash ?? this._currentRef,
+        // A node holding work nobody has heard about is AHEAD, and the answer
+        // to being ahead is to PUSH. The anti-entropy is the wrong instrument
+        // for it, and a stale `_currentRef` is a push-path problem.
+        currentRef: this._currentRef,
         lastAppliedRef: this._lastAppliedRef,
         lastPushedRef: this._lastPushedRef,
       }),
@@ -6463,6 +6459,7 @@ export class FsAgent {
     const onHubAnnouncement = (payload: ConnectorPayload) => {
       if (typeof payload?.r !== 'string') return;
       const announced = payload.r;
+
       const observe = (ref: string) =>
         antiEntropy.observe({
           ref,
