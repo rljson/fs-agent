@@ -89,19 +89,44 @@ shape as the fix that made `_applyIncomingRemovals` safe, and the same shape as
 "an absence is not a deletion": **do not act on a fact derived from a state
 without checking whether the state is still current.**
 
-## What to do with this
+## What to do with this — and what does NOT work
 
-Order matters, and each step is measurable on its own:
+The obvious fix was tried, measured and reverted. **Recorded here so it is not
+tried a second time.**
 
-1. **Give the bucket round the ordering rule.** `plan.drop` is a list of paths;
-   refuse any whose newest chain edit is later than the manifest the drop was
-   computed from. The guard belongs beside the existing mass-delete floor.
-2. **Give the merge the same rule** for `resolvedAway`, which is the narrower
-   of the two: it already deletes only paths it has an opinion about, so it
-   needs the opinion dated.
-3. **Only then correct the agreement memo**, and expect the churn split to
-   close with it. Until 1 and 2 are done it cannot be enabled, and the test for
-   it stays inverted with this file named in the comment.
+The idea: give the bucket round's `plan.drop` and the merge's `resolvedAway`
+the same ordering rule, by asking `lastEditOf(head, path)` whether the
+history's newest word on that path is `changed` or `removed`, and refusing the
+deletion when it says the file exists.
+
+**It cannot be asked from the deciding node's own head, and that is fatal.**
+`lastEditOf` walks back from a head through what that head descends from. A
+node being told to delete a path has NOT yet applied the entry that states the
+removal — that is precisely why it is being told — so its own head cannot see
+it. The newest word it finds is the file's creation, so the guard refuses every
+removal it was built to order, including every correct one.
+
+Measured, with both guards in place: four deletion-propagation tests red —
+`delivers a deletion a peer never received`, `does not undo a peer deletion it
+missed`, `T4: a delete made while cut off is not resurrected on rejoin`, and J9.
+The matrix passed 9 of 9 in isolation, which is how the mistake survived long
+enough to be committed: the scenarios that catch it live in other files.
+
+So the rule is right and **the information needed to apply it is not available
+where the deletion happens**:
+
+- a bucket **manifest** carries paths and blob ids, and no chain reference or
+  time at all — there is nothing to date the tombstone against;
+- a **merge** holds two branch tips, and the edit that would outrank its
+  opinion is by construction one that neither tip descends from.
+
+Anything built on this has to give those two mechanisms a reference into the
+chain they do not currently carry — a tombstone that names the entry that
+created it, or a merge basis that can be compared against a later entry. That
+is a protocol change to the manifest, not a guard.
+
+The agreement memo therefore stays inverted, and the churn split stays open.
+Nine attempts are catalogued above; the tenth was this one.
 
 A note on what NOT to do, because it was tried: do not make the detector
 quieter to keep the deletions safe. That is the state the package is in today —

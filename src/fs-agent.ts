@@ -4679,51 +4679,7 @@ export class FsAgent {
           new Error(`refused ${plan.drop.length}/${held} drops`),
         );
       } else {
-        // THE SAME ORDERING RULE THE STATED REMOVALS OBEY — see
-        // `doc/convergence-contract.md`.
-        //
-        // A drop says "the peer's manifest holds a tombstone for a path we
-        // hold live". That is true of the manifest it was computed from, and
-        // the manifest carries no time: so a file created AFTER that manifest
-        // was captured is deleted by evidence older than itself. This is the
-        // second of the three deletion authorities and it never asked the
-        // chain anything.
-        //
-        // The question needs no timestamps, because the chain answers it
-        // directly: what is the newest edit of this path, and does it say the
-        // file EXISTS or that it is GONE? `lastEditOf` walks back from this
-        // node's head, nearest-to-head first, so its answer is the latest
-        // word the shared history has. If that word is `changed`, the file is
-        // meant to be here and the peer is simply behind.
-        //
-        // Measured as I7b: a re-created file deleted on a node that had
-        // applied the earlier, legitimate removal — the re-creation was in
-        // the chain, announced, and the bucket round dropped it anyway.
-        const head = this._chainHead?.head;
-        const refused: string[] = [];
-        const dropping: string[] = [];
         for (const path of plan.drop) {
-          if (this._chain && head !== undefined) {
-            const last = await this._chain
-              .lastEditOf(head, path)
-              .catch(() => undefined);
-            if (last?.changed.includes(path)) {
-              refused.push(path);
-              continue;
-            }
-          }
-          dropping.push(path);
-        }
-        if (refused.length > 0) {
-          console.warn(
-            `${this._tag} kept ${refused.length} path` +
-              `${refused.length === 1 ? '' : 's'} a bucket round would have ` +
-              `dropped — the history's newest word on ` +
-              `${refused.slice(0, 3).join(', ')} is that it exists`,
-          );
-        }
-
-        for (const path of dropping) {
           const target = join(this._rootPath, ...path.split('/'));
           try {
             await rm(target, { force: true });
@@ -4742,17 +4698,6 @@ export class FsAgent {
     // `redelete` needs no action here: our manifest already advertises those
     // tombstones, so the peer acts on them in its own round. Naming it in the
     // plan is what makes the omission deliberate rather than forgotten.
-    //
-    // DROPPING a stale tombstone here was tried and withdrawn. The idea was
-    // sound — our deletion versus a peer's re-creation is an ordering
-    // question, and re-asserting a tombstone the history has moved past
-    // deadlocks against the node that re-created the path. But it reaches the
-    // offline case too: a deletion made while the agent was stopped is never
-    // stated, so the history still says the file exists, the tombstone is
-    // dropped, and the deletion never propagates. That cost J9's destructive
-    // half — and it fixed nothing measurable, with I7b still failing 5 of 5
-    // under the agreement memo. See `doc/convergence-contract.md`.
-
     if (plan.conflict.length > 0) {
       // NAMED, not resolved. Both sides edited the same file, which no
       // additive step can settle — the ordinary conflict resolver owns it.
@@ -5220,19 +5165,6 @@ export class FsAgent {
         const filePath = join(this._rootPath, relativePath);
         await mkdir(dirname(filePath), { recursive: true });
         await FsAgent._atomicWriteFile(filePath, content);
-      },
-      // The history's newest word on a path, asked from THIS node's head —
-      // the merge cannot ask it, because `lastEditOfPath` only sees what a
-      // branch tip descends from. See `doc/convergence-contract.md`.
-      newestWordOnPath: async (relativePath) => {
-        await this._ensureChain(db, treeKey);
-        const head = this._chainHead?.head;
-        if (!this._chain || head === undefined) return undefined;
-        const last = await this._chain
-          .lastEditOf(head, relativePath)
-          .catch(() => undefined);
-        if (!last) return undefined;
-        return last.changed.includes(relativePath) ? 'exists' : 'gone';
       },
       deleteFileAt: async (relativePath) => {
         await rm(join(this._rootPath, relativePath), {

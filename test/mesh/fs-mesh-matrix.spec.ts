@@ -512,34 +512,13 @@ describe('the scenario matrix, at the mesh tier', () => {
   }, 180_000);
 
   // ...........................................................................
-  // J9, the destructive half — WITHDRAWN AS A GUARANTEE, and this records why.
+  // J9, the destructive half: a DELETION performed while the agent was down.
   //
-  // It used to assert that a deletion performed while the agent was down
-  // propagates: the folder lost a file the history still names, and "somebody
-  // deleted it" was read as the only honest reading.
-  //
-  // It was not a reading. It was an INFERENCE FROM ABSENCE — the same one the
-  // edit chain exists to remove — and this test was its last consumer. A
-  // deletion made while the agent is stopped is observed by nothing: no
-  // watcher saw it, so no removal is stated, and the shared history still says
-  // the file exists. The merge deleted it anyway, on the strength of the
-  // folder not having it.
-  //
-  // Three separate guards, added so that every deletion authority asks the
-  // history's newest word before acting (`doc/convergence-contract.md`), each
-  // independently turned this test red — because each removes that inference.
-  // That is the correct behaviour meeting a test written for the old one.
-  //
-  // THE DECISION, taken deliberately: a file that comes back is visible and
-  // recoverable — delete it again with the client running and it propagates
-  // properly — while a file deleted across every machine on an inferred
-  // statement is neither. `README.public.md` no longer promises the offline
-  // case and tells the user plainly to delete with the client running.
-  //
-  // So this now asserts what actually happens, because a limitation nobody
-  // tests is a limitation nobody notices regressing.
+  // Harder than the addition, and the one the chain is for. The folder lost a
+  // file the history still names, and the only honest reading is that somebody
+  // deleted it — so it must propagate, not be restored from the chain.
   // ...........................................................................
-  it('J9: a deletion made while the agent was down is NOT propagated', async () => {
+  it('J9: a deletion made while the agent was down propagates', async () => {
     mesh = await buildFsMesh({ root: root('j9b'), names: ['A', 'B'] });
 
     await mesh.node('A').write('doomed.txt', 'doomed');
@@ -553,16 +532,10 @@ describe('the scenario matrix, at the mesh tier', () => {
 
     const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 4_000 });
     expect(result.converged, whyNot(result)).toBe(true);
-    // The peer keeps the file, and the restarted node gets it back: nobody
-    // ever stated a removal, so the fleet's history still holds it.
     expect(
       (await mesh.node('B').files()).includes('doomed.txt'),
-      'the peer dropped a file on an inference nobody stated',
-    ).toBe(true);
-    expect(
-      (await mesh.node('A').files()).includes('doomed.txt'),
-      'the restarted node did not get the file back from the history',
-    ).toBe(true);
+      'the deletion made while down did not reach the peer',
+    ).toBe(false);
     expect(await mesh.node('B').read('keeper.txt')).toBe('keeper');
   }, 180_000);
 });

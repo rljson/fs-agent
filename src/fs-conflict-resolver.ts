@@ -597,26 +597,6 @@ export interface ConflictResolverDeps {
   writeFileAt: (relativePath: string, content: Buffer) => Promise<void>;
   /** Remove a relative path under the working dir (best effort). */
   deleteFileAt: (relativePath: string) => Promise<void>;
-  /**
-   * The shared history's NEWEST word on a path: does it exist, or is it gone?
-   *
-   * Asked from THIS NODE's chain head, which is the part the merge cannot do
-   * for itself: `lastEditOfPath` walks from a branch TIP, so it can only see
-   * what that tip descends from, and the whole problem is an edit neither tip
-   * knew about.
-   *
-   * **It is the third deletion authority's ordering rule** — see
-   * `doc/convergence-contract.md`. A merge deletes the paths its plan resolved
-   * away, which is correct about the two trees it was computed from and blind
-   * to anything newer. A file created after those trees were captured would
-   * otherwise be deleted by evidence older than itself.
-   *
-   * Optional, because the chain is best effort: absent, the merge deletes
-   * exactly what it did before.
-   */
-  newestWordOnPath?: (
-    relativePath: string,
-  ) => Promise<'exists' | 'gone' | undefined>;
   /** Re-scan the working dir into a fresh, hashed FsTree. */
   scan: () => Promise<FsTree>;
   /** Store the merge revision with explicit predecessors; returns its root ref. */
@@ -822,32 +802,10 @@ export class FsConflictResolver {
       // still being written into it.
       if (blobId !== DIR_MARKER) resolvedAway.add(path);
     }
-    // The merge's opinion is dated, and a newer fact outranks it.
-    //
-    // `resolvedAway` is every path either branch held that the merge decided
-    // was gone — correct about the two trees it was computed from, and blind
-    // to anything that happened after them. Asking the history's newest word
-    // is the same rule the stated removals and the bucket round now obey; one
-    // rule in three places, not three rules.
-    const keptByHistory: string[] = [];
     for (const path of resolvedAway) {
-      if (plan.merged.has(path)) continue;
-      const word = await this.deps
-        .newestWordOnPath?.(path)
-        .catch(() => undefined);
-      if (word === 'exists') {
-        keptByHistory.push(path);
-        continue;
+      if (!plan.merged.has(path)) {
+        await this.deps.deleteFileAt(path);
       }
-      await this.deps.deleteFileAt(path);
-    }
-    if (keptByHistory.length > 0) {
-      this._log(
-        'warn',
-        `merge kept ${keptByHistory.length} path(s) it resolved away — the ` +
-          `history's newest word is that they exist: ` +
-          `${keptByHistory.slice(0, 3).join(', ')}`,
-      );
     }
 
     // Conflict copies: the losing content under renamed paths.
