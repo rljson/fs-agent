@@ -6,6 +6,32 @@ Use of this source code is governed by terms that can be
 found in the LICENSE file in the root of this package.
 -->
 
+# THE RULE
+
+**Content-based linked chaining is the mechanism of consistency. Nothing is
+transferred, and no action is taken, except through the shared edit chain —
+consequently chained, and applied in order.**
+
+No heuristic is an acceptable substitute. Where one exists today it is a gap to
+be closed, not a design choice to be balanced against the chain. This document
+exists because that gap turned out to be larger than anyone had written down,
+and because ten separate fixes for one defect were each attempted at the wrong
+end of it.
+
+The practical reading, in the order it has to happen:
+
+1. **make the chain able to answer** — a verdict that arrives too late is
+   indistinguishable from no chain at all;
+2. **then the heuristics stop being reached**, having become unnecessary rather
+   than forbidden;
+3. **then remove them**, and the safety floors that exist only to catch their
+   mistakes;
+4. **the agreement memo is one line at the end of that**, not the start.
+
+Removing a heuristic before step 1 removes a mechanism the fleet is currently
+relying on. That was measured — see *Why the chain is not actually leading*
+below — and it is the single most expensive thing in this file to re-learn.
+
 # The convergence contract — who may delete a file, and on what evidence
 
 Written 2026-10-05, after six separate fixes for one defect were each measured
