@@ -611,74 +611,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
   });
 
   // ...........................................................................
-  describe('a ref arriving while a join is still pending', () => {
-    // The hub's own announcements are UNMARKED — it advertises from the
-    // server's trees table, not from the ref log it relayed — so the first
-    // thing a joining node hears is a bare tree ref and never a marked head.
-    // Both ways that can fail have to leave the node able to try again.
-
-    const joinOnRef = (
-      a: FsAgent,
-      treeRef: string,
-      schedule: (r: string) => void,
-    ): Promise<void> =>
-      priv<
-        (
-          r: string,
-          p: { db: Db; treeKey: string },
-          s: (r: string) => void,
-        ) => Promise<void>
-      >(a, '_joinOnUnmarkedRef').call(
-        a,
-        treeRef,
-        { db: undefined as unknown as Db, treeKey: 'fsTree' },
-        schedule,
-      );
-
-    it('falls back to the ordinary apply when no entry covers the ref', async () => {
-      // An older peer, or history that has not replicated yet. The ref is
-      // still real — it must be applied the normal way rather than dropped.
-      (agent as unknown as { _chain: unknown })._chain = failingChain([], {
-        entryForTreeRef: undefined,
-      });
-      const scheduled: string[] = [];
-      await joinOnRef(agent, 'bareTreeRef', (r) => scheduled.push(r));
-      expect(scheduled, 'the ref was dropped instead of applied').toEqual([
-        'bareTreeRef',
-      ]);
-    });
-
-    it('leaves the join pending and records a lookup that fails', async () => {
-      (agent as unknown as { _chain: unknown })._chain = failingChain([
-        'entryForTreeRef',
-      ]);
-      const scheduled: string[] = [];
-      await joinOnRef(agent, 'bareTreeRef', (r) => scheduled.push(r));
-
-      expect(syncErrors(dir)).toContain('join/lookup');
-      // And it did NOT fall back to applying: the join is still waiting for a
-      // state it can reconcile against, which the next announcement carries.
-      expect(scheduled).toEqual([]);
-    });
-
-    it('records a reconcile that fails, rather than throwing out of the handler', async () => {
-      // `_reconcileJoin` reads the tree and writes the folder, so it can fail
-      // for reasons that have nothing to do with the lookup. Same answer: the
-      // join stays pending.
-      (agent as unknown as { _chain: unknown })._chain = failingChain([], {
-        entryForTreeRef: { head: 'aHead', treeRef: 'aTreeRef', timeId: '1:a' },
-      });
-      (
-        agent as unknown as { _reconcileJoin: (...a: unknown[]) => Promise<void> }
-      )._reconcileJoin = () =>
-        Promise.reject(new Error('the reconcile could not run'));
-
-      await joinOnRef(agent, 'bareTreeRef', () => undefined);
-      expect(syncErrors(dir)).toContain('join/lookup');
-    });
-  });
-
-  // ...........................................................................
   describe('classifying an announced ref with an unreadable chain', () => {
     const classify = (a: FsAgent, treeRef: string): Promise<string> =>
       priv<(r: string) => Promise<string>>(a, '_classifyAnnouncedRef').call(
@@ -741,26 +673,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
 
       expect(await classify(agent, 'theirTreeRef')).toBe('behind');
       expect(asked).toEqual(['headFromTheAnnouncement']);
-    });
-  });
-
-  // ...........................................................................
-  describe('a join whose reconcile cannot run', () => {
-    it('records it and stays silent rather than announcing an unjudged folder', async () => {
-      (
-        agent as unknown as { _reconcileJoin: (...a: unknown[]) => Promise<void> }
-      )._reconcileJoin = () =>
-        Promise.reject(new Error('the head tree could not be read'));
-
-      await priv<
-        (p: { db: Db; treeKey: string }, e: unknown) => Promise<void>
-      >(agent, '_reconcileJoinOrRecord').call(
-        agent,
-        { db: undefined as unknown as Db, treeKey: 'fsTree' },
-        { head: 'theirHead', treeRef: 'theirTreeRef', timeId: '1:a', previous: [] },
-      );
-
-      expect(syncErrors(dir)).toContain('join/reconcile');
     });
   });
 
@@ -1550,6 +1462,124 @@ describe('FsAgent — degradation when a dependency fails', () => {
       }
       expect(warnings.join('\n')).not.toContain('re-announcing');
     });
+  });
+  // ...........................................................................
+  describe('the plural and the singular, because a support log is read by a person', () => {
+    it('says "paths" when a peer deleted more than one thing this node keeps', async () => {
+      // The singular is covered elsewhere. Both forms matter for the same
+      // reason: "kept 1 paths" in a support log is how a reader stops
+      // trusting the log, and this line is what a user is shown when their
+      // own newer work survives a peer's deletion.
+      await writeFile(join(dir, 'mine-a.txt'), 'my newer work');
+      await writeFile(join(dir, 'mine-b.txt'), 'also mine');
+      await writeFile(join(dir, 'anchor.txt'), 'anchor');
+      await agent.extract();
+
+      const claims = priv<Map<string, string>>(agent, '_localPathTimeIds');
+      claims.set('mine-a.txt', '9999999999999:zzzzzzzz');
+      claims.set('mine-b.txt', '9999999999999:zzzzzzzy');
+      priv<
+        Map<string, { removed: string[]; changed: string[]; timeId: string }>
+      >(agent, '_incomingRemovals').set('theirTreeRef', {
+        removed: ['mine-a.txt', 'mine-b.txt'],
+        changed: [],
+        timeId: '100:aaaaaaaa',
+      });
+
+      const warnings: string[] = [];
+      const warn = console.warn;
+      console.warn = (...a: unknown[]) => warnings.push(a.join(' '));
+      try {
+        await callOnAgent(agent, '_applyIncomingRemovals', 'theirTreeRef');
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings.join('\n')).toContain('kept 2 paths a peer deleted');
+      expect(existsSync(join(dir, 'mine-a.txt'))).toBe(true);
+      expect(existsSync(join(dir, 'mine-b.txt'))).toBe(true);
+    });
+
+    it('lifts a single tombstone and says "tombstone", not "tombstones"', async () => {
+      // A tombstone is lifted when a peer re-creates a path this node had
+      // deleted — without it the restore would refuse every later copy of
+      // that path for ever.
+      const target = join(dir, 'came-back.txt');
+      priv<Set<string>>(agent, '_pendingDeletes').add(target);
+      await writeFile(join(dir, 'anchor.txt'), 'anchor');
+      await agent.extract();
+
+      priv<
+        Map<string, { removed: string[]; changed: string[]; timeId: string }>
+      >(agent, '_incomingRemovals').set('theirTreeRef', {
+        removed: [],
+        changed: ['came-back.txt'],
+        timeId: '100:aaaaaaaa',
+      });
+
+      const logs: string[] = [];
+      const log = console.log;
+      console.log = (...a: unknown[]) => logs.push(a.join(' '));
+      try {
+        await callOnAgent(agent, '_applyIncomingRemovals', 'theirTreeRef');
+      } finally {
+        console.log = log;
+      }
+      expect(logs.join('\n')).toMatch(/lifted 1 tombstone[^s]/);
+      expect(
+        priv<Set<string>>(agent, '_pendingDeletes').has(target),
+        'the tombstone was not lifted, so the re-creation can never be written',
+      ).toBe(false);
+    });
+  });
+
+  // ...........................................................................
+  describe('errors that are not the shape the code hoped for', () => {
+    it('tags a stream read that fails with something other than an Error', async () => {
+      // The restore has to tell "the blob could not be read" from "the file
+      // could not be written" — one costs a retry, the other a user-visible
+      // error. A source that rejects with a string still has to be
+      // classifiable.
+      const file = join(dir, 'from-a-bad-stream.txt');
+      const broken = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.error('a string, not an Error');
+        },
+      });
+      await expect(
+        callOnAgent(
+          agent.constructor as unknown as FsAgent,
+          '_atomicWriteStream',
+          file,
+          broken,
+        ),
+      ).rejects.toMatchObject({ __blobRead: true });
+    });
+
+    it('tolerates a missing tree node that is not a timeout', async () => {
+      // A missing node is ordinary — a blob reference, or one deleted. Only a
+      // timeout is systemic and must surface, because swallowing that turns a
+      // transport fault into a silently short tree.
+      const db = await aDb();
+      await writeFile(join(dir, 'doc.txt'), 'content');
+      const tree = await agent.extract();
+      const ref = await agent.storeInDb(db, 'fsTree', tree);
+      (
+        db.core as unknown as { readRowsByHashes: (...a: unknown[]) => unknown }
+      ).readRowsByHashes = () =>
+        Promise.reject(new Error('the batch read is unavailable'));
+      (db as unknown as { get: (...a: unknown[]) => unknown }).get = () =>
+        Promise.reject(new Error('node not found'));
+
+      // The non-timeout error is TOLERATED at the node level — the walk
+      // carries on — and the read then ends with no nodes at all, which is
+      // fatal because a tree whose root cannot be read is not a tree. Both
+      // halves matter: tolerating the node is what keeps a blob reference or a
+      // deleted entry from killing a restore, and failing at the end is what
+      // keeps an empty result from being mistaken for an empty folder.
+      await expect(
+        callOnAgent(agent, '_fetchTreeFromDb', db, 'fsTree', ref),
+      ).rejects.toThrow(/No tree nodes found/);
+    }, 30_000);
   });
 });
 

@@ -4062,40 +4062,6 @@ export class FsAgent {
     });
   }
 
-  /**
-   * Uses an unmarked tree ref to finish a join, rather than queueing it.
-   *
-   * A method rather than an inline handler so that both of its failures can be
-   * TESTED. Awaiting a query here is safe for this one case, because a pending
-   * join deliberately schedules nothing — the rule it would otherwise break,
-   * never await before scheduling an apply, exists to stop a late joiner's
-   * bootstrap being lost, and this IS the bootstrap being used.
-   *
-   * No entry for the ref means nothing to reconcile against — an older peer,
-   * or history that has not replicated yet — so the ordinary path applies it
-   * and the next head tries again. A failed lookup leaves the join pending for
-   * the next announcement to retry, which is why it is recorded rather than
-   * thrown.
-   * @param treeRef - The unmarked ref that arrived.
-   * @param pending - The join waiting for a state to reconcile against.
-   * @param schedule - Queues the ordinary debounced apply.
-   */
-  private async _joinOnUnmarkedRef(
-    treeRef: string,
-    pending: { db: Db; treeKey: string },
-    schedule: (ref: string) => void,
-  ): Promise<void> {
-    try {
-      const entry = await this._chain?.entryForTreeRef(treeRef);
-      if (!entry) {
-        schedule(treeRef);
-        return;
-      }
-      await this._reconcileJoin(pending.db, pending.treeKey, entry);
-    } catch (err) {
-      this._writeSyncError('join/lookup', err);
-    }
-  }
 
   /**
    * Where an announced state sits relative to this node, per the chain.
@@ -4134,26 +4100,6 @@ export class FsAgent {
       .catch(() => 'incomplete' as const);
   }
 
-  /**
-   * Reconciles a join against the head that arrived, or records why it could not.
-   *
-   * A method rather than an inline `.catch` so the failure can be TESTED. A
-   * failed reconcile leaves the node SILENT rather than guessing — it has
-   * established nothing yet, and announcing a folder it has not judged against
-   * the history is how a stale copy gets published. The next head retries.
-   * @param pending - The join waiting for a state to reconcile against.
-   * @param entry - The chain entry that arrived.
-   */
-  private async _reconcileJoinOrRecord(
-    pending: { db: Db; treeKey: string },
-    entry: FsChainEntry,
-  ): Promise<void> {
-    try {
-      await this._reconcileJoin(pending.db, pending.treeKey, entry);
-    } catch (err) {
-      this._writeSyncError('join/reconcile', err);
-    }
-  }
 
   private async _joinReconcileBody(
     db: Db,
@@ -6004,58 +5950,24 @@ export class FsAgent {
           }
           return; // Success — exit retry loop
         } catch (err) {
-          if (err instanceof MassDeleteRefusedError) {
-            // A refusal is TERMINAL for this ref, and the opposite of the
-            // locked-file case below in both respects.
-            //
-            // No retry: the same tree will be refused for the same reason, so
-            // retrying only burns the recovery budget and repeats the error.
-            //
-            // And no advertisement suppression — this is the correction the
-            // lab forced. Suppressing here looked consistent and was wrong:
-            // the peer that sent the sparse tree is the one MISSING data, and
-            // this node holds the fuller copy. Going quiet leaves it stranded
-            // with nothing to catch up from, and with every node that has the
-            // files refusing its pushes, the network livelocks — measured on
-            // four nodes, where two sat at 5 and 15 of 121 files and could not
-            // recover.
-            //
-            // So this node keeps its state and keeps talking about it. The
-            // ref is still not adopted, because it was not applied.
-            //
-            // "Keeps talking about it" was aspirational. Nothing here made it
-            // talk: the refusal only stopped SUPPRESSING this node's
-            // advertisements, and with its own content unchanged it had nothing
-            // new to say, so it said nothing at all. The sender — the node that
-            // is missing data — heard silence.
-            //
-            // Measured on two clients: an empty joiner sat at 0 of 3642 files
-            // for 60 s, unaffected by a 15 s settle, and a single write on the
-            // populated side moved all 414 MB in about six seconds. On four
-            // nodes the same shape shows as `mass-delete-guard` reporting
-            // "did NOT refill on its own — it needs a change elsewhere".
-            //
-            // That change elsewhere is what this now supplies. A refusal is a
-            // fact about the SENDER: it holds less than we do. Answering it
-            // with our current state is the whole correction.
-            // Retire the refused ref, or the SECOND time this happens is
-            // silent. A tree ref is a content hash, so a folder that is emptied
-            // twice re-derives the same ref both times — and the first
-            // advertisement left it marked "already received" here. The second
-            // is dropped by the connector before the agent sees it, so nothing
-            // refuses, nothing answers, and the peer stays empty for good.
-            //
-            // Measured: a client that had already joined and was then emptied
-            // sat at 1 of 3642 files with no refusal logged at all, while a
-            // FRESH client — whose empty ref this node had never seen — was
-            // refused, answered, and converged in eleven seconds.
-            //
-            // Same shape as the delete fix in 0.0.31: refusing a state is not
-            // the same as having consumed it.
-            connector.invalidateReceived(treeRef);
-            await this._readvertiseAfterRefusal(connector);
-            return;
-          }
+          // NO `MassDeleteRefusedError` BRANCH HERE, and that is not an
+          // omission.
+          //
+          // It is thrown only from inside `restore`'s `cleanTarget` block, and
+          // every apply on this path passes `cleanTarget: false` — deliberately,
+          // because the chain made deletions STATED rather than inferred from
+          // a tree being sparse. So the whole-folder prune this used to catch
+          // cannot happen here any more, and the branch that handled it sat
+          // dead with its own re-announcement machinery behind it.
+          //
+          // The live mass-delete guards are `planRemovals` and the bucket
+          // round's destructive half; both refuse in place and log, neither
+          // throws. **If a prune is ever re-enabled on this path, the refusal
+          // handling has to come back with it** — including telling the sender,
+          // because a node that refuses a sparse tree and then goes quiet
+          // leaves the sender stranded with nothing to catch up from, and the
+          // fleet livelocks. That was measured on four nodes sitting at 5 and
+          // 15 of 121 files.
           if (
             err instanceof PartialRestoreError ||
             err instanceof BlobUnavailableError
@@ -6264,10 +6176,26 @@ export class FsAgent {
         // otherwise break — never await before scheduling an apply — exists to
         // stop a late joiner's bootstrap being lost, and this is the bootstrap
         // being used rather than queued.
-        if (this._joinPending) {
-          void this._joinOnUnmarkedRef(treeRef, this._joinPending, schedule);
-          return Promise.resolve();
-        }
+        // WHILE JOINING, AN ANNOUNCEMENT IS IGNORED — the ask loop is the
+        // only way in.
+        //
+        // Both have to be refused, not just the apply: scheduling an ordinary
+        // apply here would restore the hub's state over a folder whose extras
+        // nobody has judged yet, and the join protocol exists precisely to
+        // judge them first (new work is announced, a file the history deleted
+        // is set aside). Measured before that existed: the joiner's stale copy
+        // was deleted by a peer's stated removal instead of being kept.
+        //
+        // Reconciling from the announcement was the other option and it was
+        // what this did. It is redundant now — `_deferToNetwork` polls the
+        // chain every `JOIN_ASK_INTERVAL_MS` and reconciles the moment it has
+        // a head, and it reads the SAME chain, so it offers no resilience the
+        // ask loop lacks. Two routes to one reconcile, racing each other, with
+        // only one of them ever measured.
+        //
+        // If no head ever arrives the bounded wait expires and this folder IS
+        // the origin — a deferral, never a refusal.
+        if (this._joinPending) return Promise.resolve();
         schedule(treeRef);
         // AND look its chain entry up anyway, in parallel.
         //
@@ -6343,11 +6271,10 @@ export class FsAgent {
           // An ordinary apply here would do the opposite — restore the head
           // over the folder and let the next push announce whatever survived,
           // which cannot tell new work from a stale copy.
-          const pending = this._joinPending;
-          if (pending) {
-            void this._reconcileJoinOrRecord(pending, resolved.entry);
-            return;
-          }
+          // Same rule as the unmarked path above: while a join is pending the
+          // ask loop owns the reconcile, and this ref is dropped rather than
+          // applied over an unjudged folder.
+          if (this._joinPending) return;
           // PARKED, not claimed. The peer's head becomes a parent of whatever
           // this node records next — but only once the apply for this state has
           // actually run, so the two lineages join on work this node did hold.
