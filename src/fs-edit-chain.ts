@@ -867,6 +867,19 @@ export interface RemovalQuestion {
    * applied — "unknown" must never read as "older".
    */
   localTimeIds: ReadonlyMap<string, string>;
+  /**
+   * `path → timeId` of the last edit the CHAIN knows for that path.
+   *
+   * Consulted only where {@link localTimeIds} has nothing, which is the case
+   * that matters: a node holding a file it RECEIVED rather than authored has
+   * no claim on it — a receiver adopts and never authors, deliberately — so
+   * without this the ordering question had no answer and an old removal won
+   * by default.
+   *
+   * Optional, because the chain is best effort. Absent, the behaviour is
+   * exactly what it was: only this node's own claims can outrank a removal.
+   */
+  chainTimeIds?: ReadonlyMap<string, string>;
   /** Relative paths this node currently holds. */
   held: ReadonlySet<string>;
   /**
@@ -972,7 +985,27 @@ export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
       staler.push(path);
       continue;
     }
-    const local = opts.localTimeIds.get(path);
+    // WHO LAST TOUCHED THIS PATH — asked of this node's claims first, and of
+    // the CHAIN when it has none.
+    //
+    // A claim is recorded by the PUSH, and a receiver adopts without
+    // authoring: that is deliberate, because claiming an adopted path would
+    // make a peer's later removal of it look stale. The consequence is that a
+    // node holding a file it merely RECEIVED has no claim for it — so this
+    // comparison had nothing to compare and the removal applied by default.
+    //
+    // Measured: a file re-created on one node, adopted by a third, and then
+    // deleted on that third node by a removal older than the re-creation. The
+    // ordering fact existed the whole time — the re-creator's entry carries a
+    // later `timeId` than the removal — and nothing asked for it, because the
+    // only question being put was "do I claim this?".
+    //
+    // `chainTimeIds` is that question put to the history instead, which is
+    // where the answer lives. Deriving it from the local claim map alone is
+    // the same mistake as deriving a deletion from an absent file: a fact
+    // about the fleet read off one node's private state.
+    const local =
+      opts.localTimeIds.get(path) ?? opts.chainTimeIds?.get(path);
     if (local !== undefined && compareTimeId(opts.timeId, local) < 0) {
       staler.push(path);
       continue;

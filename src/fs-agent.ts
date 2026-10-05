@@ -4855,10 +4855,35 @@ export class FsAgent {
       }
     }
 
+    // ASK THE CHAIN who last touched the paths this node has no claim on.
+    //
+    // A claim is recorded by the PUSH and a receiver adopts without
+    // authoring, so a file this node merely RECEIVED carries no claim — and
+    // the ordering question then had no answer, so an older removal applied
+    // by default and deleted a newer re-creation. The fact was in the history
+    // the whole time; nothing asked for it.
+    //
+    // Only for the paths that need it: one walk per unclaimed removal, and
+    // removals are few. Best effort, because the chain is — a lookup that
+    // cannot be made leaves the behaviour exactly as it was.
+    const chainTimeIds = new Map<string, string>();
+    const head = this._chainHead?.head;
+    if (this._chain && head !== undefined) {
+      for (const path of incoming.removed) {
+        if (!held.has(path)) continue;
+        if (this._localPathTimeIds.has(path)) continue;
+        const entry = await this._chain
+          .lastEditOf(head, path)
+          .catch(() => undefined);
+        if (entry) chainTimeIds.set(path, entry.timeId);
+      }
+    }
+
     const plan = planRemovals({
       removed: incoming.removed,
       timeId: incoming.timeId,
       localTimeIds: this._localPathTimeIds,
+      chainTimeIds,
       held,
       unannounced,
       // What the same edit CLAIMS, so a renamed folder is not read as a wipe:
