@@ -460,10 +460,38 @@ export class FsAntiEntropy {
    * beacon — and so a mixed-version fleet does not spend its rollout window
    * showing red.
    *
+   * **Keyed on the PAIR, and that is the whole correctness of it.** The thing
+   * proven is "the hub's ref X describes the same content as the state I am
+   * in" — a statement about two sides, true only while neither moves. Keyed on
+   * X alone it survived this node changing underneath it, so a later
+   * announcement of X cleared the divergence without any content check at all,
+   * for ever.
+   *
+   * Measured: all four nodes of a churn run reporting `diverged=false` while
+   * their own `differingPaths` named `two.txt`, stable, with the content
+   * genuinely different. The two signals contradicted each other because one
+   * was memoised and the other was not — and the repair is gated on the
+   * memoised one.
+   *
+   * The code already knew the rule and applied it to one side only: a `no` is
+   * deliberately never cached, because *"caching a `no` would have to be
+   * invalidated the moment either side changes"*. A `yes` needs exactly the
+   * same invalidation, and the pair key is what provides it.
+   *
    * Bounded, because it is keyed on refs a peer chooses: a hub that changes
    * state constantly must not grow this without limit.
    */
   private readonly _contentAgreed = new Set<string>();
+
+  /**
+   * The key under which an agreement is remembered: hub ref AND local ref.
+   * @param hubRef - The ref the hub announced.
+   * @param localRef - The state this node was in when the two were compared.
+   * @returns The pair key.
+   */
+  private static _agreementKey(hubRef: string, localRef: string): string {
+    return `${hubRef}@${localRef}`;
+  }
 
   /**
    * Hub refs a content check is already running for.
@@ -502,7 +530,14 @@ export class FsAntiEntropy {
    */
   private _checkContent(ref: string): void {
     if (!this._deps.sameContent) return;
-    if (this._contentAgreed.has(ref) || this._contentChecking.has(ref)) return;
+    if (
+      this._contentAgreed.has(
+        FsAntiEntropy._agreementKey(ref, this._deps.view().currentRef ?? ''),
+      ) ||
+      this._contentChecking.has(ref)
+    ) {
+      return;
+    }
     this._contentChecking.add(ref);
     void this._deps
       .sameContent(ref)
@@ -527,7 +562,13 @@ export class FsAntiEntropy {
    * @param ref - The hub ref that was compared.
    */
   agreedOn(ref: string): void {
-    this._contentAgreed.add(ref);
+    // The local side read from the VIEW, not from `_localRef`: that field is
+    // only set while an announcement is being judged, and a bucket round can
+    // finish before the beacon that would have reported the divergence ever
+    // arrives. The view is the state this agreement is actually about.
+    this._contentAgreed.add(
+      FsAntiEntropy._agreementKey(ref, this._deps.view().currentRef ?? ''),
+    );
     // Agreement means there is nothing to list, and a stale list is worse than
     // none: it is what a UI shows somebody.
     this._differingPaths = [];
@@ -582,7 +623,11 @@ export class FsAntiEntropy {
 
     // A ref already proven content-equivalent is not a divergence, however
     // different the two hashes look. (`unknown` has already returned above.)
-    if (this._contentAgreed.has(hubRef)) {
+    if (
+      this._contentAgreed.has(
+        FsAntiEntropy._agreementKey(hubRef, view.currentRef as string),
+      )
+    ) {
       this._key = null;
       this._divergedSince = null;
       this._attempts = 0;

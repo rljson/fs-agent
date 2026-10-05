@@ -436,6 +436,82 @@ describe('the scenario matrix, at the mesh tier', () => {
   }, 180_000);
 
   // ...........................................................................
+  // J6 — joining with a file the fleet CHANGED while you were away.
+  //
+  // The third thing a joiner's folder can hold, and the only one J4+J5 does
+  // not cover. A path the fleet has never heard of is new work and is
+  // announced; a path the fleet DELETED is stale and is set aside into
+  // `.fsagent-recovered/`. This is the one in between: a path both sides
+  // still hold, with DIFFERENT content.
+  //
+  // It cannot be judged by absence, because nothing is absent. The folder's
+  // copy might be the newer edit or it might be a stale backup, and the chain
+  // cannot order it either — the joiner has no history, which is why it is
+  // joining. So neither version may be thrown away: the fleet's state is
+  // applied and the joiner's copy is kept beside it as a conflict copy, which
+  // is the same answer a live edit/edit conflict gets.
+  //
+  // Overwriting it instead is silent data loss of exactly the shape this
+  // package exists to prevent — somebody's unsaved afternoon, replaced on the
+  // authority of a history that never saw it.
+  // ...........................................................................
+  it('J6: a joiner keeps its own version of a file the fleet also changed', async () => {
+    mesh = await buildFsMesh({
+      root: root('j6'),
+      names: ['A', 'B'],
+      joinWaitMs: 4_000,
+    });
+
+    // The fleet's history for `shared.txt`: created, then changed.
+    await mesh.node('A').write('shared.txt', 'the fleet wrote this first');
+    expect((await mesh.converged({ timeoutMs: 30_000 })).converged).toBe(true);
+    await mesh.node('A').write('shared.txt', 'and then the fleet changed it');
+    // Wait on CONTENT, not on the file list: the list never changed, so
+    // `settlesOn` would return immediately and the joiner would arrive
+    // mid-flight. `converged()` compares bytes.
+    expect(
+      (await mesh.converged({ timeoutMs: 30_000 })).converged,
+      'the fleet did not settle before the joiner arrived',
+    ).toBe(true);
+    expect(await mesh.node('B').read('shared.txt')).toBe(
+      'and then the fleet changed it',
+    );
+
+    // C arrives holding its OWN version of the same path.
+    const joiner = await mesh.join('C', async (folder) => {
+      await writeFile(join(folder, 'shared.txt'), 'but I edited it too');
+    });
+
+    const result = await mesh.converged({ timeoutMs: 90_000, stableMs: 4_000 });
+    expect(result.converged, whyNot(result)).toBe(true);
+
+    // The fleet's version is what the path holds, everywhere.
+    for (const name of ['A', 'B', 'C']) {
+      expect(
+        await mesh.node(name).read('shared.txt'),
+        `${name} does not hold the fleet's version`,
+      ).toBe('and then the fleet changed it');
+    }
+
+    // And the joiner's own version was NOT destroyed — it is beside it, under
+    // a conflict-copy name, with its bytes intact.
+    //
+    // Through `files()`, because a conflict copy is an ORDINARY file: unlike
+    // the recovered copy in J4+J5 it is inside the synced tree and the whole
+    // fleet is told about it. That is the difference between "kept quiet for
+    // the user" and "kept, and everybody knows".
+    const files = await joiner.files();
+    const copy = files.find(
+      (f) => f.startsWith('shared (conflicted copy') && f.endsWith('.txt'),
+    );
+    expect(
+      copy,
+      `the joiner's own edit was overwritten rather than kept: ${files.join(', ')}`,
+    ).toBeDefined();
+    expect(await joiner.read(copy as string)).toBe('but I edited it too');
+  }, 180_000);
+
+  // ...........................................................................
   // J9, the destructive half: a DELETION performed while the agent was down.
   //
   // Harder than the addition, and the one the chain is for. The folder lost a

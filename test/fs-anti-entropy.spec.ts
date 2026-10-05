@@ -543,6 +543,66 @@ describe('FsAntiEntropy', () => {
       expect(ae.status.diverged).toBe(false);
     });
 
+    it('forgets the agreement once THIS node has moved on', async () => {
+      // The agreement is about a PAIR — "the hub's ref describes the same
+      // content as the state I am in" — and it is true only while neither side
+      // moves. Keyed on the hub ref alone it survived this node changing
+      // underneath it, so a later announcement of the same ref cleared the
+      // divergence with no content check at all, for ever.
+      //
+      // Measured before this: all four nodes of a churn run reporting
+      // `diverged=false` while their own `differingPaths` named `two.txt`,
+      // stable, with the content genuinely different. The two signals
+      // contradicted each other because one was memoised and the other was
+      // not — and the repair is gated on the memoised one.
+      let now = 0;
+      let localRef = 'OUR-NAME-FOR-IT';
+      const ae = new FsAntiEntropy(
+        { graceMs: 100 },
+        {
+          view: () => ({
+            origin: 'me',
+            currentRef: localRef,
+            lastAppliedRef: undefined,
+            lastPushedRef: localRef,
+          }),
+          busy: () => false,
+          repair: () => {},
+          now: () => now,
+          log: () => {},
+        },
+      );
+
+      // Proven equal, so the divergence is correctly dropped.
+      ae.observe(theirName);
+      ae.agreedOn('THEIR-NAME-FOR-IT');
+      expect(ae.status.diverged).toBe(false);
+
+      // Now THIS node changes — a local edit, a merge, a conflict copy — and
+      // the hub re-announces the state it was already in. The old agreement
+      // says nothing about this new pair.
+      localRef = 'OUR-NEW-STATE';
+      now += 1_000;
+      ae.observe(theirName);
+      expect(
+        ae.status.diverged,
+        'a stale agreement suppressed a real divergence, and nothing would ' +
+          'ever re-check it',
+      ).toBe(true);
+    });
+
+    it('keeps the agreement while neither side has moved', () => {
+      // The other direction, and the reason the memo exists: a repeating
+      // beacon must not cost a content comparison every time.
+      const { ae, tick } = build();
+      ae.observe(theirName);
+      ae.agreedOn('THEIR-NAME-FOR-IT');
+      expect(ae.status.diverged).toBe(false);
+      tick(1_000);
+      ae.observe(theirName);
+      expect(ae.status.diverged).toBe(false);
+    });
+
     it('bounds what it remembers', () => {
       // Keyed on refs a PEER chooses, so a hub whose state changes constantly
       // must not grow this without limit.

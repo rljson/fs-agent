@@ -1303,6 +1303,173 @@ describe('FsAgent — degradation when a dependency fails', () => {
       ).not.toContain('antiEntropy/ask');
     });
   });
+  // ...........................................................................
+  describe('the fallbacks a folder with no scan yet relies on', () => {
+    it('a manifest of a folder nobody has scanned is empty, not a crash', async () => {
+      // `_manifest` is what the bucket protocol advertises. Asked before the
+      // first scan it has no tree to read, and an empty manifest is the
+      // truthful answer — this node is advertising that it holds nothing yet.
+      const manifest = (
+        agent as unknown as { _manifest: () => ReadonlyMap<string, string> }
+      )._manifest();
+      expect(manifest.size).toBe(0);
+    });
+
+    it('announces a bare tree ref when it is not at that state', async () => {
+      // The marked `~H~` form says "this is the head I am at". For any other
+      // state there is no head to mark it with, so the plain ref travels.
+      priv<Map<string, string>>(agent, '_announcedHeads');
+      (agent as unknown as { _chainHead: unknown })._chainHead = {
+        head: 'myHead',
+        treeRef: 'theStateIAmAt',
+      };
+      const announced = (
+        agent as unknown as { _announceAs: (r: string) => string }
+      )._announceAs('someOtherState');
+      expect(announced).toBe('someOtherState');
+    });
+  });
+
+  // ...........................................................................
+  describe('the removals guard, at its two edges', () => {
+    it('keeps ONE path a peer deleted, and says so in the singular', async () => {
+      // The plural form is not cosmetic here: this warning is what a user is
+      // shown when their own newer work survives a peer's deletion, and "kept
+      // 1 paths" in a support log is how a reader stops trusting the log.
+      await writeFile(join(dir, 'mine.txt'), 'my newer work');
+      await writeFile(join(dir, 'anchor.txt'), 'anchor');
+      await agent.extract();
+
+      // This node claims the path, with a LATER timeId than the removal.
+      priv<Map<string, string>>(agent, '_localPathTimeIds').set(
+        'mine.txt',
+        '9999999999999:zzzzzzzz',
+      );
+      priv<
+        Map<string, { removed: string[]; changed: string[]; timeId: string }>
+      >(agent, '_incomingRemovals').set('theirTreeRef', {
+        removed: ['mine.txt'],
+        changed: [],
+        timeId: '100:aaaaaaaa',
+      });
+
+      const warnings: string[] = [];
+      const warn = console.warn;
+      console.warn = (...a: unknown[]) => warnings.push(a.join(' '));
+      try {
+        await callOnAgent(agent, '_applyIncomingRemovals', 'theirTreeRef');
+      } finally {
+        console.warn = warn;
+      }
+
+      expect(warnings.join('\n')).toContain('kept 1 path a peer deleted');
+      expect(
+        existsSync(join(dir, 'mine.txt')),
+        'newer local work was deleted on a peer\'s authority',
+      ).toBe(true);
+    });
+
+    it('refuses a bucket round that would drop most of what the node holds', async () => {
+      // The ratio half of the guard, reached by a plan rather than by a
+      // stated removal: enough files to pass the floor, and a drop list that
+      // takes most of them.
+      for (let i = 0; i < 120; i++) {
+        await writeFile(join(dir, `f${i}.txt`), `content ${i}`);
+      }
+      await agent.extract();
+
+      const db = await aDb();
+      const errors: string[] = [];
+      const err = console.error;
+      console.error = (...a: unknown[]) => errors.push(a.join(' '));
+      try {
+        await callOnAgent(
+          agent,
+          '_applyReconcilePlan',
+          {
+            fetch: [],
+            drop: Array.from({ length: 110 }, (_, i) => `f${i}.txt`),
+            redelete: [],
+            conflict: [],
+          },
+          db,
+          'fsTree',
+        );
+      } finally {
+        console.error = err;
+      }
+
+      expect(errors.join('\n')).toMatch(/REFUSED|refused/);
+      expect(
+        existsSync(join(dir, 'f0.txt')),
+        'a bucket round emptied the folder',
+      ).toBe(true);
+    }, 60_000);
+
+    it('falls back to the entry\'s own timeId when the walk carries none', async () => {
+      // The parked removals are ordered by the timeId of the edit that made
+      // them. A walk that reaches the root without one leaves the entry's own
+      // as the best available answer — ordering by nothing would make every
+      // removal the oldest.
+      (agent as unknown as { _chain: unknown })._chain = {
+        collectRemovals: () =>
+          Promise.resolve({
+            complete: true,
+            removed: ['gone.txt'],
+            changed: [],
+            timeId: undefined,
+          }),
+      };
+      await callOnAgent(agent, '_collectIncomingRemovals', {
+        head: 'theirHead',
+        treeRef: 'theirTreeRef',
+        timeId: '555:fromTheEntry',
+        previous: [],
+      });
+      expect(
+        priv<Map<string, { timeId: string }>>(
+          agent,
+          '_incomingRemovals',
+        ).get('theirTreeRef')?.timeId,
+      ).toBe('555:fromTheEntry');
+    });
+  });
+
+  // ...........................................................................
+  describe('a tree node that is simply missing', () => {
+    it('tolerates a missing node but lets a TIMEOUT surface', async () => {
+      // A missing node is ordinary — a blob reference, or one that was
+      // deleted — and the per-node walk tolerated it too. A timeout is
+      // systemic and must surface, because swallowing it turns a transport
+      // fault into a silently short tree.
+      const db = await aDb();
+      await writeFile(join(dir, 'doc.txt'), 'content');
+      const tree = await agent.extract();
+      const ref = await agent.storeInDb(db, 'fsTree', tree);
+
+      // Nothing missing: the happy path still works.
+      expect(
+        await callOnAgent(agent, '_fetchTreeFromDb', db, 'fsTree', ref),
+      ).toBeTruthy();
+
+      // Now make every read time out: that must throw, not return a short
+      // tree.
+      (
+        db.core as unknown as { readRowsByHashes: (...a: unknown[]) => unknown }
+      ).readRowsByHashes = () =>
+        Promise.reject(new Error('the batch read is unavailable'));
+      (
+        db as unknown as { get: (...a: unknown[]) => unknown }
+      ).get = () => Promise.reject(new Error('Timeout after 1ms: db.get'));
+
+      // It THROWS, and that is the point: a swallowed timeout would turn a
+      // transport fault into a tree that is merely short, which the caller
+      // cannot tell from a folder that really has fewer files.
+      await expect(
+        callOnAgent(agent, '_fetchTreeFromDb', db, 'fsTree', ref),
+      ).rejects.toThrow(/Timeout/);
+    }, 60_000);
+  });
 });
 
 /** Calls a private method on an agent with arguments. */
