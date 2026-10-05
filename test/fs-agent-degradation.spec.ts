@@ -1470,6 +1470,87 @@ describe('FsAgent — degradation when a dependency fails', () => {
       ).rejects.toThrow(/Timeout/);
     }, 60_000);
   });
+  // ...........................................................................
+  describe('answering a tree this node refuses to apply', () => {
+    // A refusal is the one case where going quiet is actively harmful, and the
+    // lab forced the correction. The peer that sent the sparse tree is the one
+    // MISSING data; this node holds the fuller copy. Suppressing this node's
+    // advertisements leaves the sender stranded with nothing to catch up from,
+    // and with every node that has the files refusing its pushes the network
+    // livelocks — measured on four nodes, two of them sat at 5 and 15 of 121
+    // files and could not recover.
+    //
+    // "Keeps talking about it" was aspirational for a while: the refusal only
+    // stopped SUPPRESSING advertisements, and a node whose own content had not
+    // changed had nothing new to say, so it said nothing. Hence an explicit
+    // re-announcement.
+
+    it('re-announces its own state so the sender can catch up', async () => {
+      await writeFile(join(dir, 'doc.txt'), 'content');
+      const db = await aDb();
+      const tree = await agent.extract();
+      const ref = await agent.storeInDb(db, 'fsTree', tree);
+      (agent as unknown as { _currentRef: string })._currentRef = ref;
+
+      const sent: string[] = [];
+      const connector = {
+        sendRef: (r: string) => {
+          sent.push(r);
+          return Promise.resolve();
+        },
+      };
+      const warnings: string[] = [];
+      const warn = console.warn;
+      console.warn = (...a: unknown[]) => warnings.push(a.join(' '));
+      try {
+        await callOnAgent(agent, '_readvertiseAfterRefusal', connector);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings.join('\n')).toContain('re-announcing');
+    });
+
+    it('answers at most once per cooldown, so a refusal storm is not a flood', async () => {
+      // The sender re-announces on every beacon while it is behind, and
+      // answering each one would turn one disagreement into a broadcast loop.
+      await writeFile(join(dir, 'doc.txt'), 'content');
+      const db = await aDb();
+      const tree = await agent.extract();
+      (agent as unknown as { _currentRef: string })._currentRef =
+        await agent.storeInDb(db, 'fsTree', tree);
+
+      const connector = { sendRef: () => Promise.resolve() };
+      const warnings: string[] = [];
+      const warn = console.warn;
+      console.warn = (...a: unknown[]) => warnings.push(a.join(' '));
+      try {
+        await callOnAgent(agent, '_readvertiseAfterRefusal', connector);
+        await callOnAgent(agent, '_readvertiseAfterRefusal', connector);
+        await callOnAgent(agent, '_readvertiseAfterRefusal', connector);
+      } finally {
+        console.warn = warn;
+      }
+      expect(
+        warnings.filter((w) => w.includes('re-announcing')).length,
+        'a refusal storm turned into an announcement flood',
+      ).toBe(1);
+    });
+
+    it('says nothing when it has no state of its own to offer', async () => {
+      // Nothing established yet: there is no fuller copy to point the sender
+      // at, so there is nothing to say.
+      const connector = { sendRef: () => Promise.resolve() };
+      const warnings: string[] = [];
+      const warn = console.warn;
+      console.warn = (...a: unknown[]) => warnings.push(a.join(' '));
+      try {
+        await callOnAgent(agent, '_readvertiseAfterRefusal', connector);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings.join('\n')).not.toContain('re-announcing');
+    });
+  });
 });
 
 /** Calls a private method on an agent with arguments. */

@@ -6349,7 +6349,25 @@ export class FsAgent {
     const antiEntropy = new FsAntiEntropy(this._antiEntropyOptions, {
       view: () => ({
         origin: connector.origin,
-        currentRef: this._currentRef,
+        // THE FOLDER, not the memory of it.
+        //
+        // `_currentRef` is the state this node last ESTABLISHED — adopted or
+        // announced — and after an apply that left extra files behind it names
+        // a state the folder is no longer in. Every signal the anti-entropy
+        // computes is then derived from that one stale value: `hub.ref ===
+        // currentRef` answers `in-sync`, so no repair is attempted, and
+        // nothing else ever re-checks.
+        //
+        // Measured on the churn fuzzer: one node holding 7 files and
+        // reporting a 4-file ref, identical to the hub's, with
+        // `diverged=false` — permanently. Its scanner tree was correct and
+        // current the whole time; only the remembered ref was wrong.
+        //
+        // The scan's own root hash cannot be stale by construction: it is
+        // whatever the last scan of this folder produced. Falling back to
+        // `_currentRef` covers the window before the first scan, where there
+        // is no folder state to report yet.
+        currentRef: this._scanner.tree?.rootHash ?? this._currentRef,
         lastAppliedRef: this._lastAppliedRef,
         lastPushedRef: this._lastPushedRef,
       }),

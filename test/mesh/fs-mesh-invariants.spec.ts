@@ -363,9 +363,23 @@ describe('invariants over the route, not the destination', () => {
           const node = mesh.node(name);
           const ae = node.agent.antiEntropyStatus;
           const tree = node.agent.getTree();
+          // DISK versus the agent's own TREE. They must be the same number:
+          // the scanner's tree is what the node announces, compares incoming
+          // states against, and reports as its own ref. A tree that is short
+          // of the folder means the node is syncing a state it is not in —
+          // it skips restores as "equivalent content", pushes nothing because
+          // its scan shows no change, and the anti-entropy reports in-sync
+          // because the stale ref matches the hub. Nothing repairs that,
+          // because every signal involved is derived from the same stale tree.
+          const onDisk = (await node.files()).length;
+          const inTree = tree
+            ? [...tree.trees.values()].filter(
+                (t) => (t as { isFile?: boolean }).isFile !== false,
+              ).length
+            : 0;
           return (
-            `  ${name}: ${(await node.files()).length} files` +
-            `  treeRef=${tree ? 'present' : 'none'}` +
+            `  ${name}: ${onDisk} files on disk` +
+            `  tree=${tree ? `${inTree} entries` : 'none'}` +
             `  diverged=${ae?.diverged ?? 'n/a'}` +
             `  hub=${ae?.hubRef?.slice(0, 8) ?? 'none'}` +
             `  local=${ae?.localRef?.slice(0, 8) ?? 'none'}` +
