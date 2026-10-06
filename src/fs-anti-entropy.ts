@@ -318,7 +318,20 @@ export interface AntiEntropyStatus {
   divergedSince: number | null;
   /** The state the hub last announced. */
   hubRef: string | null;
-  /** Our state at that moment. */
+  /**
+   * The state this node is in **now**, not the one it was in when it last
+   * compared.
+   *
+   * It used to be the latter, and the two read identically in a quiet fleet and
+   * differently in exactly the case somebody is debugging. A node that moves
+   * after the last announcement it processed kept reporting the ref it had then,
+   * so `hubRef === localRef` with {@link diverged} false was indistinguishable
+   * from genuinely being in sync — and a churn run on CI showed four nodes
+   * reporting precisely that while two of them held different bytes for one
+   * path. Read live, the pair says what it is: the hub announced X, I am at Y,
+   * and {@link diverged} is the verdict of the last comparison rather than of
+   * this instant.
+   */
   localRef: string | null;
   /**
    * The paths this node and the hub actually disagree about, when that has
@@ -581,7 +594,6 @@ export class FsAntiEntropy {
   private _differingPaths: readonly string[] = [];
 
   private _hubRef: string | null = null;
-  private _localRef: string | null = null;
   private _repairs = 0;
   private _lastRepair: AntiEntropyStatus['lastRepair'] = null;
 
@@ -663,14 +675,21 @@ export class FsAntiEntropy {
     return this._options.enabled;
   }
 
-  /** A snapshot of what this instance has seen and done. */
+  /**
+   * A snapshot of what this instance has seen and done.
+   *
+   * `localRef` is read from `view` here rather than from a remembered field,
+   * because this node's own state is the one fact that is always available and
+   * never needs remembering — see {@link AntiEntropyStatus.localRef}. The field
+   * that held it is gone rather than left unread.
+   */
   get status(): AntiEntropyStatus {
     return {
       differingPaths: this._differingPaths,
       diverged: this._divergedSince !== null,
       divergedSince: this._divergedSince,
       hubRef: this._hubRef,
-      localRef: this._localRef,
+      localRef: (this._deps.view().currentRef as string | undefined) ?? null,
       repairs: this._repairs,
       lastRepair: this._lastRepair ? { ...this._lastRepair } : null,
     };
@@ -690,7 +709,6 @@ export class FsAntiEntropy {
     const hubPredecessors = hub.predecessors ?? [];
 
     this._hubRef = hubRef;
-    this._localRef = view.currentRef as string;
 
     // A ref already proven content-equivalent is not a divergence, however
     // different the two hashes look. (`unknown` has already returned above.)

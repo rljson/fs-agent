@@ -373,10 +373,18 @@ describe('invariants over the route, not the destination', () => {
           // its scan shows no change, and the anti-entropy reports in-sync
           // because the stale ref matches the hub. Nothing repairs that,
           // because every signal involved is derived from the same stale tree.
+          //
+          // `meta.type === 'file'` is the discriminator, and getting it wrong
+          // invented a defect. This read `isFile !== false`, and `isFile` is not
+          // a field these nodes have — it is `undefined` on every one of them,
+          // directories included — so the count was files PLUS every directory
+          // PLUS the root. `tree=6 entries` beside `4 files on disk` was 4 files,
+          // `sub` and `.`: exactly consistent, reported as a fleet-wide loss.
           const onDisk = (await node.files()).length;
           const inTree = tree
             ? [...tree.trees.values()].filter(
-                (t) => (t as { isFile?: boolean }).isFile !== false,
+                (t) =>
+                  (t.meta as { type?: string } | undefined)?.type === 'file',
               ).length
             : 0;
           return (
@@ -393,46 +401,60 @@ describe('invariants over the route, not the destination', () => {
       const story =
         `seed ${seed}, ${writes} writes\n  ${log.join('\n  ')}\n` +
         `state after healing:\n${perNode.join('\n')}`;
-      // WHAT THIS CAN AND CANNOT GATE.
+      // WHAT THIS GATES, AND WHAT THAT COST TO LEARN.
       //
-      // Convergence is asserted above: every node holds the same thing. Two
-      // stronger properties were written here, both found real open defects,
-      // and NEITHER can gate a build because the fuzzer finds them
-      // probabilistically:
+      // Three properties were written here and each was called ungateable. Only
+      // one of the three descriptions survived checking:
       //
-      //  - "a node that is behind must SAY so" — failed on CI with
-      //    `A is missing two.txt and reports nothing`, neither a divergence nor
-      //    a differing path. That is the agreement memo.
-      //  - "a path written and not deleted must exist somewhere" — failed about
-      //    one run in two here and one in four on the source as it stood before
-      //    0.1.0, so it is NOT something this release introduced. The signature
-      //    is all four nodes agreeing on `tree=6 entries` while holding
-      //    `4 files on disk`, with a re-created path present in every tree and
-      //    on no disk, and no blob error anywhere.
+      //  - **"a path written and not deleted must exist somewhere"** was said to
+      //    fail one run in two, with the signature "all four nodes agreeing on
+      //    `tree=6 entries` while holding `4 files on disk`". THAT DEFECT DOES
+      //    NOT EXIST. The entry count above was wrong: it read `isFile !== false`
+      //    on tree nodes that have no `isFile` field, so every directory and the
+      //    folder root counted as a file. Six entries beside four files was four
+      //    files, `sub` and `.` — consistent. The run against older source that
+      //    appeared to confirm it used the same miscount.
+      //  - **"the nodes agree byte for byte"** failed for a real reason: seed 1 on
+      //    CI, four nodes holding `two.txt=s2` where the last write was `s7`.
+      //    `reconcile` settled a live-versus-live conflict by which blob id
+      //    sorted higher, because `ManifestEntry.editedAt` was carried on the
+      //    wire and then read only by the tombstone branches. Fixed — the newer
+      //    edit wins, and `fs-manifest.spec.ts` pins both directions.
+      //  - **"a node that is behind must SAY so"** is the one that stands:
+      //    measured on CI as `A is missing two.txt and reports nothing`, which is
+      //    the agreement memo, deliberately left under-reporting because the
+      //    repair for it made the fleet lose files.
       //
-      //  - "the nodes agree byte for byte over the paths they do have" — this
-      //    one was asserted here and described as "the part that holds every
-      //    time", which a CI run disproved: seed 1, all four nodes reporting
-      //    `tree=9 entries`, `7 files on disk`, `hub == local` and
-      //    `diverged=false`, with B holding `two.txt=s2` where A held `s7`.
-      //    Four nodes agreeing on one ref while disagreeing on the bytes
-      //    behind it is the agreement memo again, from the other side.
+      // So all three are asserted below, and the lesson worth keeping is the
+      // middle one: a fuzzer's report is only as good as the instrument it reads
+      // the fleet with, and two of these three were the instrument. Check the
+      // instrument before writing a defect down.
       //
-      // All three are in `README.public.md` under Known constraints with their
-      // evidence. Reinstating any of them here needs a DETERMINISTIC repro
-      // first — a seeded scenario that fails every time — because a gate that
-      // fires on half of all runs teaches people to re-run CI, which is worse
-      // than no gate at all. The seed fixes the write sequence and nothing
-      // else: watchers, sockets and scans interleave differently every run, so
-      // the same seed is a different race each time.
-      //
-      // What is asserted below is what holds whatever the race does: a
-      // disagreement is never SILENT, and nothing holds content nobody wrote.
+      // The seed fixes the write sequence and nothing else — watchers, sockets
+      // and scans interleave differently every run — so one green run proves very
+      // little here and a count of them is the only evidence worth quoting.
 
-      // Collect the disagreements rather than failing on the first one, because
-      // what matters is whether the fleet knows, not which path it was.
-      // Compared only over paths a node actually has: one that is behind is
-      // allowed to be short, by the rule above.
+      // THE FILE LISTS AGREE, asserted rather than merely used.
+      //
+      // `converged` was read for its `snapshot` and its verdict thrown away, so
+      // a fleet that ended one file short passed: the content loop below skips
+      // any path a node does not have, which is right for a node that is behind
+      // and wrong as the only check there is. "A machine can finish heavy churn
+      // one file short" was written down as a known limit on the strength of
+      // this gap — it was never gated, so nothing told us whether it still
+      // happened.
+      //
+      // Asserted HERE rather than straight after `converged()` so the message
+      // carries `story`: which node is short, of what, and the sequence that got
+      // it there. Without the log the failure is a pair of file lists and the
+      // only way on is to guess.
+      expect(result.converged, `${whyNot(result)}\n${story}`).toBe(true);
+
+      // Collected rather than failing on the first one, so a failure names every
+      // path that disagrees and whether anybody noticed — the two facts needed
+      // to tell "the fleet picked the wrong version" from "the fleet is still
+      // catching up". Compared only over paths a node actually has: one that is
+      // behind is allowed to be short, by the rule above.
       const first = mesh.node(names[0]);
       const disagreements: string[] = [];
       for (const path of result.snapshot[names[0]]) {
@@ -489,6 +511,15 @@ describe('invariants over the route, not the destination', () => {
             `${disagreements.join('\n  ')}\n${story}`,
         ).not.toEqual([]);
       }
+
+      // AND THE NODES AGREE. Checked after the silence guard so that a failure
+      // reports both facts: a disagreement nobody noticed is a different defect
+      // from one every node is announcing.
+      expect(
+        disagreements,
+        `the fleet converged on different content:\n  ` +
+          `${disagreements.join('\n  ')}\n${story}`,
+      ).toEqual([]);
 
       // And nothing holds content nobody ever wrote.
       const everWritten = new Set(['base', ...log

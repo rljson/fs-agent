@@ -4907,12 +4907,37 @@ export class FsAgent {
     void treeKey;
 
     // ---- additive half ----
+    const lifted: string[] = [];
     for (const [path, blobId] of plan.fetch) {
       const target = join(this._rootPath, ...path.split('/'));
-      // A path this node deliberately deleted is not fetched back. The peer
-      // has not heard about the deletion yet; it will, and our manifest
-      // already says so.
-      if (this._pendingDeletes.has(target)) continue;
+      // A TOMBSTONE OF OURS IN `fetch` HAS ALREADY LOST, so it is lifted here
+      // rather than allowed to veto the fetch.
+      //
+      // This used to `continue`, on the reasoning that "a path this node
+      // deliberately deleted is not fetched back — the peer has not heard about
+      // the deletion yet; it will, and our manifest already says so". The
+      // premise is true only while OUR tombstone is the newer edit, and in that
+      // case `reconcile` puts the path in `redelete`, never in `fetch`. Every
+      // path reaching this line is one `reconcile` has ordered the other way:
+      // their write is newer than our deletion, so our tombstone is stale.
+      //
+      // `_manifest()` advertises every pending delete as a tombstone, so a path
+      // in `_pendingDeletes` is always `oursIsTombstone` in the comparison and
+      // cannot arrive here by the "never heard of it" route. A peer that sends no
+      // `editedAt` cannot get here either — `olderThan` is false when either side
+      // is silent, which sends the path to `redelete`.
+      //
+      // Skipping it instead was a stable, permanent split: the deleting node
+      // never took the file back and went on re-advertising its tombstone, while
+      // every peer went on holding the newer content. Measured on Linux, 6 runs
+      // in 8 of the churn fuzzer's seed 2 — one node short of `sub/three.txt`
+      // for the whole 120-second budget, every other path and every conflicted
+      // copy identical. It is the same lift `_applyIncomingRemovals` performs
+      // when a peer re-creates a path, applied on the route that had none.
+      if (this._pendingDeletes.delete(target)) {
+        lifted.push(path);
+        this._persistTombstones();
+      }
       try {
         await this._adapter.blobToFile(
           { name: path, blobId, size: 0, mtime: Date.now(), path: target },
@@ -4923,6 +4948,16 @@ export class FsAgent {
         // round — the same rule the restore path learned the hard way.
         this._writeSyncError(`bucketSync/fetch/${path}`, err);
       }
+    }
+    // Said once per round rather than per path, and said at all because a node
+    // taking back a file it deleted is exactly the event somebody will want to
+    // account for later.
+    if (lifted.length > 0) {
+      console.log(
+        `${this._tag} lifted ${lifted.length} stale tombstone` +
+          `${lifted.length === 1 ? '' : 's'} a peer has since written: ` +
+          `${lifted.slice(0, 3).join(', ')}`,
+      );
     }
 
     // ---- destructive half, bounded ----

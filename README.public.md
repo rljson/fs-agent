@@ -504,40 +504,44 @@ truncated version until the copy finishes — at which point the size and timest
 change, the file is re-read, and the complete version propagates. Nothing is
 corrupted permanently.
 
-**Heavy churn can leave the fleet disagreeing, and agreeing that it agrees.**
-Under sustained random writing, deleting and partitioning, three things were
-measured, all of them with the same root: a node's health signals are derived
-from its own tree, so when that tree is wrong every signal built on it is wrong
-in the same direction.
+**Heavy churn is now gated, and two constraints that stood here are gone.**
+Earlier releases of this document listed three things the churn fuzzer found.
+What they actually were:
 
-- **A machine ends up one file short.** It reports the divergence and names the
-  path, so this one is visible.
-- **A re-created file is lost from every machine.** The fuzzer's log shows a path
-  written, deleted, then written again, and the re-creation absent everywhere
-  afterwards. The signature is every machine agreeing on a tree with **six
-  entries while holding four files on disk** — the path in everybody's tree, on
-  nobody's disk, and no blob error. Roughly one run in two, and **one in four on
-  the code as it stood before 0.1.0**, so this release did not introduce it; it
-  is the first release that looks for it.
-- **Two machines hold different bytes for one path while both report perfect
-  health.** Measured on CI: four nodes, all reporting `hub == local` and
-  `diverged: false`, one holding the second-to-last write of a contested file
-  and another the last.
+- **Two machines holding different bytes for one path while both reported
+  perfect health — FIXED.** A same-path conflict where both sides had edited the
+  file was settled by whichever content hash sorted higher, because the edit time
+  carried on the wire was read only when one side had deleted the path. The newer
+  edit now wins, and both sides compute the same verdict. The fleet converged on
+  the superseded write about half the time this arose.
+- **A re-created file lost from every machine — DID NOT EXIST.** It was an error
+  in the test's own instrument. The count of entries in a node's tree used a
+  field the tree nodes do not have, so it counted every directory and the folder
+  root as files: `6 entries` beside `4 files on disk` was four files, one
+  subdirectory and the root, exactly consistent. Nothing was ever lost. The
+  measurement that appeared to confirm it on older code was the same miscount.
+- **A machine finishing one file short — FIXED, and it was never rare.** This was
+  written down as a limit while the test read the fleet's convergence verdict and
+  threw it away, so nothing had ever gated it. Asserting it exposed the cause at
+  once: a node that deletes a file keeps a tombstone until it has announced it,
+  and that tombstone was allowed to refuse a peer's LATER write of the same path
+  — although the comparison had already established the write was newer. The
+  deleting node stayed permanently short of a file every peer held, still
+  advertising a deletion the fleet had moved past, with nothing to end it. On
+  Linux, 6 runs in 8 of one churn scenario. The stale tombstone is now lifted,
+  and the node says so in its log when it happens.
 
-None of the three is gated, deliberately: a fuzzer that fails half the time
-teaches people to re-run the build, which is worse than no gate. What **is**
-gated is that a disagreement is never silent — if the nodes differ, some node's
-`diverged` or `differingPaths` must say something. The stronger assertions are
-written out in `mesh/fs-mesh-invariants.spec.ts` beside the measurement each one
-produced, and reinstating any of them needs a seeded scenario that fails every
-time.
+So the churn scenarios are a real gate: every node ends with the same files and
+the same bytes, and any disagreement must at least be visible in some node's
+`diverged` or `differingPaths`. A run that ends disagreeing says so in the test
+output rather than passing quietly. Measured 8 of 8 on Linux where the same
+scenario failed 6 of 8 before these two fixes.
 
-**What this means in practice.** A fleet doing ordinary work — people saving
-files, machines going offline and coming back — is covered by the rest of this
-suite. These three need sustained simultaneous churn on the same few paths from
-several machines at once, which is what the fuzzer does on purpose. Treat
-`agent.antiEntropyStatus.differingPaths` as the signal to watch rather than
-`diverged` alone, because it is the one that was non-empty in all three cases.
+**What to watch in production.** `agent.antiEntropyStatus.differingPaths` names
+the paths rather than reporting that the checksums differ, so it is the more
+useful of the two. `localRef` is this node's state right now and `hubRef` is what
+the hub last announced, so the pair can legitimately differ for a moment while
+`diverged` still reports the previous comparison's verdict.
 
 ---
 

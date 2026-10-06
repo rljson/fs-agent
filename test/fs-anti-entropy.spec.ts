@@ -242,8 +242,13 @@ describe('FsAntiEntropy', () => {
       differingPaths: [],
       diverged: false,
       divergedSince: null,
+      // Nothing has announced yet, so there is no hub ref to report — but this
+      // node's OWN ref is known from the moment it has one, and reporting it as
+      // `null` until a hub speaks was the stale half of this status. Read live
+      // from `view`, so `hubRef === localRef` means they agree and never "I have
+      // not looked".
       hubRef: null,
-      localRef: null,
+      localRef: 'S1',
       repairs: 0,
       lastRepair: null,
     });

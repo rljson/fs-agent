@@ -8,8 +8,8 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**70 files, 916 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 915 must pass; one is committed inverted, and §2.11 says which and why.
+**70 files, 923 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 922 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 916 does
+This document says what the suite actually proves, because the number 923 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -139,17 +139,23 @@ example-based test could: a receiver catching up recorded itself as the author o
 a file it had never edited, 28 seconds after the real edit, and the whole fleet
 settled one version behind the last save about one run in three.
 
-**The churn scenarios assert less than they could, on purpose.** Three stronger
-properties were written there, each one found a real open defect, and none of
-them can gate a build: the fuzzer finds them probabilistically, because the seed
-fixes the write sequence and nothing else — watchers, sockets and scans
-interleave differently every run, so the same seed is a different race each time.
-A gate that fires on half of all runs teaches people to re-run CI, which is
-worse than no gate. All three are written out in the file beside the measurement
-that produced them, and in [README.public.md § Known
-constraints](README.public.md#known-constraints); reinstating any of them needs a
-seeded scenario that fails every time. What is gated is the part that survives
-any race: if the nodes disagree, some node's health signal says so.
+**The churn scenarios found three things, and only one of them was what it
+looked like.** One was a real defect and is fixed — a same-path conflict settled
+by content hash rather than by when the edit happened, which made the fleet
+converge on a superseded write. One did not exist: the test's own count of a
+node's tree entries used a field those nodes do not have, so it counted
+directories and the folder root as files and reported a consistent fleet as a
+loss. The third had never been gated at all, because the test read the fleet's
+convergence verdict and used only its snapshot.
+
+All three are now asserted: the same files, the same bytes, and — if that ever
+fails — that some node's `diverged` or `differingPaths` said so. The silence
+check is kept beside the equality check rather than instead of it, because a
+disagreement nobody noticed is a different defect from one every node is
+announcing, and a failure should say which. The seed fixes the write sequence
+and nothing else, so each run is a different race; that is why these are run
+repeatedly rather than once, and why a count of passes is the only evidence
+worth quoting.
 
 ### 2.5 That joining a network cannot destroy what is already there
 
@@ -349,7 +355,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 916 above.
+loop are counted as they run. They sum to the 923 above.
 
 ### Mesh tier
 
@@ -385,8 +391,8 @@ loop are counted as they run. They sum to the 916 above.
 | `fs-scanner.spec.ts` | 56 | scanning, watching, the scan cache |
 | `fs-conflict-resolver.spec.ts` | 41 | tip ordering, winners, three-way merge, copy naming |
 | `fs-anti-entropy.spec.ts` | 38 | the repair decision, by example |
-| `fs-manifest.spec.ts` | 41 | buckets, digests, reconciliation plans |
-| `fs-agent-degradation.spec.ts` | 87 | what the agent does when a dependency fails, and the shapes no scenario reaches |
+| `fs-manifest.spec.ts` | 46 | buckets, digests, reconciliation plans |
+| `fs-agent-degradation.spec.ts` | 89 | what the agent does when a dependency fails, and the shapes no scenario reaches |
 | `fs-collect-removals.spec.ts` | 31 | the removal walk |
 | `fs-bucket-sync.spec.ts` | 29 | the wire format |
 | `fs-ignore.spec.ts` | 28 | glob ignore patterns, and every legacy prefix |

@@ -67,7 +67,7 @@ a silent hang and an unbounded list is tomorrow's memory ceiling.
 | how a deletion travels | [A Delete Travels as a Fact](#a-delete-travels-as-a-fact-collectremovals--planremovals) |
 | why a big deletion is refused, and how to find out | [Refused Deletions Are Reported](#refused-deletions-are-reported-not-only-logged-fsagentrefuseddeletions) |
 | what a restart remembers | [Tombstone Log](#tombstone-log-_pendingdeletes--fsagent-statejson) |
-| why an old deletion cannot beat a newer write | [Ordering a Tombstone](#ordering-a-tombstone-against-the-write-it-supersedes-manifestentryeditedat) |
+| why an older edit cannot beat a newer one | [Ordering Every Difference](#ordering-every-difference-by-when-it-happened-manifestentryeditedat) |
 | the history itself | [Edit Chain](#edit-chain-srcfs-edit-chaints) |
 | what a joining machine does | [Joining a Network](#joining-a-network-planjoin) |
 | who is recorded as having changed a file | [Authorship](#authorship-a-node-claims-only-what-it-changed) |
@@ -739,6 +739,26 @@ the ordinary comparison rather than a side channel. A peer still holding the
 file sees something to drop; a peer missing a file it has itself tombstoned
 re-advertises the tombstone instead of fetching the file back.
 
+**Every difference is settled by WHEN, with two tie-breaks under it.** An entry
+carries the `timeId` of the newest edit its sender knows for that path
+(`ManifestEntry.editedAt`), so both sides read the same two times and reach the
+same verdict with no coordination. The order is:
+
+1. **the newer edit wins** — whichever side edited the path last, whether the
+   difference is content against content, content against a tombstone, or a
+   tombstone against content;
+2. **otherwise whoever's history claims the path**, for a peer that cannot date
+   its edits;
+3. **otherwise the greater blob id** — arbitrary, but identical on both nodes, so
+   two versions never sit there for ever.
+
+Rule 1 reached only the tombstone cases at first, and the gap is worth naming
+because it looked like it was covered: a conflict between two LIVE versions means
+both sides edited the path, so both claim it, so rule 2 cannot separate them
+either and rule 3 decided it. The fleet converged on whichever content hash
+sorted higher — the writer's own folder going backwards about half the time,
+measured as four nodes settling on a file's second-to-last version.
+
 ### Four messages, not mongo's six
 
 | | |
@@ -1222,7 +1242,7 @@ The other half needs the edit chain below.
 keeps them. `@rljson/mongo-agent` routes tombstone application through the same
 mass-delete circuit breaker that bounds a prune; fs does not yet.
 
-## Ordering a Tombstone Against the Write It Supersedes (`ManifestEntry.editedAt`)
+## Ordering Every Difference by When It Happened (`ManifestEntry.editedAt`)
 
 A bucket round compares two manifests. A manifest says what a node **holds**;
 until this release it never said **when the node decided**. So `reconcile` took
@@ -1248,6 +1268,17 @@ the hash tie-break, which is the fallback for two nodes sharing no history. It
 does not hold for a tombstone, where a history exists and says plainly which
 came first.
 
+**Nor does it hold for two live versions, and that is the half this section
+originally missed.** The field below was added, carried on the wire by both
+sides, and then read only by the two tombstone branches. A content-versus-content
+conflict kept falling through to the hash, and the paragraph above is the reason
+nobody looked: it reads as though the hash were reserved for nodes with no
+history, when in fact it was deciding every ordinary same-file conflict. Both
+sides of such a conflict have edited the path, so both claim it, so the claim
+rule cannot separate them either. Measured as four nodes converging on a file's
+second-to-last version. **The newer edit wins in every branch now**, and the
+claim and the hash are what remain for a peer that cannot date its edits at all.
+
 ### The fix: the Edit's own identity travels
 
 `ManifestEntry` gains a fourth element:
@@ -1261,15 +1292,16 @@ that produced the blob, or the removal that produced the tombstone. It is not a
 wall-clock reading taken at send time; it is the identity of an Edit, minted
 once by whoever made it, so **both sides of a round order it identically**.
 
-Both tombstone branches then became symmetric, and the mirror matters as much
-as the rule:
+Every branch then became symmetric, and the mirror matters as much as the rule:
 
 - their tombstone older than our write → **keep** the file
 - our tombstone older than their write → **fetch** it, rather than re-asserting
   a deletion the fleet has moved past
+- their content newer than ours → **fetch** it
+- our content newer than theirs → **keep** ours, and their own round fetches it
 
-Without the second half each side holds its own position for ever and the round
-never converges.
+Without the mirror each side holds its own position for ever and the round never
+converges.
 
 Absent means "the sender did not say", exactly as for `claimed`, and the rules
 that predate the field decide — which is also what happens after a restart

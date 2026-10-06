@@ -1044,20 +1044,35 @@ describe('FsAgent — degradation when a dependency fails', () => {
 
   // ...........................................................................
   describe('the bucket fetch and a path this node deleted', () => {
-    it('does not fetch back a path this node has tombstoned', async () => {
-      // The peer has not heard about the deletion yet; it will, and this
-      // node's own manifest already says so. Fetching it back would resurrect
-      // a file its owner deleted — on the authority of a peer that is simply
-      // behind.
+    // THIS PAIR IS ONE RULE SEEN FROM BOTH SIDES, and the first half used to
+    // assert the opposite.
+    //
+    // It read "does not fetch back a path this node has tombstoned", on the
+    // reasoning that the peer was simply behind and had not heard the deletion
+    // yet. That is true in one of the two cases and `reconcile` separates them
+    // before this method is reached: while OUR tombstone is the newer edit the
+    // path goes to `redelete`, and it reaches `fetch` only when the peer's write
+    // is provably newer than our deletion. Honouring the tombstone there left
+    // the deleting node permanently short of a file every peer held, still
+    // re-advertising a tombstone the fleet had moved past — measured on Linux at
+    // 6 runs in 8 of the churn fuzzer's seed 2.
+    it('fetches a path it tombstoned when the peer wrote it later', async () => {
       const target = join(dir, 'deleted-here.txt');
-      priv<Set<string>>(agent, '_pendingDeletes').add(target);
+      const pending = priv<Set<string>>(agent, '_pendingDeletes');
+      pending.add(target);
 
       const db = await aDb();
+      const bs = priv<{ setBlob(c: Buffer): Promise<{ blobId: string }> }>(
+        agent,
+        '_bs',
+      );
+      const { blobId } = await bs.setBlob(Buffer.from('written later'));
+
       await callOnAgent(
         agent,
         '_applyReconcilePlan',
         {
-          fetch: [['deleted-here.txt', 'someBlobId']],
+          fetch: [['deleted-here.txt', blobId]],
           drop: [],
           redelete: [],
           conflict: [],
@@ -1068,8 +1083,99 @@ describe('FsAgent — degradation when a dependency fails', () => {
 
       expect(
         existsSync(target),
-        'a tombstoned path was fetched back from a peer',
+        'the peer’s newer write was refused by a tombstone that had lost',
+      ).toBe(true);
+      expect(
+        pending.has(target),
+        'the stale tombstone survived, so the next round would undo the fetch',
       ).toBe(false);
+    });
+
+    it('names a lifted tombstone in the singular and the plural', async () => {
+      // The wording, both ways, because a count stitched into a sentence is the
+      // one thing a reader of the log sees and the one thing no behavioural
+      // assertion touches.
+      const db = await aDb();
+      const bs = priv<{ setBlob(c: Buffer): Promise<{ blobId: string }> }>(
+        agent,
+        '_bs',
+      );
+      const pending = priv<Set<string>>(agent, '_pendingDeletes');
+      const logs: string[] = [];
+      const spy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+        logs.push(args.join(' '));
+      });
+      try {
+        const one = await bs.setBlob(Buffer.from('one'));
+        const two = await bs.setBlob(Buffer.from('two'));
+
+        pending.add(join(dir, 'lift-one.txt'));
+        await callOnAgent(
+          agent,
+          '_applyReconcilePlan',
+          {
+            fetch: [['lift-one.txt', one.blobId]],
+            drop: [],
+            redelete: [],
+            conflict: [],
+          },
+          db,
+          'fsTree',
+        );
+
+        pending.add(join(dir, 'lift-two.txt'));
+        pending.add(join(dir, 'lift-three.txt'));
+        await callOnAgent(
+          agent,
+          '_applyReconcilePlan',
+          {
+            fetch: [
+              ['lift-two.txt', two.blobId],
+              ['lift-three.txt', one.blobId],
+            ],
+            drop: [],
+            redelete: [],
+            conflict: [],
+          },
+          db,
+          'fsTree',
+        );
+      } finally {
+        spy.mockRestore();
+      }
+      const said = logs.join('\n');
+      expect(said).toContain('lifted 1 stale tombstone a peer');
+      expect(said).toContain('lifted 2 stale tombstones a peer');
+    });
+
+    it('keeps the tombstone where the plan says `redelete`', async () => {
+      // The other half. Our deletion is the newer edit, so `reconcile` asks us
+      // to re-assert it rather than to fetch — and re-asserting is exactly what
+      // our manifest already does, which is why there is nothing to do here but
+      // leave the file absent and the tombstone standing.
+      const target = join(dir, 'deleted-here.txt');
+      const pending = priv<Set<string>>(agent, '_pendingDeletes');
+      pending.add(target);
+
+      const db = await aDb();
+      await callOnAgent(
+        agent,
+        '_applyReconcilePlan',
+        {
+          fetch: [],
+          drop: [],
+          redelete: ['deleted-here.txt'],
+          conflict: [],
+        },
+        db,
+        'fsTree',
+      );
+
+      expect(existsSync(target), 'a redelete resurrected the file').toBe(false);
+      expect(
+        pending.has(target),
+        'the tombstone was dropped although it had won',
+      ).toBe(true);
     });
   });
   // ...........................................................................

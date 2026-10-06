@@ -285,6 +285,76 @@ const T = (path: string, blob: string, editedAt: string): ManifestEntry => [
       expect(lower.fetch).toEqual([]);
     });
 
+    // .........................................................................
+    // THE NEWER EDIT WINS, and it is tried before either tie-break.
+    //
+    // `editedAt` travelled on the entry and was read only by the tombstone
+    // branches, so a live-versus-live conflict — which is what two people
+    // editing one file produces, both sides claiming it — fell through to the
+    // blob-id comparison. These blob ids are chosen so the OLDER content sorts
+    // HIGHER, which is the case the hash rule gets wrong; with the hash
+    // deciding, both assertions below held the stale bytes.
+    //
+    // Found by the churn fuzzer on CI: four nodes settled on `two.txt=s2`
+    // where the last write was `s7`.
+    // .........................................................................
+    it('adopts the peer’s content when the peer edited it later', () => {
+      const plan = reconcile(
+        [T('doc.txt', 'zzz-older', '1000:a')],
+        [['doc.txt', 'aaa-newer', 1, '2000:b']],
+        new Set(['doc.txt']),
+      );
+      expect(plan.conflict).toEqual(['doc.txt']);
+      expect(plan.fetch).toEqual([['doc.txt', 'aaa-newer']]);
+    });
+
+    it('keeps ours when WE edited it later, whatever the hashes say', () => {
+      const plan = reconcile(
+        [T('doc.txt', 'aaa-newer', '2000:b')],
+        [['doc.txt', 'zzz-older', 1, '1000:a']],
+        new Set(['doc.txt']),
+      );
+      expect(plan.conflict).toEqual(['doc.txt']);
+      expect(plan.fetch).toEqual([]);
+    });
+
+    it('gives both sides the same winner, so one round converges', () => {
+      // The two assertions above are the two halves of one exchange: whichever
+      // node runs it, the newer edit is what survives. Asserted together
+      // because a rule that is not a mirror image leaves the fleet split.
+      const older: ManifestEntry = ['doc.txt', 'zzz-older', 1, '1000:a'];
+      const newer: ManifestEntry = ['doc.txt', 'aaa-newer', 1, '2000:b'];
+      const claim = new Set(['doc.txt']);
+      const atOlder = reconcile([older], [newer], claim);
+      const atNewer = reconcile([newer], [older], claim);
+      expect(atOlder.fetch).toEqual([['doc.txt', 'aaa-newer']]);
+      expect(atNewer.fetch).toEqual([]);
+    });
+
+    it('outranks the claim rule, because a claim cannot date itself', () => {
+      // Only the PEER claims the path, which on its own hands them the file.
+      // Our edit is newer, and that is the fact that decides.
+      const plan = reconcile(
+        [T('doc.txt', 'aaa', '2000:b')],
+        [['doc.txt', 'zzz', 1, '1000:a']],
+        new Set(),
+      );
+      expect(plan.fetch).toEqual([]);
+    });
+
+    it('falls back to the hash when the two edits are dated alike', () => {
+      // The same `timeId` on both sides is the same Edit, so there is nothing
+      // to order. BOTH sides claim it here — with only one claiming, the claim
+      // rule decides first and the hash is never reached, which is what the
+      // first version of this test got wrong.
+      const plan = reconcile(
+        [T('doc.txt', 'aaa', '1000:a')],
+        [['doc.txt', 'zzz', 1, '1000:a']],
+        new Set(['doc.txt']),
+      );
+      expect(plan.fetch).toEqual([['doc.txt', 'zzz']]);
+    });
+
     it('falls back to the hash when neither side claims it', () => {
       // Two nodes each holding bytes they received and neither authored — an
       // older peer that sends no claims at all looks exactly like this, which

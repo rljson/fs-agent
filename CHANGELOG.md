@@ -53,6 +53,32 @@ Two people saving one file get a three-way merge, a winner chosen on the chain's
 `timeId` rather than on whichever content hash sorts higher, the losing copy kept
 under a conflicted-copy name, and a conflict **signal** the caller can read.
 
+That rule now also governs the **additive reconciliation** path, which it did
+not — see *A deletion no longer outlives the write that replaced it* above. A peer
+that cannot date its edits still falls back to exactly the behaviour it had
+before.
+
+### A deletion no longer outlives the write that replaced it
+
+Two defects on the additive-reconciliation path, both of which made a fleet stop
+converging and neither of which announced itself.
+
+**A live-versus-live conflict was settled by content hash.** Each side carries the
+`timeId` of its newest edit for a path, and that was consulted only where one side
+had deleted it. Two people editing one file means both sides claim it, so the
+claim rule could not separate them either and the greater blob id won — the fleet
+converging on the superseded write about half the time it arose. The newer edit
+now wins in every branch, and both sides compute the same verdict so one round
+settles it.
+
+**A node's own tombstone could refuse a peer's later write.** The comparison puts
+a path in `fetch` only when the peer's write is provably newer than this node's
+deletion, and the step that performed the plan then skipped it anyway if the path
+was still in the local tombstone log. The deleting node stayed permanently short
+of a file every peer held, re-advertising a deletion the fleet had moved past,
+with nothing to end it. The stale tombstone is lifted and logged. Measured on
+Linux at 6 runs in 8 of one churn scenario, now 8 of 8.
+
 ### Joining a network
 
 A folder with files and no history does not speak: it asks the network for a head
@@ -70,6 +96,11 @@ that the history never named are kept as new work.
 - Ignore patterns accept globs.
 - Mass-delete refusals are reported through `FsAgent.refusedDeletions`, not only
   logged, so a host application can diagnose a refusal it did not cause.
+- `AntiEntropyStatus.localRef` is this node's state **now**, where it used to be
+  its state at the last announcement it processed. The two read alike in a quiet
+  fleet and differently in exactly the case somebody is debugging, so
+  `hubRef === localRef` with `diverged: false` could not be told apart from
+  genuinely being in sync.
 - The package builds. `crypto` was not externalised, so `pnpm build` had never
   produced a bundle on this line of work; the test run in `prebuild` hid it.
 
@@ -78,7 +109,7 @@ that the history never named are kept as new work.
 `README.api.md` is new and covers every export. `README.architecture.md`,
 `README.tests.md` and `README.public.md` are rewritten against the code — the old
 "Client A → Client B" flow described a mechanism this package no longer uses. The
-suite is 70 files and 916 scenarios at 100 % coverage, and `README.tests.md` says
+suite is 70 files and 923 scenarios at 100 % coverage, and `README.tests.md` says
 what they prove and what they cannot.
 
 ## [0.0.85]
