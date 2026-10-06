@@ -70,32 +70,6 @@ import type { FsChange, FsNodeMeta } from './fs-scanner.ts';
  */
 export interface FsAgentOptions {
   /**
-   * Announce the plain TREE REF instead of the chain head.
-   *
-   * The migration switch, and it exists so a fleet can roll forward one node
-   * at a time instead of all at once. A build that predates the `~H~`
-   * announcement cannot parse it: it tries to fetch a tree by that hash and
-   * fails, so a new node's pushes are invisible to it.
-   *
-   * With this on, a new node speaks the OLD wire format and is understood by
-   * everyone — and it still resolves its own ancestry, because an entry can be
-   * found from the tree ref it produced (`FsEditChain.entryForTreeRef`, a
-   * query, measured as served across a real relay). What it gives up is
-   * unambiguity: a folder returning to earlier content produces two entries
-   * with the same `dataRef`, and the fallback has to pick the newest.
-   *
-   * **It also switches off bucket sync**, for the same reason and in the same
-   * breath: the bucket protocol travels on the ref channel under its own
-   * prefixes, and a build that cannot parse `~H~` cannot parse `~BQ~` either.
-   * It would try to fetch a tree by each protocol message and log a failure
-   * for every one. "Speak the old dialect" has to mean all of it, or the
-   * switch only half works and the half it misses is the noisy one.
-   *
-   * So: on during a rollout, off once the fleet is past the old build.
-   * Default: off, which is the better format.
-   */
-  announceTreeRef?: boolean;
-  /**
    * Reconcile a divergence ADDITIVELY instead of replacing a folder.
    *
    * With this on, a divergence the anti-entropy would have answered with
@@ -1178,8 +1152,6 @@ export class FsAgent {
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
 
-  /** See {@link FsAgentOptions.announceTreeRef}. */
-  private _announceTreeRef: boolean;
 
   /** See {@link FsAgentOptions.bucketSync}. */
   private _bucketSyncOn: boolean;
@@ -1200,12 +1172,11 @@ export class FsAgent {
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._onConflict = options.onConflict;
-    this._announceTreeRef = options.announceTreeRef ?? false;
-    // `announceTreeRef` means "speak the build before this one", and that
-    // build has no bucket protocol. An explicit `bucketSync: true` still wins,
-    // so the combination remains testable.
-    this._bucketSyncOn =
-      options.bucketSync ?? !(options.announceTreeRef ?? false);
+    // Bucket sync is on unless a caller turns it off. It used to default to
+    // "on unless this build speaks the old wire format", and there is no old
+    // wire format any more — nothing is in production, so nothing has to be
+    // spoken to in a dialect it predates.
+    this._bucketSyncOn = options.bucketSync ?? true;
     this._antiEntropyOptions = options.antiEntropy;
     this._joinWaitMs = options.joinWaitMs ?? DEFAULT_JOIN_WAIT_MS;
     this._tag =
@@ -4665,7 +4636,6 @@ export class FsAgent {
    *   whose chain could not be created.
    */
   private async _announceAs(treeRef: string): Promise<string> {
-    if (this._announceTreeRef) return treeRef;
     // The fast path, and the only one that costs nothing: the state this node
     // just appended. `_chainHead` is a cache FOR this comparison — see its doc,
     // which says a re-announcement has to find the head for a state it did not
@@ -5552,8 +5522,9 @@ export class FsAgent {
         // created, 6 runs in 8.
         //
         // It used to be `!this._bucketSyncOn`, which left the destructive
-        // variant alive for a build with `announceTreeRef` on. That is the
-        // same inference by absence as everywhere else, with the same answer:
+        // variant alive for a build speaking the old wire format — a format
+        // that no longer exists. That is the same inference by absence as
+        // everywhere else, with the same answer:
         // the merge contributes everything it worked out, nothing it could not
         // account for is deleted on its authority, and a real deletion comes
         // from the chain. This was the last path inside the agent that could
@@ -6021,12 +5992,16 @@ export class FsAgent {
             // builds two maps over every row in it, on every announcement
             // that reaches here — and it answers the same question
             // `classify` just answered above with a bounded, cached walk. It
-            // predates the chain and it is kept for one case only: a peer the
-            // chain cannot speak for, which is a node on the old wire format
-            // (`announceTreeRef`) or one whose chain failed to initialise.
-            // The same condition keeps the heuristics in
-            // `antiEntropyDecision` alive, and both go when the fleet is on
-            // the chain.
+            // predates the chain and it is kept for ONE case, now that the
+            // old wire format is gone: a node whose chain failed to
+            // initialise. That is degradation, not compatibility, and it does
+            // not expire — a node that cannot read its own history still has
+            // to sync, it just cannot contribute an ordering.
+            //
+            // The same condition keeps the heuristics in `antiEntropyDecision`
+            // alive. Both go only if a chain that cannot be read becomes a
+            // reason to stop rather than to degrade, which is a different
+            // decision from dropping compatibility.
             //
             // Where the chain HAS an answer it is authoritative, so there is
             // nothing to recompute: `fork` is the merge, `behind` is the
@@ -6688,8 +6663,12 @@ export class FsAgent {
         // `doc/convergence-contract.md`, "Where the headless announcements came
         // from", and the invariant `every announcement carries a chain head`.
         //
-        // The lookup stays, because an OLD peer (`announceTreeRef`) is a real
-        // case and the mixed-fleet spec still exercises it.
+        // The lookup stays. Not for an old peer — that format is gone — but
+        // because a bare ref is what any sender produces whose chain could not
+        // name the state it is announcing, and that is a runtime condition
+        // rather than a version one. Whether it is still REACHABLE is a
+        // measurement, not an assumption: see the ref census in
+        // `doc/convergence-contract.md`.
         //
         // Scheduled FIRST and synchronously, then the lookup — because a query
         // is a peer read and awaiting one before queueing an apply is how a

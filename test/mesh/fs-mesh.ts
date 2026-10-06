@@ -403,11 +403,6 @@ export const buildFsMesh = async (opts: {
   antiEntropy?: AntiEntropyOptions;
   seed?: (folders: Record<string, string>) => Promise<void>;
   /**
-   * Node names that speak the OLD wire format — a plain tree ref rather than
-   * a `~H~` chain head. A mixed-version fleet, by construction.
-   */
-  oldWireFormat?: readonly string[];
-  /**
    * Answer a divergence with an ADDITIVE bucket-sync round instead of
    * replacing a folder. `FsAgentOptions.bucketSync` on every node.
    */
@@ -558,7 +553,6 @@ export const buildFsMesh = async (opts: {
       },
       antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
       timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
-      announceTreeRef: opts.oldWireFormat?.includes(name) ?? false,
       // Undefined, not `false`. Passing `false` here overrode the agent's own
       // default and silently measured the OLD model: T4 ran at 3 of 8 while
       // the identical scenario passed 8 of 8 elsewhere, for no reason but
