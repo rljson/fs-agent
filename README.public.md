@@ -492,6 +492,13 @@ different subset surviving each time. macOS reports every child deletion and is
 unaffected. Deleting the files individually, or deleting the directory a second
 time, propagates normally.
 
+**A file still being written is occasionally distributed half-done.** The settle
+rule holds a file back until it stops growing, and about one run in ten of its
+guard test sees a partial copy hashed anyway — measured both under load and in
+isolation, so it is the rule itself and not the harness. Nothing is corrupted
+permanently: the next scan hashes the finished file and the complete version
+propagates. A reader of a shared folder can see a truncated file in between.
+
 **Under heavy churn a re-created file can be lost from the whole fleet.** The
 fuzzer's own log shows a path written, deleted, then written again — and the
 re-creation absent from every machine afterwards. The signature is all machines

@@ -2221,6 +2221,42 @@ describe('FsAgent — degradation when a dependency fails', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('names a bucket-sync conflict in the singular and the plural', async () => {
+      // "1 paths edited on both sides" in a support log is how a reader stops
+      // trusting the log, which is why both forms exist — and why both have to
+      // be measured. Whichever one a run happens not to produce is an uncovered
+      // branch: this read 100% on macOS and failed Linux CI at 99.92%, the last
+      // branch in the package.
+      const db = await aDb();
+      const warned: string[] = [];
+      const spy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation((...a: unknown[]) => {
+          warned.push(a.map(String).join(' '));
+        });
+      try {
+        for (const conflict of [['a.txt'], ['a.txt', 'b.txt']]) {
+          await callOnAgent(
+            agent,
+            '_applyReconcilePlan',
+            { fetch: [], drop: [], redelete: [], conflict },
+            db,
+            'fsTree',
+          );
+        }
+      } finally {
+        spy.mockRestore();
+      }
+      expect(
+        warned.filter((w) => w.includes('1 path edited on both sides')),
+        'one conflict was reported in the plural',
+      ).toHaveLength(1);
+      expect(
+        warned.filter((w) => w.includes('2 paths edited on both sides')),
+        'two conflicts were reported in the singular',
+      ).toHaveLength(1);
+    }, 30_000);
+
     it('refuses a mass deletion against a folder it has not scanned', async () => {
       // `held` is read from the scan, and an unscanned folder reports ZERO
       // held. The guard divides by it, so this is the shape that either
