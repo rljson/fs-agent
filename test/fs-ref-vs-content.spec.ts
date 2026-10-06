@@ -157,7 +157,7 @@ describe('S5 — ref identity vs content identity', () => {
   // only for a sender that names a state the receiver is in, so a ref has to
   // mean the same thing on both ends. Where it does not, a node announces
   // parents nobody can be in and every deletion it sends is refused by
-  // everybody — which is `KNOWN-WEAKNESSES.md` §1, *"deletions do not reliably
+  // everybody — which is `the weakness register` §1, *"deletions do not reliably
   // propagate"*, the register's most-reproduced entry.
   //
   // mtime was in the content identity and broke it. Not for exotic input: any

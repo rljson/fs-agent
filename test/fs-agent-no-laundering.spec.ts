@@ -138,7 +138,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     agent.scanner.stopWatch();
   });
 
-  // The third outcome, and the one the lab measured. A node in the middle of
+  // The third outcome, and the one a real fleet measured. A node in the middle of
   // catching up holds a SUBSET of the sender's tree, and announcing that is how
   // a burst turns into a rollback: trees arrived at the writer carrying 1008
   // files, then 892, then 907, every one stamped newestFromSender=true —
@@ -193,7 +193,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   // by the agent with the right ones. Receivers kept the first and dropped the
   // second as already-received, so every push arrived one parent behind.
   //
-  // Measured on the lab, sender against receivers:
+  // measured on a real fleet, sender against receivers:
   //   sent 6guj63Ox parent yNAJN-wC | seen parent CtAgdd1w
   //   sent UBl35ZQQ parent 6guj63Ox | seen parent yNAJN-wC
   //

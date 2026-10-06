@@ -117,7 +117,7 @@ describe('additive reconciliation', () => {
 
   // ...........................................................................
   it('A3: three nodes, adds and a delete at once', async () => {
-    // The shape the lab reported: *"exactly one of three peers applied the
+    // The shape a real fleet reported: *"exactly one of three peers applied the
     // deletion and the other two kept the file"*. A mesh reaches a ref by more
     // paths than a pair does, and an additive round has to hold for all of
     // them. Also passes with the switch off — see the header.

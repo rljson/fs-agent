@@ -31,7 +31,7 @@
 // content map now reports what it found.
 //
 // This is also the last structural difference from `@rljson/mongo-agent`, which
-// is stable on the lab: mongo's unit of convergence is the DOCUMENT, with
+// is stable on a real fleet: mongo's unit of convergence is the DOCUMENT, with
 // per-document hashes compared in buckets, so it never asks whether two
 // whole-collection fingerprints agree. fs has a whole-folder ref because its
 // ancestry rules need one — so it has to answer the question mongo never asks.

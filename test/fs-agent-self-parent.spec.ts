@@ -33,7 +33,7 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 // A push that names itself can never do that, so every deletion it carries is
 // refused by everyone it reaches. When the state being announced is the result
 // of a deletion, the deletion simply does not arrive — which is what the
-// folder-delta recipe reports as "was deleted but is still on NB-21624".
+// folder-delta recipe reports as "was deleted but is still on node-A".
 //
 // **The obvious mechanism is NOT the one.** The push takes its parent from
 // `_currentRef`, captured before the store, so an agent that has just applied
@@ -77,7 +77,7 @@ describe('FsAgent — a push that parents itself', () => {
     // then re-scans the folder it has just been given, derives the very ref
     // `_currentRef` already names, and pushes it — with itself as parent.
     //
-    // That is the shape the lab produced 5 times in 38 pushes, and every peer
+    // That is the shape a real fleet produced 5 times in 38 pushes, and every peer
     // not already in that state refused its deletions.
     const db = await makeDb();
     const bs = new BsMem();
@@ -180,7 +180,7 @@ describe('FsAgent — a push that parents itself', () => {
       `self-parented pushes: ${JSON.stringify(selfParented)}`,
     ).toEqual([]);
 
-    // ...and the log the lab reads must not show one either.
+    // ...and the log a real fleet reads must not show one either.
     const pushes = logSpy.mock.calls
       .map((c) => String(c[0]))
       .filter((line) => line.includes('pushing ref='));

@@ -12,7 +12,7 @@
 // a state it held earlier re-derives that state's exact hash. "We returned to
 // an old state" and "we never left it" are literally the same string — which
 // is why two data-loss failures in opposite directions were measured on the
-// same day (`doc/known-limits.md`), and why neither could be fixed by reading
+// same day (`README.public.md`, "Known constraints"), and why neither could be fixed by reading
 // the anti-entropy decision more cleverly. A change that restores earlier
 // content is a NEW entry here with a new ref, so the ambiguity cannot occur
 // inside the chain.

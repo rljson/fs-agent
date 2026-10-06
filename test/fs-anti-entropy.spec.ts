@@ -96,7 +96,7 @@ describe('antiEntropyDecision', () => {
   describe('a fork, with local work that has not reached the hub', () => {
     // The test that used to live here asserted the WRONG answer on purpose —
     // a node holding work the hub had not seen decided it was behind and
-    // pulled, discarding that work (§1.1, measured on NB-2744). Its comment
+    // pulled, discarding that work (§1.1, measured on node-C). Its comment
     // said: "When D1 goes green that test is deleted, not amended."
     //
     // D1 is green (`fs-anti-entropy-level1.spec.ts`), so it is deleted. The
@@ -331,7 +331,7 @@ describe('FsAntiEntropy', () => {
     expect(repairs[0][2]).toEqual([]);
   });
 
-  // The review's case (ONE-446): another machine writes every few seconds, so
+  // The review's case (an earlier change): another machine writes every few seconds, so
   // the hub's state never holds still. The grace period used to restart on
   // every one of those changes — and a node that missed them all never got a
   // repair, showing "noch kein Reparaturversuch" for good.
@@ -469,7 +469,7 @@ describe('FsAntiEntropy', () => {
     // during a ROLLOUT a node on an older build still derives the old ref, by
     // construction, for every folder it holds.
     //
-    // Measured on the lab before any of this: both machines held 38 identical
+    // measured on a real fleet before any of this: both machines held 38 identical
     // files with identical hashes, and one reported `diverged: true` for over
     // EIGHT MINUTES across six merge repairs, logging "equivalent content,
     // skipping restore" every time. The apply path correctly saw nothing to
@@ -646,7 +646,7 @@ describe('FsAntiEntropy', () => {
   //
   // A state beacon carries a ref and triggers no apply, so without this
   // nothing in the agent ever reads the hub's tree and nothing discovers that
-  // the two folders are identical. Measured on the lab: `diverged: true` for
+  // the two folders are identical. measured on a real fleet: `diverged: true` for
   // over EIGHT MINUTES on a node holding exactly the hub's 38 files, across
   // six merge repairs, logging "equivalent content, skipping restore" every
   // time.

@@ -79,14 +79,14 @@ describe('FsAgent — anti-entropy wiring', () => {
     expect(agent.antiEntropyStatus?.hubRef).toBeNull();
   });
 
-  // The signal a CARAT One Client runs on: its heartbeat is off.
+  // The signal a host client runs on: its heartbeat is off.
   it('hears the state beacon, which the connector ignores', async () => {
     const { agent, beacon } = await start();
     beacon({ o: 'hub', r: 'hub-state', p: ['x'] });
     expect(agent.antiEntropyStatus?.hubRef).toBe('hub-state');
   });
 
-  // A stopped sync reports nothing (review, ONE-446): a status left behind
+  // A stopped sync reports nothing (review, an earlier change): a status left behind
   // would keep describing a divergence nobody is watching.
   it('stops listening, and stops reporting, when sync stops', async () => {
     const { agent, beacon } = await start();

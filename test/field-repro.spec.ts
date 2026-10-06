@@ -7,7 +7,7 @@
 // .............................................................................
 // The register's own reproduction scripts, run verbatim.
 //
-// `cos-one-client/KNOWN-WEAKNESSES.md` supplies two of these as code, with
+// `cos-one-client/the weakness register` supplies two of these as code, with
 // timings and the line that fails. They are followed exactly rather than
 // reinterpreted: the whole value of a field observation is that somebody wrote
 // down what they saw, and an approximation of it is a different test.
@@ -33,7 +33,7 @@ import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 const TREE = 'sharedTree';
 
-describe('KNOWN-WEAKNESSES reproductions, verbatim', () => {
+describe('the weakness register reproductions, verbatim', () => {
   const base = join(process.cwd(), 'test-temp-field-repro');
   let teardown: (() => Promise<void>) | undefined;
 
@@ -140,7 +140,7 @@ describe('KNOWN-WEAKNESSES reproductions, verbatim', () => {
   };
 
   // ...........................................................................
-  // §3, pinned down 2026-09-15, *"reproduces in 11 seconds, off the lab"*.
+  // §3, pinned down 2026-09-15, *"reproduces in 11 seconds, off a real fleet"*.
   //
   //   "Both writes propagate fine, and then one file is DELETED from the node
   //    that wrote it. Two clients write DIFFERENT files against the same parent
@@ -194,7 +194,7 @@ describe('KNOWN-WEAKNESSES reproductions, verbatim', () => {
 
     // Then it records A losing the file A created — and without ancestry it
     // may. What must NOT happen is both copies going: a file that is gone from
-    // every node is gone from the customer, and that is a different severity
+    // every node is gone from a deployment, and that is a different severity
     // from a file that moved off its author.
     //
     // Settled, not sampled: the whole point is that the prune lands late, so a

@@ -52,7 +52,7 @@
 //
 // NOT COPIED FROM THE MONGO ANTI-ENTROPY
 // That one is driven by noticing a PEER's root, so a node that receives
-// nothing never starts it (`KNOWN-WEAKNESSES` §10), and it applies a peer's
+// nothing never starts it (`the weakness register` §10), and it applies a peer's
 // tombstone without any recency check (§11). Here the trigger is the hub's own
 // periodic announcement, and every destructive step goes through the ordinary
 // apply with its ancestry and mass-delete rules — this module never deletes
@@ -234,7 +234,7 @@ export function antiEntropyDecision(
   //
   // The reasoning was always right: a state we have built on is behind us, so
   // a hub state descending from it is a sibling of our work, not a successor
-  // to it, and adopting it discards what we made. Measured on NB-2744 as 15
+  // to it, and adopting it discards what we made. Measured on node-C as 15
   // files repeatedly replaced by the fleet's 13.
   //
   // What made it unshippable was not the narrowing but its side effect: it
@@ -262,7 +262,7 @@ export function antiEntropyDecision(
   // push, and neither yields. That is the 2-of-576 pair the enumeration found
   // still reachable after the 0.0.85 revert, so the livelock was never closed,
   // only made harder to reach — and when it is reached it costs 90 seconds of
-  // a customer's folder rewriting itself.
+  // a production folder rewriting itself.
   //
   // A SINGLE push is not a livelock, and the first attempt is what the
   // measurements are about: "a peer that deletes what we added returns the
@@ -394,7 +394,7 @@ export interface AntiEntropyDeps {
    * fingerprints alone.** The decision above compares refs, which is all a
    * state beacon carries — and a beacon, unlike a ref event, triggers no
    * apply, so nothing else in the agent ever fetches that tree and nothing
-   * ever discovers that the two folders are identical. Measured on the lab:
+   * ever discovers that the two folders are identical. measured on a real fleet:
    * `diverged: true` for over EIGHT MINUTES on a node holding exactly the
    * hub's 38 files.
    *
@@ -430,7 +430,7 @@ export class FsAntiEntropy {
    * It used to include the hub's state, so every change on the hub restarted
    * the grace period — and a node that missed every forward while another
    * machine wrote every few seconds never got a repair at all, showing "weicht
-   * ab, noch kein Reparaturversuch" for good (review, ONE-446). What makes a
+   * ab, noch kein Reparaturversuch" for good (review, an earlier change). What makes a
    * divergence a lost message is that THIS node is not moving: a node keeping
    * up with the traffic changes its own state with every forward it applies.
    * Which hub state the repair answers is read from the latest announcement.
@@ -448,7 +448,7 @@ export class FsAntiEntropy {
    * A tree ref is a hash of the whole tree, and two nodes can derive different
    * ones for byte-identical content — the order a filesystem lists a directory
    * in used to be enough, and during a rollout a node on an older build still
-   * derives the old ref. Measured on the lab: both machines held 38 identical
+   * derives the old ref. measured on a real fleet: both machines held 38 identical
    * files with identical hashes and one reported `diverged: true` for over
    * EIGHT MINUTES across six merge repairs, logging "equivalent content,
    * skipping restore" every time. The apply path correctly saw nothing to

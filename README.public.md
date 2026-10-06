@@ -55,7 +55,7 @@ path because the sender removed it, or because the sender never had it, and a
 content hash cannot tell the two apart. So a removal is **stated** by the
 machine that performed it, and a receiver applies what is stated rather than
 inferring from what is missing. Every attempt to guess it instead cost data —
-see [doc/known-limits.md](doc/known-limits.md).
+see [Known constraints](#known-constraints).
 
 Consequences worth knowing before you start:
 
@@ -486,7 +486,7 @@ writing, deleting and partitioning, a machine can end up holding one file fewer
 than the fleet. It reports the divergence and names the path, so nothing is lost
 silently, and it does not catch up inside the test's window. The cause is
 recorded: its scan disagrees with its disk, so it is in sync with its own wrong
-tree. See [doc/known-limits.md](doc/known-limits.md).
+tree.
 
 ---
 

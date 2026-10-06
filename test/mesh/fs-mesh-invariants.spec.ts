@@ -396,7 +396,7 @@ describe('invariants over the route, not the destination', () => {
       // CONVERGENCE IS THE AIM; NOT LOSING ANYTHING SILENTLY IS THE GUARANTEE.
       //
       // Under sustained churn a node can still finish a run short of one file.
-      // It is a real defect and it is tracked — `doc/known-limits.md`, "a node
+      // It is a real defect and it is tracked — `README.public.md`, "Known constraints", "a node
       // can finish churn one file short". What this test asserts is the
       // property the package actually guarantees today, which is the one that
       // matters to anybody operating it:
@@ -432,7 +432,7 @@ describe('invariants over the route, not the destination', () => {
         //   B: 9 files on disk  tree=11 entries  diverged=false
         //      local == hub  differing=[sub/three.txt]
         //
-        // See `doc/known-limits.md`, "a node can finish churn one file short".
+        // See `README.public.md`, "Known constraints".
         //
         // What this must never tolerate is SILENCE, and it does not: the
         // original defect had all four nodes at `diverged=false` AND

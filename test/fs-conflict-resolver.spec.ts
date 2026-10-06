@@ -279,7 +279,7 @@ describe('compareTips / decideWinner', () => {
     expect(usableClientId(DB_OPERATION_ORIGIN)).toBe('');
     expect(usableClientId(undefined)).toBe('');
     expect(usableClientId('')).toBe('');
-    expect(usableClientId('NB-2505')).toBe('NB-2505');
+    expect(usableClientId('node-D')).toBe('node-D');
   });
 
   it('dates a copy from the chain stamp, not from an unset timestamp', () => {
@@ -317,8 +317,8 @@ describe('compareTips / decideWinner', () => {
     expect(conflictCopyName('doc.txt', '', 1790000000000, taken)).toBe(
       'doc (conflicted copy 2026-09-21 141320).txt',
     );
-    expect(conflictCopyName('doc.txt', 'NB-2505', 1790000000000, taken)).toBe(
-      'doc (conflicted copy NB-2505 2026-09-21 141320).txt',
+    expect(conflictCopyName('doc.txt', 'node-D', 1790000000000, taken)).toBe(
+      'doc (conflicted copy node-D 2026-09-21 141320).txt',
     );
   });
 
@@ -405,8 +405,8 @@ describe('formatConflictTimestamp', () => {
 describe('conflictCopyName', () => {
   it('inserts the marker before the extension', () => {
     const ts = Date.UTC(2026, 5, 18, 9, 15, 0);
-    expect(conflictCopyName('document.txt', 'NB-2510', ts, new Set())).toBe(
-      'document (conflicted copy NB-2510 2026-06-18 091500).txt',
+    expect(conflictCopyName('document.txt', 'node-B', ts, new Set())).toBe(
+      'document (conflicted copy node-B 2026-06-18 091500).txt',
     );
   });
 

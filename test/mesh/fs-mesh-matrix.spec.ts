@@ -52,7 +52,7 @@ describe('the scenario matrix, at the mesh tier', () => {
   //
   // To this system a rename is "delete everything and re-add", so a folder
   // rename is the single operation most likely to be mistaken for a mass
-  // deletion — `KNOWN-WEAKNESSES.md` D5, measured at 140 of 140 files and
+  // deletion — `the weakness register` D5, measured at 140 of 140 files and
   // nothing applied. It was covered by two agents over a database; this is the
   // same operation with a hub, watchers and a peer that has to converge on it.
   // ...........................................................................

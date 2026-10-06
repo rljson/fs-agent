@@ -128,7 +128,7 @@ export interface FsAgentOptions {
    * registers a DAG-branch conflict observer that resolves forks into a single
    * merge revision (winner keeps the path, loser is renamed). This is a
    * **client-only** behaviour — hubs are dumb relays and must leave it off
-   * (the default). See `doc/conflict-resolution-design.md`.
+   * (the default). See `README.architecture.md`, "Conflicts".
    */
   resolveConflicts?: boolean;
   /**
@@ -467,7 +467,7 @@ export const RESTORED_BLOB_MEMORY_MAX = 50_000;
  * A restore's cost is dominated by `getBlob`, and a blob this node does not
  * already hold is a socket round trip. Walking the tree strictly sequentially
  * makes the whole restore `files × RTT` — invisible on localhost, and about
- * sixteen files a second on the lab, where a 1 200-file folder then takes
+ * sixteen files a second on a real fleet, where a 1 200-file folder then takes
  * minutes and reads as a stalled node.
  *
  * Sixteen rather than sixty-four: blobs carry file CONTENT, so the ceiling is
@@ -639,7 +639,7 @@ export class PartialRestoreError extends RestoreIncompleteError {
  *
  * Measured on four nodes: one 63 MB file (120% of the cap) left three of them
  * holding a file the fourth had deleted, permanently, and `projekte-shape`'s
- * deletion had still not propagated after 300 seconds. The customer's largest
+ * deletion had still not propagated after 300 seconds. The largest observed
  * file was 45.9 MB against the same 50 MB cap — close enough that the next
  * revision of one document would have reproduced it in production.
  */
@@ -1095,11 +1095,11 @@ export class FsAgent {
   /**
    * How long each stage of the last push and the last apply took, in ms.
    *
-   * Measured on the lab: *"im Schnitt 3 Sekunden, im schlechtesten Fall 84.
+   * measured on a real fleet: *"im Schnitt 3 Sekunden, im schlechtesten Fall 84.
    * Alle Zeitbudgets der Testsuite hängen an dieser Zahl."* And the reason
    * nobody could say more than that: *"bisher wird nur die Gesamtzeit
    * gemessen. Die einzelnen Schritte mitmessen — Scan, Prüfsumme, Ablage,
-   * Meldung, Abholen, Schreiben —, sonst rät man."* (`KNOWN-WEAKNESSES.md`
+   * Meldung, Abholen, Schreiben —, sonst rät man."* (`the weakness register`
    * F5/C7.)
    *
    * A total tells you a sync was slow. It does not tell you whether the folder
@@ -1259,7 +1259,7 @@ export class FsAgent {
    * guard refuses on every node, so a real mass deletion stalls the whole
    * fleet silently as far as a UI is concerned — the only trace today is a
    * line in each machine's log. See {@link RefusedDeletion} and
-   * `doc/known-limits.md`.
+   * `README.public.md`, "Known constraints".
    *
    * Bounded at {@link REFUSED_DELETION_LOG_MAX}; in memory, so a restart
    * clears it while the folders stay split. That is a reason to show it
@@ -1579,7 +1579,7 @@ export class FsAgent {
    *
    * The two have different answers. A blob that cannot be fetched costs one
    * file and the tree applies without it; a file that cannot be written is
-   * usually a CARAT document a user still has open, and that one must not abort
+   * usually a the host application document a user still has open, and that one must not abort
    * the rest of the restore either. Conflating them would report an offline peer
    * as a locked file, and the field reports are read by people who act on that
    * distinction.
@@ -1873,7 +1873,7 @@ export class FsAgent {
       // rename is "delete everything and re-add", so every path under the old
       // name disappears at once: measured at 140 of 140 files, ratio 1.0,
       // `MASS DELETE REFUSED`, nothing applied. That is
-      // `KNOWN-WEAKNESSES.md` D5 — *"für das System ist ein Umbenennen 'alles
+      // `the weakness register` D5 — *"für das System ist ein Umbenennen 'alles
       // löschen und neu anlegen'. Damit läuft es in die Löschsperre und
       // blockiert"* — and the register notes there was never a test for it.
       //
@@ -2214,7 +2214,7 @@ export class FsAgent {
             });
           }
         } catch (error) {
-          // CARAT holds .dbf and .PRJZ open for as long as a user has the
+          // the host application holds .dbf and .PRJZ open for as long as a user has the
           // document. One of those aborted the entire restore, so a single
           // open document stopped every OTHER file in the tree from arriving —
           // one user's lock became everyone's stalled sync.
@@ -2246,7 +2246,7 @@ export class FsAgent {
           // aborts — *"ein zu langer Pfad oder ein reservierter Name ist heute
           // der billigste Weg, einen ganzen Rechner stillzulegen"*, and the
           // node then *"empfängt gar nichts mehr und versucht es endlos mit
-          // derselben Datei"* (`KNOWN-WEAKNESSES.md` D2/Y2).
+          // derselben Datei"* (`the weakness register` D2/Y2).
           //
           // NOT retried as a lock is, because the name will not become legal.
           // Reported as unavailable, which is what it is: the tree describes a
@@ -2254,7 +2254,7 @@ export class FsAgent {
           // A full disk, reported as itself.
           //
           // *"Was bei voller Platte passiert, wurde nie getestet"*
-          // (`KNOWN-WEAKNESSES.md` D4), and what happened was a raw errno
+          // (`the weakness register` D4), and what happened was a raw errno
           // thrown out of the restore — indistinguishable from a bug, retried
           // on a schedule, and described in no message anybody reads. The
           // folder cannot be completed and no amount of retrying changes that
@@ -2651,7 +2651,7 @@ export class FsAgent {
 
     // A level at a time, concurrently — not a node at a time, in series.
     //
-    // This awaited one `db.get` per node. On the customer catalogue that is
+    // This awaited one `db.get` per node. On a catalogue-sized folder that is
     // 4 952 sequential round trips before a single byte of file content moves,
     // and the cost is `nodes × RTT`: invisible on localhost at 0.1 ms, 49 s at
     // 10 ms — which is why the fetch blew its 20 s budget three times running
@@ -3095,14 +3095,14 @@ export class FsAgent {
     // a receiver cannot ask "does this sender name a state I am in", so it
     // grants the prune by default.
     //
-    // Measured on the lab, ten minutes apart:
+    // Measured on a four-machine fleet, ten minutes apart:
     //
-    //   14:53:18 NB-21624 resuming from recorded ref COpHl4bU… (4 547 files)
-    //   14:53:19 NB-21624 sync:out COpHl4bU…
-    //   15:03:57 NB-2510  sync:in  COpHl4bU…
-    //   15:04:00 NB-2510  applying declaresAncestry=false mayPrune=true
+    //   14:53:18 node-A resuming from recorded ref COpHl4bU… (4 547 files)
+    //   14:53:19 node-A sync:out COpHl4bU…
+    //   15:03:57 node-B  sync:in  COpHl4bU…
+    //   15:04:00 node-B  applying declaresAncestry=false mayPrune=true
     //                     incomingFiles=4547 currentFiles=4581
-    //   15:04:00 NB-2510  restore: wrote 0, left 3617 untouched
+    //   15:04:00 node-B  restore: wrote 0, left 3617 untouched
     //
     // Two peers rolled back 35 files — under the mass-delete guard's floor, so
     // nothing challenged it — and the file that had just been added was undone
@@ -3176,7 +3176,7 @@ export class FsAgent {
     // The mass-delete guard stops that costing data, but it cannot make the
     // joiner's folder fill: with its own empty tree as the network's latest
     // ref there is nothing for the bootstrap to deliver. Measured on the real
-    // customer folder: 0 of 3642 files after 60 s, twice.
+    // a large production folder: 0 of 3642 files after 60 s, twice.
     //
     // Staying silent leaves the populated state as the latest one, which is
     // what the existing bootstrap already knows how to send.
@@ -3358,7 +3358,7 @@ export class FsAgent {
             // Such a ref is PRIVATE: this node derived it and never announced
             // it, so no peer can be in it. A push naming it as parent has its
             // deletions refused by everybody — and that is the mechanism
-            // behind `KNOWN-WEAKNESSES.md` §1, the register's
+            // behind `the weakness register` §1, the register's
             // most-reproduced entry. A directory removal is what exposes it,
             // exactly as the register says: *"a rename or a directory removal
             // is 'delete everything and re-add' to this system"*, so the
@@ -3425,7 +3425,7 @@ export class FsAgent {
                   // ancestry and sends again, and every receiver drops that
                   // second copy as already-received.
                   //
-                  // Measured on the lab, sender against receivers:
+                  // measured on a real fleet, sender against receivers:
                   //
                   //   sent  6guj63Ox parent yNAJN-wC | seen  parent CtAgdd1w
                   //   sent  UBl35ZQQ parent 6guj63Ox | seen  parent yNAJN-wC
@@ -3569,7 +3569,7 @@ export class FsAgent {
             // The parent is logged because it is now load-bearing: a receiver
             // prunes only for a sender that declares a state the receiver is
             // in, so a push that names a stale parent has its DELETIONS
-            // refused. Measured on the lab — a node pushed a new file as
+            // refused. measured on a real fleet — a node pushed a new file as
             // 2Rhrtyln, then pushed a deletion one and a half seconds later
             // claiming to descend from zvEHrFbO, the state before it. All three
             // peers refused, correctly, and the file stayed. Nothing in the
@@ -4581,7 +4581,7 @@ export class FsAgent {
     // nobody, and on rejoin the fleet's tree still contains the file — so the
     // apply puts it back on the node that deleted it, the local scan finds it
     // present, and the deletion is never announced at all. Measured as mesh
-    // scenario T4; see `doc/known-limits.md`.
+    // scenario T4; see `README.public.md`, "Known constraints".
     return { changed, removed };
   }
 
@@ -5641,7 +5641,7 @@ export class FsAgent {
     // re-send what it lost, and those peers answer with exactly the ref the
     // connector had already delivered to the previous agent — dropped before
     // this one saw it, leaving the folder empty. That is `snapshot-bootstrap`
-    // on the lab, red on every run the suite has ever produced.
+    // on a real fleet, red on every run the suite has ever produced.
     //
     // A no-op on a first start, and cheap when it is not: a redelivered ref
     // whose state the folder already holds costs one content comparison.
@@ -5657,7 +5657,7 @@ export class FsAgent {
     // It used to read: without ancestry on the wire, a tree that simply
     // predates this node's newest write is indistinguishable from one deleting
     // it, so the prune rule needed a deliberate escape hatch — and the hatch
-    // was where `KNOWN-WEAKNESSES.md` §3 lived, *"two people save different
+    // was where `the weakness register` §3 lived, *"two people save different
     // files at the same moment on different machines, one file disappears, and
     // the node that lost it is the one that created it"*. It then said the
     // case could not be closed from inside this agent, because no fact
@@ -5870,7 +5870,7 @@ export class FsAgent {
             // itself. The anti-entropy then rediscovered the same fact the
             // long way round: declare a divergence, wait out the grace
             // period, start a repair, run a bucket round, find the roots
-            // identical, and only then clear. Measured on the lab: 38
+            // identical, and only then clear. measured on a real fleet: 38
             // identical files with identical hashes, `diverged: true` for over
             // EIGHT MINUTES across six merge repairs, logging "equivalent
             // content, skipping restore" each time — the apply path saying the
@@ -5884,7 +5884,7 @@ export class FsAgent {
             // was not.
             //
             // The consequence was the laundering step in the large-folder
-            // rollback, traced on the lab to this exact path. The folder now
+            // rollback, traced on a real fleet to this exact path. The folder now
             // matches `treeRef`, but `_lastSentContentKey` still described some
             // earlier state, so the next debounced push saw a content key that
             // did not match, concluded it had news, and re-derived a ref —
@@ -6348,7 +6348,7 @@ export class FsAgent {
           //
           // Equal content is the opposite case, and the one that must stay
           // quiet: re-announcing a state we just adopted launders a stale tree
-          // into news from a new sender — traced on the lab to this very path —
+          // into news from a new sender — traced on a real fleet to this very path —
           // and peers that had moved on prune back to it, 77 files at a time,
           // under the mass-delete guard's floor.
           //
@@ -6977,7 +6977,7 @@ export class FsAgent {
     // heartbeat) reaches every connector anyway. The STATE BEACON is the one a
     // deployment should run: `@rljson/server`'s `stateBeaconMs` sends the same
     // payload on an event the connector never processes, so it costs nothing
-    // in the apply path — the CARAT One Client runs with the heartbeat OFF
+    // in the apply path — the host client runs with the heartbeat OFF
     // because a periodic one was measured net-harmful there.
     const hubEvents = [
       connector.events.bootstrap,

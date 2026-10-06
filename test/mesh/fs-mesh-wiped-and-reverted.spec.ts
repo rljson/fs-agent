@@ -110,7 +110,7 @@ describe('a node comes back empty, or holding an older copy', () => {
   //   … and the wiped node still holds 0 files after sixty seconds.
   //
   // The fleet is protected and the casualty is abandoned. This is
-  // `KNOWN-WEAKNESSES.md` §16 — *"the mass-delete guard can deadlock a branch,
+  // `the weakness register` §16 — *"the mass-delete guard can deadlock a branch,
   // and it does not heal"* — reproduced in just over a minute, and it is worse
   // than the register's version because the node is not merely out of step: it
   // is EMPTY and it stays empty. Replace a disk, reinstall a machine, and that
@@ -226,7 +226,7 @@ describe('a node comes back empty, or holding an older copy', () => {
   // is older than what the fleet holds and one file is missing entirely, and
   // the fleet follows it backwards — the week's work is gone everywhere.
   //
-  // This is `KNOWN-WEAKNESSES.md` U7 exactly: *"'frühere Version
+  // This is `the weakness register` U7 exactly: *"'frühere Version
   // wiederherstellen' ist kein lokales Rückgängig: Der Ordner wird
   // überschrieben und die Änderung geht an alle Rechner."* It is recorded there
   // as a UI problem — show how many files are affected, confirm, route it

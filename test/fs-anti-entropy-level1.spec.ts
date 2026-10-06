@@ -11,7 +11,7 @@
 // MILLISECONDS, with no folders and no sockets. That matters more than it
 // sounds: 0.0.84 passed every example test in the suite, fixed the case it was
 // written for, and then flipped a production folder between two states roughly
-// twenty times in ninety seconds. Ninety seconds of a customer's folder
+// twenty times in ninety seconds. Ninety seconds of a production folder
 // rewriting itself was an expensive way to learn something a loop over a
 // three-element set says before the commit.
 //
@@ -198,7 +198,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
   // on each side produces this pair.
   //
   // So the livelock 0.0.85 was believed to have closed was never closed — only
-  // made harder to reach, at a cost of 90 seconds of a customer's folder
+  // made harder to reach, at a cost of 90 seconds of a production folder
   // rewriting itself each time it was.
   //
   // THE FIX IS A TIE-BREAK ON THE ORIGIN. Both sides can compare it and both
@@ -310,7 +310,7 @@ describe('level 1 — antiEntropyDecision, enumerated', () => {
   // §1.1 exactly, at the signature. We authored `currentRef`; the hub holds a
   // state whose predecessors include `lastAppliedRef` but NOT `currentRef`.
   // That is a sibling of our work, not a successor to it, and adopting it
-  // discards what we made. Measured on NB-2744 as 15 files repeatedly replaced
+  // discards what we made. Measured on node-C as 15 files repeatedly replaced
   // by the fleet's 13, `lastRepair: { action: "pull", attempt: 5 }`.
   //
   // `fs-anti-entropy.spec.ts` pins the WRONG answer for this exact view on

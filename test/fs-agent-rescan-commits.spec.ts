@@ -129,7 +129,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
     // minus one file, and that was enough only because a tree ref included
     // mtime: the copies carried new timestamps, so the ref differed and the
     // agent treated the peer as news. With mtime out of the content identity —
-    // the fix for `KNOWN-WEAKNESSES.md` §1 — the copy re-derives a ref this
+    // the fix for `the weakness register` §1 — the copy re-derives a ref this
     // node has ALREADY advertised, so the agent correctly calls it its own
     // echo, no apply runs, and the deferred rescan is never flushed.
     //

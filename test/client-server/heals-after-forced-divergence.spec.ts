@@ -30,7 +30,7 @@ import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
  * saying so. This is the test that would have caught nearly all of them,
  * because it does not care WHICH message went missing.
  *
- * The configuration is the one a CARAT One Client ships: `causalOrdering` and
+ * The configuration is the one a host client ships: `causalOrdering` and
  * client identity on, the bootstrap heartbeat OFF, and the server's STATE
  * BEACON carrying the hub's state to a node that missed it. The heartbeat is
  * run as a second signal: the anti-entropy must work with either.
@@ -308,7 +308,7 @@ describe.each([
       expect(await until('burst-2.txt', '2')).toEqual(all('2'));
     }, 40_000);
 
-    // The review's case (ONE-446). Another machine writes every few hundred
+    // The review's case (an earlier change). Another machine writes every few hundred
     // milliseconds, so the hub's state never holds still — and B loses every
     // forward. The grace period used to restart on each hub change, so B was
     // repaired only once the writer STOPPED: "weicht ab, noch kein

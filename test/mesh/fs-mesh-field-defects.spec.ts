@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 // .............................................................................
-// The field defects from `cos-one-client/KNOWN-WEAKNESSES.md`, reduced.
+// The field defects from `cos-one-client/the weakness register`, reduced.
 //
 // WHY THIS FILE EXISTS SEPARATELY
 // `fs-mesh.spec.ts` holds the scenarios `PLAN-fs-edit-chain.md` named, and the
@@ -61,7 +61,7 @@ describe('field defects, reduced off-lab', () => {
   // The reduction is the register's own: *"create `dir/inner/a.txt`, sync,
   // remove the directory, assert the peer's tree loses it."* It asks for two
   // nodes; this uses FOUR, and deletes on the LAST of them, because that is
-  // the detail the lab log turns on — *"the deleting node was the fourth, so
+  // the detail a real fleet log turns on — *"the deleting node was the fourth, so
   // the deletion was applied locally and reached nobody"*.
   //
   // The difference is not cosmetic and was measured: at two nodes this went
@@ -81,7 +81,7 @@ describe('field defects, reduced off-lab', () => {
     });
     expect((await mesh.converged()).converged).toBe(true);
 
-    // A nested directory with a file in it, the exact shape the lab saw.
+    // A nested directory with a file in it, the exact shape a real fleet saw.
     await mesh.node('A').write('doomed-dir/inner/a.txt', 'inner');
     const withDir = ['doomed-dir/inner/a.txt', 'keeper.txt'];
     for (const name of ['A', 'B', 'C', 'D']) {
@@ -105,7 +105,7 @@ describe('field defects, reduced off-lab', () => {
   }, 180_000);
 
   // ...........................................................................
-  // §3 — "Concurrent writes do not converge", 4 of 6 runs on the lab, and
+  // §3 — "Concurrent writes do not converge", 4 of 6 runs on a real fleet, and
   // pinned down 2026-09-15 to something that reproduces in ELEVEN SECONDS.
   //
   // *"Both writes propagate fine, and then one file is DELETED from the node
@@ -160,7 +160,7 @@ describe('field defects, reduced off-lab', () => {
   // §3 again, at three nodes — the "stable 2/2 split" form.
   //
   // *"The second form is a stable 2/2 split that persists past the budget"* —
-  // `holding NB-2505=3652 NB-21624=3650 NB-2510=3652 NB-2744=3650`. Two
+  // `holding node-D=3652 node-A=3650 node-B=3652 node-C=3650`. Two
   // sub-networks that never merged, or one DAG branch conflict resolution left
   // unresolved. With three writers the split cannot be even, which is a
   // sharper assertion than four.
@@ -203,10 +203,10 @@ describe('field defects, reduced off-lab', () => {
   // lasts and every recipe fails for a reason unrelated to what it tests. It
   // did not resolve on its own; it was cleared by hand.
   //
-  // *"Why this matters beyond the lab. The provoking condition was leftover
+  // *"Why this matters beyond a real fleet. The provoking condition was leftover
   // fixture files, but nothing about the deadlock is specific to a test: two
   // branches that diverge far enough, with one side sparse, is the same shape.
-  // A customer branch in this state would sync nothing and report no error
+  // A production branch in this state would sync nothing and report no error
   // anybody is looking at."*
   //
   // The register's own reduction: *"two nodes, one with a large tree and one
@@ -247,11 +247,11 @@ describe('field defects, reduced off-lab', () => {
   }, 180_000);
   // ...........................................................................
   // §4 — "Conflict resolution can leave three versions of one file", 2 of 6
-  // runs, observed with the lab's clocks synced to 0 s spread:
+  // runs, observed with a real fleet's clocks synced to 0 s spread:
   //
   //   nodes diverged on conflict/shared.txt after 60s: 3 distinct versions
-  //     [NB-2505=263d5dab…, NB-21624=4ca963ab…, NB-2510=263d5dab…,
-  //      NB-2744=bd4d35fe…]
+  //     [node-D=263d5dab…, node-A=4ca963ab…, node-B=263d5dab…,
+  //      node-C=bd4d35fe…]
   //
   // Four nodes, THREE hashes, stable. The register is careful about what that
   // does and does not implicate: *"the resolver never runs; it runs on every
@@ -293,7 +293,7 @@ describe('field defects, reduced off-lab', () => {
     });
     expect(result.converged, whyNot(result)).toBe(true);
 
-    // Stable file LISTS are not agreement — the lab's four nodes all listed
+    // Stable file LISTS are not agreement — a real fleet's four nodes all listed
     // the same one file and held three different versions of it.
     const contents = await Promise.all(
       names.map((name) => mesh!.node(name).read('conflict/shared.txt')),
@@ -313,8 +313,8 @@ describe('field defects, reduced off-lab', () => {
   // ...........................................................................
   // §5 — "A file written during a scan can be lost", 2 of 6 runs.
   //
-  //   file "churn-survivor.txt" not found on NB-2744
-  //     [NB-21624=ok, NB-2505=ok, NB-2510=ok, NB-2744=missing]
+  //   file "churn-survivor.txt" not found on node-C
+  //     [node-A=ok, node-D=ok, node-B=ok, node-C=missing]
   //
   // *"The recipe's other assertions pass — the watcher survives the churn, a
   // later write reaches every peer, no churned file is left behind. Only the
@@ -348,7 +348,7 @@ describe('field defects, reduced off-lab', () => {
     // Churn and survivor interleaved, not sequenced: the survivor lands while
     // scans are in flight, which is the whole point. Writing it first or last
     // tests nothing — the recipe's own "a later write reaches every peer"
-    // assertion already passed on the lab.
+    // assertion already passed on a real fleet.
     const churning = (async () => {
       for (let i = 0; i < CHURN; i++) {
         await a.write(`churn-${i}.tmp`, `tmp-${i}`);
@@ -447,8 +447,8 @@ describe('field defects, reduced off-lab', () => {
   // ...........................................................................
   // §6 — "A locked file blocks propagation to peers", 1 of 6 runs.
   //
-  //   file "held-open.dbf" not found on NB-2510
-  //     [NB-2510=missing, NB-2505=ok, NB-21624=missing, NB-2744=missing]
+  //   file "held-open.dbf" not found on node-B
+  //     [node-B=missing, node-D=ok, node-A=missing, node-C=missing]
   //
   // *"The recipe exists to prove a file held open by another process does not
   // block the rest of sync. It reached one node of four."*
@@ -516,7 +516,7 @@ describe('field defects, reduced off-lab', () => {
   // never investigated:
   //
   //   FAIL large-file-roundtrip  123389ms
-  //        "big-blob.bin" never reached NB-2510, NB-2505, NB-21624, NB-2744
+  //        "big-blob.bin" never reached node-B, node-D, node-A, node-C
   //        after 120 attempts
   //
   // Not one of the four nodes, after two minutes of polling. *"The contrast
@@ -527,7 +527,7 @@ describe('field defects, reduced off-lab', () => {
   //
   // And §2, "an oversized file leaves residue that is never cleaned up", which
   // the register records as having failed in ALL SIX suite runs on 2026-09-02:
-  // `only NB-2744=3 of 2 after 240 attempts` — one node keeps the file after
+  // `only node-C=3 of 2 after 240 attempts` — one node keeps the file after
   // deletion, so the folder never returns to its expected state.
   //
   // Both carry the same instruction — *"RE-MEASURE BEFORE INVESTIGATING"*,

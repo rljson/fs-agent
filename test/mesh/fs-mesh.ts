@@ -28,7 +28,7 @@
 // than a mock of it:
 //
 //   - a real `Server` with the STATE BEACON, a real `Client` per node over a
-//     real socket pair, a real `Connector` carrying the SyncConfig a CARAT One
+//     real socket pair, a real `Connector` carrying the SyncConfig a the host application One
 //     Client ships (`causalOrdering` + `includeClientIdentity`), and
 //     `resolveConflicts: true` — the production value, without which the
 //     ancestry DAG, the inline merge and the prune rule are all switched off;
@@ -110,7 +110,7 @@ import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
 import type { FsConflictReport } from '../../src/fs-conflict-resolver.ts';
 
 // .............................................................................
-/** The sync configuration a CARAT One Client ships (`sl-node.ts`). */
+/** The sync configuration a host client ships (`sl-node.ts`). */
 export const MESH_SYNC: SyncConfig = {
   causalOrdering: true,
   includeClientIdentity: true,

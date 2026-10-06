@@ -292,7 +292,7 @@ describe('FsAgent', () => {
       // twice, a seeded fixture, a folder copied to two laptops — and at
       // MILLISECOND granularity. A node whose ref disagrees with its peers'
       // announces parents nobody can be in, so every deletion it sends is
-      // refused by everybody: `KNOWN-WEAKNESSES.md` §1, *"deletions do not
+      // refused by everybody: `the weakness register` §1, *"deletions do not
       // reliably propagate"*, reproduced on four machines three times.
       //
       // The trade was measured, not assumed: 10 of 10 on the four-node

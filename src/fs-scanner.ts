@@ -213,7 +213,7 @@ export class FsScanner {
   /**
    * The ignore list, compiled once.
    *
-   * Compiled rather than re-read per entry because a scan of the customer's
+   * Compiled rather than re-read per entry because a scan of a production
    * catalogue asks this question once per file, and a glob is a regular
    * expression that should be built once. `fs-ignore.ts` carries the
    * compatibility rule that keeps every prefix pattern working.
@@ -602,8 +602,8 @@ export class FsScanner {
           // one day ahead was invisible to the tree for good.
           //
           // That is not exotic. Clock skew between these machines is a known
-          // problem in its own right (`KNOWN-WEAKNESSES.md` F7/S3/M6 —
-          // *"CARAT lässt Rechner nur auf BIOS-Uhren hören"*), an archive can
+          // problem in its own right (`the weakness register` F7/S3/M6 —
+          // *"the host application lässt Rechner nur auf BIOS-Uhren hören"*), an archive can
           // carry any timestamp it likes, and a file copied from a machine
           // running fast arrives dated ahead. None of those is a file being
           // written, so none of them may be held back.
@@ -628,7 +628,7 @@ export class FsScanner {
           // `settleMs` before it can be announced.
           //
           // Worth it: without it a large copy is announced truncated and
-          // *"dort gilt sie als gültig"* on every peer — `KNOWN-WEAKNESSES.md`
+          // *"dort gilt sie als gültig"* on every peer — `the weakness register`
           // D3, rated kritisch. A file being MODIFIED pays nothing, because
           // the last scan knew it; only the first sight of a new one waits.
           const firstSight =
@@ -780,7 +780,7 @@ export class FsScanner {
             // A node whose ref disagrees with its peers' for identical content
             // is out of the ancestry conversation: it announces parents nobody
             // can be in, so every deletion it sends is refused by everybody.
-            // That is `KNOWN-WEAKNESSES.md` §1, the register's
+            // That is `the weakness register` §1, the register's
             // most-reproduced entry, and a directory removal is what makes it
             // visible because it returns a folder to a state whose ref must
             // still agree. Measured: 10 of 10 on the four-node directory
@@ -844,7 +844,7 @@ export class FsScanner {
     // divergence signal, which every repair decision is built on, would say
     // they disagree when they do not.
     //
-    // Measured on the lab: after a forced 40 s partition both machines held 38
+    // measured on a real fleet: after a forced 40 s partition both machines held 38
     // identical files with identical hashes, and one reported `diverged: true`
     // for over eight minutes across six merge repairs, logging "equivalent
     // content, skipping restore" every time. The apply path correctly saw
@@ -919,7 +919,7 @@ export class FsScanner {
    * change event, each event triggered a scan, and the debounce that batches a
    * push was reset before it could fire.
    *
-   * Measured on the customer's folder: after a 3 642-file restore the watcher
+   * Measured on a large production folder: after a 3 642-file restore the watcher
    * reported the SAME newly added file nine times and the agent never emitted a
    * ref for it — `[fs] added: …/probe-….txt` nine times, no `sync:out`. The
    * file did not fail to arrive; it was never sent.
@@ -1243,12 +1243,12 @@ export class FsScanner {
    * callback, so those scans all run AT ONCE. Copying 1 200 tiny files into a
    * watched folder took 1 200 concurrent full scans: the CPU sat 82% idle
    * waiting on the filesystem, RSS climbed from 263 MB to 785 MB, and after two
-   * minutes the peer had received nothing. On the customer's 3 702-file folder
+   * minutes the peer had received nothing. On a 3 702-file folder
    * the same burst wedged the client outright.
    *
    * Started-after is the part that cannot be traded away. Joining a scan that
    * began BEFORE the event would let a push carry a tree that predates the file
-   * that triggered it — which is precisely the partial trees the lab saw
+   * that triggered it — which is precisely the partial trees a real fleet saw
    * advertised: 64 nodes, then 103, then 204, each a stale snapshot of a folder
    * that already held twelve hundred files. So a caller either starts a scan
    * now, or waits for the one that begins when the current pass ends. A burst

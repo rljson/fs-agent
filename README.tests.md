@@ -40,8 +40,8 @@ A decision-tier test proves a RULE. It does not prove the rule is ever
 reached, and the difference has cost this package real defects: every decision
 in the join protocol was proven by a pure function while the input was never
 assembled, and the defect was in the assembly. So a scenario answered only at
-the unit tier is marked **partial** in [scenario-matrix.md](doc/scenario-matrix.md),
-and the tiers above exist to close exactly that gap.
+the unit tier is answered only **partly**, and the tiers above exist to close
+exactly that gap.
 
 The mesh harness (`test/mesh/fs-mesh.ts`) is the instrument most of the hard
 results come from. It can `cut()` a node (both directions), `mute()` it (its
@@ -170,7 +170,7 @@ views" — because the defect class here is two situations that need opposite
 actions arriving as the same value. That matters concretely: a release passed
 every example test in the suite, fixed the case it was written for, and then
 flipped a production folder between two states about twenty times in ninety
-seconds. Ninety seconds of a customer's folder rewriting itself was an
+seconds. Ninety seconds of a production folder rewriting itself was an
 expensive way to learn something a loop over a three-element set says before
 the commit.
 
@@ -245,7 +245,7 @@ than a sample of two formats meeting.
 
 ### 2.11 Reproductions, kept verbatim
 
-`field-repro.spec.ts` reproduces entries from `KNOWN-WEAKNESSES.md` as written,
+`field-repro.spec.ts` reproduces reported failures as written,
 and `fs-mesh-wiped-and-reverted.spec.ts` the two shapes a machine comes back
 in: a folder **wiped** (must not empty the fleet, must be refilled) and a
 folder **reverted** to an older copy. Several suites carry a backlog ID in
@@ -306,22 +306,21 @@ adding a field is expected to change it.
 
 ## 4. What this suite cannot answer
 
-Named rather than implied, with the full mapping in
-[lab-recipe-coverage.md](doc/lab-recipe-coverage.md).
+Named rather than implied.
 
-Of the lab's 23 file-sync recipes, 14 are answered here at a tier that fails
+Of the 23 end-to-end file-sync recipes an integration environment runs, 14 are answered here at a tier that fails
 the build. The rest are of two honest kinds:
 
 - **A budget or a size.** Sync latency, the cold-start budget, and the 44 MB
-  file that is the customer's real number. A budget asserted on a developer
+  file that is a realistic production number. A budget asserted on a developer
   laptop measures the laptop.
 - **An environment this suite does not have.** A Windows file lock (the one
   thing on the list a mesh on macOS cannot settle — it wants a Windows
   runner), the OS watcher at a scale that overwhelms it, a transport limit, and
-  the real customer folder across four workstations.
+  the real production folder across four workstations.
 
-Open items are tracked in [known-limits.md](doc/known-limits.md) and
-[q3-backlog-status.md](doc/q3-backlog-status.md).
+Open items are in
+[README.public.md § Known constraints](README.public.md#known-constraints).
 
 ---
 
@@ -343,7 +342,7 @@ several suites generate cases in a loop.
 | `mesh/fs-mesh-catchup-cost.spec.ts` | 2 | coming back does not cost what you missed |
 | `fs-editor-patterns.spec.ts` | 6 | how real programs save |
 | `fs-chain-crosses-the-wire.spec.ts` | 4 | the chain crosses the wire |
-| `field-repro.spec.ts` | 3 | KNOWN-WEAKNESSES reproductions, verbatim |
+| `field-repro.spec.ts` | 3 | reported failures, reproduced verbatim |
 
 ### Client–server tier
 

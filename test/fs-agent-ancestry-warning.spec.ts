@@ -13,7 +13,7 @@
 // It used to be about data loss. Without `causalOrdering` a tree that merely
 // PREDATES this node's newest write could not be told from one DELETING it,
 // the prune rule needed an escape hatch for that case, and the hatch was where
-// `KNOWN-WEAKNESSES.md` §3 lived: *"two people save different files at the same
+// `the weakness register` §3 lived: *"two people save different files at the same
 // moment on different machines, one file disappears, and the node that lost it
 // is the one that created it"* — reproduced in eleven seconds. Three local
 // prune rules were built and withdrawn proving it could not be closed from

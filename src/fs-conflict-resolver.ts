@@ -24,7 +24,7 @@ import type { FsTree } from './fs-scanner.js';
  * deterministic: every peer resolving the same fork produces the identical D,
  * so resolution converges instead of forking again.
  *
- * See `doc/conflict-resolution-design.md`.
+ * See `README.architecture.md`, "Conflicts".
  */
 
 /** relativePath → blobId. Directories are recorded as {@link DIR_MARKER}. */

@@ -193,7 +193,7 @@ describe('FsAgent — the mass-delete guard', () => {
     expect(await targetFiles()).toHaveLength(0);
   });
 
-  // The correction the lab forced, and the reason this is not symmetric with
+  // The correction a real fleet forced, and the reason this is not symmetric with
   // the locked-file case. The peer that sent the sparse tree is the one
   // MISSING data; this node holds the fuller copy. If it goes quiet after
   // refusing, the sparse peer has nothing to catch up from — and with every
@@ -418,7 +418,7 @@ describe('FsAgent — the mass-delete guard', () => {
   // A connector outlives the agent using it: Node.restartAgent() rebuilds the
   // agent from the EXISTING transport. A fresh agent must not inherit what the
   // previous one was told, because those conclusions were about a folder state
-  // it does not have — and on the lab that left snapshot-bootstrap red on every
+  // it does not have — and on a real fleet that left snapshot-bootstrap red on every
   // run the suite has ever produced.
   it('starts deaf to what a previous agent was told', async () => {
     const io = new IoMem();
@@ -613,7 +613,7 @@ describe('FsAgent — the mass-delete guard', () => {
     // Until a client asks the user, the least it can do is SAY SO. The log and
     // the sync-error file already carry it; neither is readable by a UI on
     // another machine, and "why did my deletion not arrive" is exactly the
-    // question that UI has to answer. See `doc/known-limits.md`.
+    // question that UI has to answer. See `README.public.md`, "Known constraints".
     const dir = await mkdtemp(join(tmpdir(), 'fs-agent-refusals-'));
     const agent = new FsAgent(dir);
     try {

@@ -39,7 +39,7 @@
 // depend on is what caused T4's sibling failure.
 //
 // Read `PLAN-fs-edit-chain.md` §7 in the workspace root for why this exists
-// and `doc/known-limits.md` for the two failures it was written from.
+// and `README.public.md`, "Known constraints" for the two failures it was written from.
 //
 // Every scenario asserts on FOLDER CONTENTS AND STABILITY, never on refs. See
 // the header of `fs-mesh.ts`.
@@ -137,7 +137,7 @@ describe('fs mesh', () => {
   // The scenario: the hub announces a state whose ancestry reaches S — the
   // state A applied before it started working — and `antiEntropyDecision`
   // counts S as "a state we are in", concludes it is behind, and chooses
-  // `pull` AGAINST A'S OWN NEW WORK. Measured on NB-2744 as 15 files being
+  // `pull` AGAINST A'S OWN NEW WORK. Measured on node-C as 15 files being
   // repeatedly replaced by the fleet's 13, `lastRepair: { action: "pull",
   // attempt: 5 }`.
   //
@@ -166,7 +166,7 @@ describe('fs mesh', () => {
   // Telling them apart needs the CHAIN: WP3 (walk and pull) and WP4 (decide
   // from reachability).
   //
-  // See `doc/known-limits.md` → "A node's own new work can be discarded when
+  // See `README.public.md`, "Known constraints" → "A node's own new work can be discarded when
   // the hub has forked", and the pinned decision case in
   // `test/fs-anti-entropy.spec.ts`.
   // ...........................................................................
@@ -402,7 +402,7 @@ describe('fs mesh', () => {
   // measurement says is that its absence is a SCALE effect, not a logic one:
   // 400 files settle inside a single scan, so no peer ever sees the partial
   // state. Held at 400 rather than the plan's 1 200 so it runs in the ordinary
-  // suite; the PROJEKTE-scale measurement, the memory budget and the gate all
+  // suite; the a production folder-scale measurement, the memory budget and the gate all
   // belong to WP5, which is where a number here would be meaningful.
   //
   // Kept as a regression guard: it is the only scenario that would notice a

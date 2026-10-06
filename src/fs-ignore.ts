@@ -17,7 +17,7 @@
 // wrote globs, they did nothing, and the workaround was to delete them.
 //
 // Q3 backlog X3, Kritisch: *"Die gelieferte Liste wäre nicht anwendbar"* — the
-// ignore list the customer is to be given cannot be applied at all.
+// ignore list a deployment is given cannot be applied at all.
 //
 // THE COMPATIBILITY RULE, and it is the whole reason this is safe to land:
 //

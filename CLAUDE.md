@@ -209,7 +209,7 @@ Tests require `cross-env NODE_OPTIONS=--max-old-space-size=8192` for heap-intens
 
 ---
 
-## Anti-entropy (ONE-446) — rules
+## Anti-entropy — rules
 
 - **The rule order in `antiEntropyDecision` is load-bearing**: origin-push,
   then pull, then last-applied-push, then merge. Each reorder was tried and

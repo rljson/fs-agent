@@ -150,7 +150,7 @@ describe('FsScanner', () => {
       // identity so two machines holding the same bytes derive the same ref.
       // With it in, they did not — at millisecond granularity — and a node
       // whose ref disagreed with its peers' had every deletion it sent
-      // refused (`KNOWN-WEAKNESSES.md` §1). The absolute `path` has been
+      // refused (`the weakness register` §1). The absolute `path` has been
       // excluded the same way, and for the same reason, all along.
       expect(meta?.mtime).toBeUndefined();
       expect(meta?.path).toBeUndefined();
@@ -378,7 +378,7 @@ describe('FsScanner', () => {
     // makes during a restore came back as a change event, each event triggered
     // a scan, and the debounce that batches a push was reset before it fired.
     //
-    // Measured on the customer's folder: after a 3 642-file restore the watcher
+    // Measured on a large production folder: after a 3 642-file restore the watcher
     // reported the same newly added file NINE times and no ref was ever emitted
     // for it. The file did not fail to arrive — it was never sent.
     it('ignores a matching segment anywhere in a watcher path', () => {
@@ -692,7 +692,7 @@ describe('FsScanner', () => {
       // every rescan is dropped, and the stuck threshold is never reached.
       // The node stays silent about its own write for as long as the traffic
       // keeps up, which is what turned a 3s recipe into a 121s timeout that
-      // converged once the lab went quiet.
+      // converged once a real fleet went quiet.
       //
       // Remembering the drop ends that: the next resume rescans, whatever the
       // pause was worth.

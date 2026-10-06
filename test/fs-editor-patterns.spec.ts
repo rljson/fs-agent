@@ -17,10 +17,10 @@
 //    for as long as it is open, and deletes it on close. It is noise that
 //    propagates to every machine and back.
 //  - Editors leave BACKUPS: `document.txt~`, `.document.txt.swp`.
-//  - CARAT holds `.dbf` and `.PRJZ` open for the life of a document, which is
+//  - the host application holds `.dbf` and `.PRJZ` open for the life of a document, which is
 //    already covered — this is about what happens AROUND that.
 //
-// None of this needs the lab and none of it was tested. The register's D3 is
+// None of this needs a real fleet and none of it was tested. The register's D3 is
 // the slow-copy half of the same family; this is the fast half, where the
 // hazard is not a partial read but a storm of events for one logical change.
 // .............................................................................

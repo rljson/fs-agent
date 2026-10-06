@@ -15,13 +15,13 @@
 // A total says a sync was slow. It does not say whether the folder was being
 // hashed, a blob was crossing the network, or a disk was writing — and those
 // have different causes and different people to talk to. The 84-second outlier
-// is unexplainable without this split, and every budget in the lab suite is
+// is unexplainable without this split, and every budget in a real fleet suite is
 // derived from it.
 //
 // These tests do not assert durations: a number measured on one laptop means
 // nothing on another, and a test that pins one is flaky by construction. They
 // assert that each stage IS measured and attributed to the right side, which is
-// what makes the lab's numbers readable.
+// what makes a real fleet's numbers readable.
 // .............................................................................
 
 import { BsMem } from '@rljson/bs';

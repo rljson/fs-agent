@@ -130,9 +130,9 @@ holds the first ten, which is enough to name the folder and ask the user.
 `lastRepair`.
 
 `diverged` is a **latch** — a difference has persisted long enough to repair.
-`differingPaths` is what a content comparison actually found. They can disagree;
-the known case is documented in
-[doc/known-limits.md](doc/known-limits.md).
+`differingPaths` is what a content comparison actually found. They can disagree,
+and the known case is in
+[README.public.md § Known constraints](README.public.md#known-constraints).
 
 ---
 

@@ -120,7 +120,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     warnSpy.mockRestore();
   });
 
-  // The same rule, on the configuration a CARAT One Client actually runs.
+  // The same rule, on the configuration a host client actually runs.
   //
   // **The lab incident of 2026-09-19.** Nine files were written into the synced
   // folder on one machine while it was — unknowingly — attached to a server
@@ -424,7 +424,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     // seen a deletion pushes a tree that still contains the file, and the
     // additive apply restores it.
     //
-    // Measured on the customer's folder — 3642 files, 404 MB — where a file
+    // Measured on a large production folder — 3642 files, 404 MB — where a file
     // deleted from it was back moments later, on one run in two.
     it('ignores a sender that descends from a state this node has left', async () => {
       const db = await makeDb();

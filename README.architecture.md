@@ -605,7 +605,7 @@ dedup is exactly what hides the repeat that would show a disagreement. Each
 announcement (`r`, `o`, `p`) goes to `FsAntiEntropy.observe()`.
 
 The beacon is the signal to run on. The connector does not listen to it, so it
-enters no apply path; the bootstrap heartbeat does, which is why the CARAT One
+enters no apply path; the bootstrap heartbeat does, which is why the host
 Client runs with it off. The event name comes from `@rljson/db`
 (`stateBeaconEvent`), next to the Connector that deliberately ignores it; the
 server imports the same function.
@@ -643,7 +643,7 @@ keeping up with the traffic changes its own state with every forward it
 applies, while a node that lost a message sits still. Keying on the hub's
 state as well restarted the grace period on every change there, so a node
 that missed every forward while another machine kept writing was never
-repaired (review, ONE-446). The repair answers the latest announcement:
+repaired. The repair answers the latest announcement:
 
 - push → `_sendRef(connector, _currentRef, [hubRef])`
 - pull → `scheduleProcess(hubRef, …, p)` — the ordinary `processRef`
@@ -683,7 +683,7 @@ When they disagree the system deadlocks against itself by design: the apply
 path correctly concludes there is nothing to transfer, the anti-entropy
 correctly concludes the refs differ, and neither is wrong.
 
-**Measured on the lab (fs-agent 0.0.81, two machines).** After a forced 40 s
+**Measured on two machines (fs-agent 0.0.81).** After a forced 40 s
 partition both sides held 38 identical files with identical hashes, and one
 reported `diverged: true` for over **eight minutes** across six merge repairs,
 logging *"equivalent content, skipping restore"* every time. It costs nothing in
@@ -1256,7 +1256,7 @@ them back.
 **This is half a mechanism.** Measured: it stops a node resurrecting its own
 deletion, reliably. It does not make the deletion win on a peer that never heard
 it, so the residual failure is a permanent divergence rather than a data loss.
-The other half needs the edit chain below. See `doc/known-limits.md`.
+The other half needs the edit chain below.
 
 **Not yet bounded.** Deleting a large folder writes one tombstone per file and
 keeps them. `@rljson/mongo-agent` routes tombstone application through the same
@@ -1338,9 +1338,8 @@ ordering has to come from the side that holds the fact, which is why it travels.
 A tree ref is a content hash of the whole folder, so a folder that returns to a
 state it held earlier re-derives that state's exact ref. "We returned to an old
 state" and "we never left it" are the same string — which is why two data-loss
-failures in opposite directions were measured on one day
-(`doc/known-limits.md`), and why neither is fixable by reading
-`antiEntropyDecision` more cleverly.
+failures in opposite directions were measured on one day, and why neither is
+fixable by reading `antiEntropyDecision` more cleverly.
 
 The chain gives every change its own identity. One entry per folder-changing
 scan:

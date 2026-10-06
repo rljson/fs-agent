@@ -14,7 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
-// CARAT holds .dbf and .PRJZ open for as long as a user has the document. One
+// the host application holds .dbf and .PRJZ open for as long as a user has the document. One
 // of those aborted the entire restore, so a single open document stopped every
 // OTHER file in the tree from arriving — one user's lock became everyone's
 // stalled sync.
@@ -46,7 +46,7 @@ vi.mock('fs/promises', async (importOriginal) => {
     },
     // A restore writes through a file handle, so the lock has to be refused
     // where Windows actually refuses it rather than at the write. A document
-    // CARAT is holding fails `CreateFile` for write access — this is a closer
+    // the host application is holding fails `CreateFile` for write access — this is a closer
     // model of the real fault than the old `writeFile` mock was, not a
     // workaround for it. Read opens are left alone: the scanner uses them on
     // the source folder, and a held document can still be read.

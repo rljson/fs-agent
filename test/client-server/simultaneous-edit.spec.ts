@@ -22,29 +22,29 @@ import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
  *
  * Every existing test of "both clients modify the same file" is sequential on
  * purpose — *A writes, wait for convergence, then B writes* — and says so. So
- * the case the lab actually fails is the one nothing here covers: the
+ * the case a real fleet actually fails is the one nothing here covers: the
  * `conflict-resolution` recipe writes from every participant at once and then
  * requires that all of them end on the same content, whichever version wins.
  *
  * Measured on four machines, 2026-09-19:
  *
  *     nodes diverged on conflict/shared.txt after 60s: 3 distinct versions
- *     [NB-21624=263d5dab, NB-2505=4ca963ab, NB-2510=19c23d89, NB-2744=19c23d89]
+ *     [node-A=263d5dab, node-D=4ca963ab, node-B=19c23d89, node-C=19c23d89]
  *
  * — three stable answers, not a race still settling.
  *
- * The configuration below is the one a CARAT One Client ships:
+ * The configuration below is the one a host client ships:
  * `causalOrdering` on, `resolveConflicts` OFF. That gate is deliberate (turning
- * the merge on once dropped the lab to 4 of 11), and what this test exists to
+ * the merge on once dropped a real fleet to 4 of 11), and what this test exists to
  * establish is what it COSTS.
  *
- * **Since ONE-446 it costs nothing here.** Both cases converge, the shipped one
+ * **Since an earlier change it costs nothing here.** Both cases converge, the shipped one
  * included — because the hub now announces what it holds (the state beacon) and
  * the anti-entropy repairs a node that disagrees with it for longer than the
  * grace period. Measured 2026-09-28: five rounds, three runs, every round on one
  * version within 18-23 s.
  *
- * What is NOT repaired, and is still written down in `doc/known-limits.md`: WHO
+ * What is NOT repaired, and is still written down in `README.public.md`, "Known constraints": WHO
  * wins. The winner is the last advertisement to arrive, not the later save.
  * Convergence is the promise; "the newer edit survives" is not.
  */
@@ -169,7 +169,7 @@ describe.each([
       }),
     );
 
-  // BOTH CASES CONVERGE. The second one did not until ONE-446: without
+  // BOTH CASES CONVERGE. The second one did not until an earlier change: without
   // `resolveConflicts` three simultaneous writes settled on three different
   // versions and stayed there, measured on four machines on 2026-09-19, and it
   // was committed here as `it.fails` — green while the body diverged, red the
@@ -191,19 +191,19 @@ describe.each([
     // "long original content here", converge, then "tiny") and reported, with
     // the merge enabled on the sandbox route:
     //
-    //     file "shrink.txt" content mismatch on NB-21624
-    //     [NB-21624=other-content, NB-2505=other-content, NB-2744=other-content]
+    //     file "shrink.txt" content mismatch on node-A
+    //     [node-A=other-content, node-D=other-content, node-C=other-content]
     //
     // Three peers agreeing with each other on the version the writer had
     // already replaced.
     //
     // **It does not reproduce here**, with or without the merge — so whatever
-    // the lab hit needs more than two sequential writes. The recipe writes
+    // a real fleet hit needs more than two sequential writes. The recipe writes
     // five files first, one of them 200 KB, and the second edit lands while
     // that is still moving. This test stays as the invariant it asserts: a
     // lone writer's second edit must reach every peer, because nothing
     // competed for it. If that ever stops being true in THIS shape, it is a
-    // much simpler bug than the one on the lab.
+    // much simpler bug than the one on a real fleet.
     const writer = nodes[0]!;
 
     await writeFile(join(writer.folder, 'shared.txt'), 'long original content');
