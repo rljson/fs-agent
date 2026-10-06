@@ -82,8 +82,8 @@ export interface FsAgentOptions {
    * **Default off.** It replaces the repair model rather than correcting it,
    * and `src/fs-agent.ts` records that this class of change "has been reverted
    * four times for being shipped on reasoning". On in the mesh, where the
-   * additive outcome is asserted; off everywhere else until a lab run says
-   * otherwise.
+   * additive outcome is asserted; off everywhere else until an integration run
+   * says otherwise.
    */
   bucketSync?: boolean;
   /** Ignore patterns for scanning */
@@ -93,10 +93,11 @@ export interface FsAgentOptions {
   /** Follow symlinks (default: false) */
   followSymlinks?: boolean;
   /**
-   * Persist a path→(mtime, size, blobId) scan cache at this file path so a RESTART
-   * does not re-read + re-hash the whole folder (a cold scan of an 80 GB catalog
-   * is ~48 min). Forwarded to the {@link FsScanner}. Requires a PERSISTENT blob
-   * store (e.g. `@rljson/bs-fs`). See {@link FsScanOptions.scanCachePath}.
+   * Persist a path→(mtime, size, blobId) scan cache at this file path so a
+   * RESTART does not re-read + re-hash the whole folder (a cold scan of an 80
+   * GB catalog is ~48 min). Forwarded to the {@link FsScanner}. Requires a
+   * PERSISTENT blob store (e.g. `@rljson/bs-fs`). See
+   * {@link FsScanOptions.scanCachePath}.
    */
   scanCachePath?: string;
   /** Storage options for database operations */
@@ -181,9 +182,9 @@ export interface FsAgentOptions {
    * **Off by default, deliberately.** It changes what a node says in its first
    * seconds, which is the class of change this package has reverted four times
    * for being shipped on reasoning. It is proven at the mesh tier
-   * (`fs-mesh-matrix.spec.ts`, `J4+J5`) and belongs on after a lab run, in the
-   * same way `bucketSync` did — see §13.17 and §13.20 of
-   * `PLAN-fs-edit-chain.md`.
+   * (`fs-mesh-matrix.spec.ts`, `J4+J5`) and belongs on after an integration
+   * run, in the same way `bucketSync` did — see `README.architecture.md`,
+   * "Joining a Network".
    */
   joinWaitMs?: number;
 
@@ -621,8 +622,8 @@ export class PartialRestoreError extends RestoreIncompleteError {
  * the fetch.
  *
  * **Size is no longer one of those reasons.** The case that produced this class
- * was a file larger than the transport's `maxHttpBufferSize`, where no number of
- * retries made 63 MB fit through a 50 MB socket. Since `@rljson/bs` 0.0.27 a
+ * was a file larger than the transport's `maxHttpBufferSize`, where no number
+ * of retries made 63 MB fit through a 50 MB socket. Since `@rljson/bs` 0.0.27 a
  * blob crosses as a series of ranged pulls, so no single message carries the
  * whole file and the cap no longer bounds file size. The class stays, because a
  * blob can still be genuinely unreachable; the reason it was first needed is
@@ -638,10 +639,10 @@ export class PartialRestoreError extends RestoreIncompleteError {
  * silently ignoring every delete.
  *
  * Measured on four nodes: one 63 MB file (120% of the cap) left three of them
- * holding a file the fourth had deleted, permanently, and `projekte-shape`'s
- * deletion had still not propagated after 300 seconds. The largest observed
- * file was 45.9 MB against the same 50 MB cap — close enough that the next
- * revision of one document would have reproduced it in production.
+ * holding a file the fourth had deleted, permanently, and the large-folder
+ * shape's deletion had still not propagated after 300 seconds. The largest
+ * observed file was 45.9 MB against the same 50 MB cap — close enough that the
+ * next revision of one document would have reproduced it in production.
  */
 export class BlobUnavailableError extends RestoreIncompleteError {
   constructor(public readonly unavailablePaths: string[]) {
@@ -1095,8 +1096,8 @@ export class FsAgent {
   /**
    * How long each stage of the last push and the last apply took, in ms.
    *
-   * measured on a real fleet: *"im Schnitt 3 Sekunden, im schlechtesten Fall 84.
-   * Alle Zeitbudgets der Testsuite hängen an dieser Zahl."* And the reason
+   * measured on a real fleet: *"im Schnitt 3 Sekunden, im schlechtesten Fall
+   * 84. Alle Zeitbudgets der Testsuite hängen an dieser Zahl."* And the reason
    * nobody could say more than that: *"bisher wird nur die Gesamtzeit
    * gemessen. Die einzelnen Schritte mitmessen — Scan, Prüfsumme, Ablage,
    * Meldung, Abholen, Schreiben —, sonst rät man."* (`the weakness register`
@@ -1579,10 +1580,11 @@ export class FsAgent {
    *
    * The two have different answers. A blob that cannot be fetched costs one
    * file and the tree applies without it; a file that cannot be written is
-   * usually a the host application document a user still has open, and that one must not abort
-   * the rest of the restore either. Conflating them would report an offline peer
-   * as a locked file, and the field reports are read by people who act on that
-   * distinction.
+   * usually a document the host application still has open for a user, and that
+   * one must not abort
+   * the rest of the restore either. Conflating them would report an offline
+   * peer as a locked file, and the field reports are read by people who act on
+   * that distinction.
    * @param error - The error thrown while writing the file.
    * @returns Whether it came from the blob source.
    */
@@ -1598,11 +1600,11 @@ export class FsAgent {
    * Writes a file from a stream, holding one chunk at a time.
    *
    * The twin of {@link FsAgent._atomicWriteFile} — temp and rename on every
-   * platform, for the same reasons — but never materialising the whole file. A 500 MB
-   * file used to cost 500 MB of Buffer on the receiving agent, another copy in
-   * the socket parser, and — on the serving hub — the same again. That is the
-   * shape that killed the cloud EventHub: memory that is work in flight rather
-   * than garbage, so no collection can reclaim any of it.
+   * platform, for the same reasons — but never materialising the whole file. A
+   * 500 MB file used to cost 500 MB of Buffer on the receiving agent, another
+   * copy in the socket parser, and — on the serving hub — the same again. That
+   * is the shape that exhausted a cloud relay: memory that is work in flight
+   * rather than garbage, so no collection can reclaim any of it.
    *
    * Read failures are tagged, because from here on the bytes arrive during the
    * write rather than before it, and {@link FsAgent._isBlobReadError} is what
@@ -1693,8 +1695,8 @@ export class FsAgent {
     // costs the ability to tell two situations apart that look identical
     // without it —
     //
-    //   a peer DELETED a file from a state we both had        (subtractive, correct)
-    //   a peer has files we never shared a history with       (additive, correct)
+    //   a peer DELETED a file from a state we both had   (subtractive, correct)
+    //   a peer has files we never shared a history with  (additive, correct)
     //
     // — because a first push from an independently-populated folder and a
     // deletion from a shared state are the same shape once the ancestry is
@@ -1764,7 +1766,8 @@ export class FsAgent {
   /**
    * Abandons a join this agent is still waiting on.
    *
-   * **This method used to do nothing at all**, and the One Client calls it in
+   * **This method used to do nothing at all**, and the host application calls
+   * it in
    * six places on shutdown. It read two fields that were never assigned —
    * leftovers of the constructor auto-sync pattern, which was removed — each
    * behind a `v8 ignore` that hid the fact. The real stopping is done by the
@@ -2129,8 +2132,8 @@ export class FsAgent {
         // file the fourth had deleted. The bytes of one file are worth exactly
         // one missing file, never the tree's deletions as well.
         //
-        // The size cap itself is gone as of the streaming fetch below; this rule
-        // still holds for every other reason a blob can be unreachable.
+        // The size cap itself is gone as of the streaming fetch below; this
+        // rule still holds for every other reason a blob can be unreachable.
         // A stream, not the whole blob. `getBlobStream` asks the source for its
         // size first, so a blob that is simply not there still fails here with
         // the same message it always did — and a blob that IS there now crosses
@@ -2214,10 +2217,10 @@ export class FsAgent {
             });
           }
         } catch (error) {
-          // the host application holds .dbf and .PRJZ open for as long as a user has the
-          // document. One of those aborted the entire restore, so a single
-          // open document stopped every OTHER file in the tree from arriving —
-          // one user's lock became everyone's stalled sync.
+          // the host application holds .dbf and .PRJZ open for as long as a
+          // user has the document. One of those aborted the entire restore, so
+          // a single open document stopped every OTHER file in the tree from
+          // arriving — one user's lock became everyone's stalled sync.
           //
           // Skip the file and keep going. The bytes are not lost: nothing has
           // been recorded as applied, so the caller retries, and by then the
@@ -2793,8 +2796,8 @@ export class FsAgent {
     }
 
     // Recursively fetch all tree nodes starting from root
-    // Trees are stored as multiple rows - querying by hash only returns one node
-    // We need to fetch the root node and recursively fetch all children
+    // Trees are stored as multiple rows - querying by hash only returns one
+    // node We need to fetch the root node and recursively fetch all children
     const route = Route.fromFlat(treeKey);
     const allNodes = await FsAgent._withTimeout(
       this._fetchTreeRecursively(db, route, treeKey, rootRef),
@@ -3430,7 +3433,7 @@ export class FsAgent {
                   // nothing read the ancestry; now that a receiver prunes only
                   // for a sender that names a state it is in, it means a
                   // correctly-formed deletion is refused by everyone — which is
-                  // exactly what the large-folder recipe has been reporting.
+                  // exactly what the large-folder scenario has been reporting.
                   //
                   // The doubled `[sync:out]` line in every log was this, in
                   // plain sight, for the whole investigation.
@@ -3610,9 +3613,9 @@ export class FsAgent {
   /**
    * Resolves the `previous` (InsertHistory predecessor timeIds) for a new
    * revision from the parent's shared content refs. timeIds are per-db, so we
-   * map each shared parent ref to *this* db's local timeId(s). Returns undefined
-   * when ancestry tracking is off (default) or no parent is known — in which
-   * case the store behaves exactly as before.
+   * map each shared parent ref to *this* db's local timeId(s). Returns
+   * undefined when ancestry tracking is off (default) or no parent is known —
+   * in which case the store behaves exactly as before.
    * @param db - Database instance
    * @param treeKey - Tree table key
    * @param parentRefs - Parent content refs (local head, or received predecessors)
@@ -4596,8 +4599,8 @@ export class FsAgent {
    * `FsEditChain.init` creates its tables with `createOrExtendTable` and
    * continues the lineage a previous process left behind.
    *
-   * Best-effort. fs-agent creates its OWN tables — the One Client creates the
-   * trees table, and an agent expecting tables its host never created would
+   * Best-effort. fs-agent creates its OWN tables — the host application creates
+   * the trees table, and an agent expecting tables its host never created would
    * fail at runtime on any node whose host is one release behind.
    * @param db - The route's database.
    * @param treeKey - The trees table key.
@@ -5800,8 +5803,8 @@ export class FsAgent {
         // state needs nothing from the older one.
         //
         // ONE place decides whether an inbound ref is news to this agent. The
-        // question used to be answered in scattered conditions, and every one of
-        // them has been wrong at least once — see `inboundRefVerdict`.
+        // question used to be answered in scattered conditions, and every one
+        // of them has been wrong at least once — see `inboundRefVerdict`.
         const verdict = this._inboundRefVerdict(treeRef, isNewestFromSender);
         if (verdict !== 'apply') {
           console.warn(
@@ -5934,13 +5937,14 @@ export class FsAgent {
             // was not.
             //
             // The consequence was the laundering step in the large-folder
-            // rollback, traced on a real fleet to this exact path. The folder now
-            // matches `treeRef`, but `_lastSentContentKey` still described some
-            // earlier state, so the next debounced push saw a content key that
-            // did not match, concluded it had news, and re-derived a ref —
-            // which, refs being content hashes, was `treeRef` itself. `_sendRef`
-            // then deliberately clears the connector's dedup so a genuine
-            // A → B → A deletion can go out, and that carried this one out too.
+            // rollback, traced on a real fleet to this exact path. The folder
+            // now matches `treeRef`, but `_lastSentContentKey` still described
+            // some earlier state, so the next debounced push saw a content key
+            // that did not match, concluded it had news, and re-derived a ref —
+            // which, refs being content hashes, was `treeRef` itself.
+            // `_sendRef` then deliberately clears the connector's dedup so a
+            // genuine A → B → A deletion can go out, and that carried this one
+            // out too.
             //
             // The effect is that a node re-advertises a state it ADOPTED as
             // though it authored it. That turns a stale tree into fresh-looking
@@ -5964,12 +5968,13 @@ export class FsAgent {
           }
 
           // Client-only conflict handling: classify the incoming revision
-          // against our head via the shared-ref DAG. `ahead` (an older ancestor,
-          // e.g. a reconnect bootstrap) is ignored; `diverged` (concurrent
-          // edits) is resolved inline — a 3-way merge into a merge revision D —
+          // against our head via the shared-ref DAG. `ahead` (an older
+          // ancestor, e.g. a reconnect bootstrap) is ignored; `diverged`
+          // (concurrent edits) is resolved inline — a 3-way merge into a merge
+          // revision D —
           // *before* the destructive restore could clobber local changes, all
-          // while the watcher is paused; `behind` falls through to fast-forward.
-          // THE CHAIN DECIDES FIRST, and unconditionally.
+          // while the watcher is paused; `behind` falls through to
+          // fast-forward. THE CHAIN DECIDES FIRST, and unconditionally.
           //
           // An incoming state whose entry is an ANCESTOR of this node's head
           // is a state this node has already left. Applying it is a rollback,
@@ -6355,13 +6360,13 @@ export class FsAgent {
           //
           // **The second half of the rollback.** With the roots unified a
           // healed receiver is no longer a fork of the writer at the root, but
-          // one that landed SHORT still authors an entry of its own — correctly,
-          // being short of what you applied is a state of your own. That entry
-          // used to list the received paths as its own changes, stamped with a
-          // fresh `timeId` at heal time, so OLD content carried a NEW time.
-          // The writer then merged against it and the receiver's v5 out-ordered
-          // the writer's v8. Measured: `changed=[doc (conflicted copy …).txt,
-          // doc.txt]` on a node that had edited neither.
+          // one that landed SHORT still authors an entry of its own —
+          // correctly, being short of what you applied is a state of your own.
+          // That entry used to list the received paths as its own changes,
+          // stamped with a fresh `timeId` at heal time, so OLD content carried
+          // a NEW time. The writer then merged against it and the receiver's v5
+          // out-ordered the writer's v8. Measured: `changed=[doc (conflicted
+          // copy …).txt, doc.txt]` on a node that had edited neither.
           //
           // The conflict copy in that list is genuinely local work and stays.
           this._recordReceived(incomingTree, currentTree, postRestoreTree);
@@ -6398,9 +6403,9 @@ export class FsAgent {
           //
           // Equal content is the opposite case, and the one that must stay
           // quiet: re-announcing a state we just adopted launders a stale tree
-          // into news from a new sender — traced on a real fleet to this very path —
-          // and peers that had moved on prune back to it, 77 files at a time,
-          // under the mass-delete guard's floor.
+          // into news from a new sender — traced on a real fleet to this very
+          // path — and peers that had moved on prune back to it, 77 files at a
+          // time, under the mass-delete guard's floor.
           //
           // Same question, two answers, one condition: did this apply leave us
           // where the sender is, or somewhere only we are?
@@ -6411,8 +6416,8 @@ export class FsAgent {
           // in the middle of catching up is a SUBSET: its folder is behind the
           // sender's, and announcing that is how a burst turns into a rollback.
           //
-          // The lab measured it directly. Trees arrived at the writer carrying
-          // 1 008 files, then 892, then 907, each stamped
+          // A field measurement caught it directly. Trees arrived at the writer
+          // carrying 1 008 files, then 892, then 907, each stamped
           // `newestFromSender=true` — and they were, because they came from
           // DIFFERENT peers, each monotonic for itself. A per-sender sequence
           // cannot order two senders against each other, so nothing downstream
@@ -6450,11 +6455,12 @@ export class FsAgent {
           // omission.
           //
           // It is thrown only from inside `restore`'s `cleanTarget` block, and
-          // every apply on this path passes `cleanTarget: false` — deliberately,
-          // because the chain made deletions STATED rather than inferred from
-          // a tree being sparse. So the whole-folder prune this used to catch
-          // cannot happen here any more, and the branch that handled it sat
-          // dead with its own re-announcement machinery behind it.
+          // every apply on this path passes `cleanTarget: false` —
+          // deliberately, because the chain made deletions STATED rather than
+          // inferred from a tree being sparse. So the whole-folder prune this
+          // used to catch cannot happen here any more, and the branch that
+          // handled it sat dead with its own re-announcement machinery behind
+          // it.
           //
           // The live mass-delete guards are `planRemovals` and the bucket
           // round's destructive half; both refuse in place and log, neither
@@ -6519,8 +6525,8 @@ export class FsAgent {
                  recovery (pendingRef set while this ref was being processed)
                  is a timing race that cannot be reproduced deterministically */
               if (pendingRef === null) {
-                // Per-cycle retries exhausted, but rather than DROP the ref (and
-                // lose the file written during a transport disruption) we
+                // Per-cycle retries exhausted, but rather than DROP the ref
+                // (and lose the file written during a transport disruption) we
                 // re-queue it for a later recovery cycle. tearDown() stops it.
                 console.warn(
                   `${this._tag} syncFromDb: ref=${treeRef.slice(0, 8)}… not yet ` +
@@ -6706,11 +6712,11 @@ export class FsAgent {
         // WHERE THE UNMARKED REFS ACTUALLY CAME FROM — this comment used to
         // say the hub, advertising from the server's trees table rather than
         // the ref log it relayed, and that was WRONG. `Server` keeps
-        // `this._latestRef = ref` with the prefix intact and `_bootstrapPayload`
-        // relays exactly that, so the hub is faithful. The unmarked refs were
-        // this package's own: `storeMerge` and the initial store let
-        // `Connector`'s db observer broadcast a raw tree ref. Both fixed; see
-        // the invariant `every announcement carries a chain head`.
+        // `this._latestRef = ref` with the prefix intact and
+        // `_bootstrapPayload` relays exactly that, so the hub is faithful. The
+        // unmarked refs were this package's own: `storeMerge` and the initial
+        // store let `Connector`'s db observer broadcast a raw tree ref. Both
+        // fixed; see the invariant `every announcement carries a chain head`.
         //
         // The lookup stays. Not for an old peer — that format is gone — but
         // because a bare ref is what any sender produces whose chain could not
@@ -7054,8 +7060,8 @@ export class FsAgent {
 
   /**
    * Creates a fully configured FsAgent from a Client instance.
-   * This factory method provides a simplified API where sync methods don't require
-   * db, connector, and treeKey parameters - they are stored internally.
+   * This factory method provides a simplified API where sync methods don't
+   * require db, connector, and treeKey parameters - they are stored internally.
    * @param filePath - Directory path to sync
    * @param treeKey - Tree table key (route will be `/${treeKey}`)
    * @param client - Client instance with io and bs properties
@@ -7111,8 +7117,8 @@ export class FsAgent {
     //
     // `fromClient` is how a real client joins a real hub, and it is the only
     // configuration that is integrated into the product and measured in the
-    // lab. So it defaults to that configuration rather than to the primitive
-    // one, and a caller's own values still win — the spread is after.
+    // end to end. So it defaults to that configuration rather than to the
+    // primitive one, and a caller's own values still win — the spread is after.
     //
     // What the weak alternative costs, and why it must not be the default
     // here: without `causalOrdering` the wire carries no predecessor refs, so
@@ -7122,8 +7128,8 @@ export class FsAgent {
     // warning, and quietly keeps less than the package promises — which is
     // exactly what the old README example did.
     //
-    // Both are no-ops for the One Client, which passes all three explicitly
-    // (`src/config/fs-sync-options.ts`, and both `sl-node` call sites). They
+    // Both are no-ops for the host application, which passes all three
+    // explicitly (in its sync configuration, at every call site). They
     // are here for the next integrator.
     //
     // `new FsAgent(...)` keeps the primitive defaults: it is the building

@@ -222,7 +222,7 @@ const connectorB = new Connector(clientDbB, Route.fromFlat('/dataSync'), socketB
 When a Connector sends a message via `connector.send(ref)`, two things happen:
 
 1. **Local Socket Echo**: The connector's own `listen()` callback is immediately triggered because sockets emit to all listeners (standard EventEmitter behavior)
-2. **Server Multicast**: The server receives the message and broadcasts it to OTHER clients (sender is filtered out via `clientIdA !== clientIdB` in `@rljson/server@0.0.4+`)
+2. **Server Multicast**: The server receives the message and broadcasts it to OTHER clients (the sender is filtered out via `clientIdA !== clientIdB` in `@rljson/server`)
 
 ```typescript
 // This is NORMAL behavior:
@@ -236,9 +236,9 @@ connector.send('my-ref-123');
 // Output: "Received ref: my-ref-123"  ← Local echo happens IMMEDIATELY
 ```
 
-**Server-Side Filtering (v0.0.4+):**
+**Server-Side Filtering:**
 
-The `@rljson/server` package (v0.0.4 and later) correctly filters out the sender when multicasting:
+`@rljson/server` filters out the sender when multicasting:
 
 ```typescript
 // Inside Server._multicastRefs():
@@ -875,47 +875,35 @@ flag during the rollout window — §2.1b's symptom — and clears once every no
 has re-scanned. **Upgrade machines together**, and expect the flag until the
 last one has.
 
-**`~H~` is unintelligible to an older build, and that is now accepted rather
-than worked around.** The agent used to offer a way out:
-`FsAgentOptions.announceTreeRef` made a new node speak the OLD wire format
-while still resolving its own ancestry, so a rollout could be "deploy with the
-switch on, then turn it off" rather than "stop the fleet".
+**`~H~` is unintelligible to a build that does not speak it**, and there is no
+compatibility switch — deliberately. A build that cannot parse `~H~` cannot
+parse `~BQ~` either, so such a switch would also have to disable the bucket
+protocol: one flag selecting two different consistency models.
 
-**That switch is gone.** Nothing is in production anywhere, so there is no
-older build to be understood by, and the cost was a second dialect inside every
-decision: a build that cannot parse `~H~` cannot parse `~BQ~` either, so the
-switch also had to disable the bucket protocol, which is why `bucketSync`
-defaulted to "on unless the old format is on". One flag quietly selected two
-different consistency models. Removed with it: the harness's `oldWireFormat`
-option and `fs-mesh-mixed.spec.ts`.
+So the rollout rule is the simple one: **upgrade machines together.** The ref
+change above already requires it.
 
-So the rollout rule is now the simple one: **upgrade machines together.** The
-ref change above already requires that; this no longer adds an alternative.
+### Two paths that look like compatibility and are not
 
-### What stayed, and why it is not compatibility
+Both exist for a runtime condition, not for an older peer:
 
-Two paths were justified by the old format AND by a second case. Only the
-version justification expired:
-
-- **`_ancestryRelation`**, the whole-`InsertHistory` ancestry walk, is kept for
-  a node whose chain failed to **initialise**. That is degradation, not a
-  version: a node that cannot read its own history still has to sync, it just
-  cannot contribute an ordering.
+- **`_ancestryRelation`**, the whole-`InsertHistory` ancestry walk, serves a
+  node whose chain failed to **initialise**. That is degradation: a node that
+  cannot read its own history still has to sync, it just cannot contribute an
+  ordering.
 - **the bare-ref receive path**, because a bare ref is what any sender produces
-  whose chain could not name the state it is announcing — a runtime condition.
+  whose chain could not name the state it is announcing.
 
 Whether the second is still REACHABLE is a measurement rather than an
-assumption. With no old-format nodes left in the suite, the invariant `every
-announcement carries a chain head` passes across the whole mesh tier: **zero
-bare refs**. Coverage stayed at 100% through the deletion, so nothing was
-relying on the old dialect to be covered. That is the evidence for deleting the
-receive path, whenever it is deleted.
+assumption: the invariant `every announcement carries a chain head` passes
+across the whole mesh tier — **zero bare refs**. That is the evidence for
+deleting it, whenever it is deleted.
 
-What the fallback taught is still worth keeping: finding a row BY a field is a
-query, not a content read, and a relay does serve one across `IoPeer` —
-verified against a real `Server`/`Client` pair. And a tree ref is a content
-hash, so a folder that returns to earlier content produces a SECOND entry with
-the same `dataRef` — §2.1 exactly, the ambiguity the chain exists to remove.
+Two facts the path rests on are worth stating, because both are easy to get
+wrong. Finding a row BY a field is a query, not a content read, and a relay does
+serve one across `IoPeer` — verified against a real `Server`/`Client` pair. And
+a tree ref is a content hash, so a folder that returns to earlier content
+produces a SECOND entry with the same `dataRef` — §2.1 exactly, the ambiguity the chain exists to remove.
 The newest by `timeId` is the right pick and is still a pick, which is why the
 head is the primary and the lookup never runs on the apply path.
 
@@ -966,11 +954,11 @@ hiding below the bound would turn a skipped removal into a deleted live file.
 
 ## Deciding From Reachability
 
-`antiEntropyDecision` used to have a content hash and ONE generation of
-ancestry, and §2.2 is the proof that cannot be made correct: "a peer deleted
-what we added" and "a peer forked from an ancestor we share" arrive at that
-signature as the **same value**. Narrowing the rule was tried twice — it cost a
-discarded folder the first time and a livelock the second.
+A content hash plus ONE generation of ancestry cannot decide this, and §2.2 is
+the proof: "a peer deleted what we added" and "a peer forked from an ancestor we
+share" arrive at that signature as the **same value**. Narrowing such a rule was
+tried twice — it cost a discarded folder the first time and a livelock the
+second. **Do not re-derive this decision from that input.**
 
 The chain answers instead, and where it answers no heuristic may overrule it:
 
@@ -982,12 +970,12 @@ The chain answers instead, and where it answers no heuristic may overrule it:
 | `incomplete` — a walk was truncated | **`blocked`** |
 | absent — no chain on either side | the old heuristics, unchanged |
 
-**`ahead` no longer requires `lastPushedRef` to match.** That condition existed
-only because "a state I authored" was the closest available stand-in for "a
-state the other side does not have yet" — and it is a bad one. A node that
-ADOPTED a peer's tree and then deleted a file authors nothing, so it could never
-re-announce the deletion, and the delete never propagated. Reachability proves
-the same thing properly, whoever wrote it.
+**`ahead` does not require `lastPushedRef` to match**, and must never be
+narrowed to it. Authorship is not a stand-in for "a state the other side does
+not have yet": a node that ADOPTED a peer's tree and then deleted a file authors
+nothing, so under that condition it could never re-announce the deletion and the
+delete never propagated. Reachability proves the same thing properly, whoever
+wrote it.
 
 **`blocked` is reported and not repaired.** Every action available is
 destructive in one direction or the other, and an incomplete walk that answers
@@ -1002,12 +990,11 @@ known limits.
 
 ### The keystone: lineages have to be joined
 
-**Reachability added on its own made things WORSE**, and the measurement is the
-only reason that was caught. Every node appends to its OWN lineage and chains
-are never merged, so an entry naming only this node's previous head can never be
-reachable from a peer's — `classify` answered `fork` for every disagreement
-there has ever been, and cases that used to pull or push correctly all became
-merges.
+**Reachability on its own makes things WORSE**, and only a measurement catches
+it. Every node appends to its OWN lineage, so an entry naming only this node's
+previous head can never be reachable from a peer's — `classify` answers `fork`
+for every disagreement, and cases a heuristic pushed or pulled correctly all
+become merges.
 
 So an entry that applies a peer's state names **that peer's head as a second
 parent**. It is the shape `FsEditChain` writes its rows by hand to allow, and it
@@ -1073,47 +1060,29 @@ turns the detector back on and the repair behind it was choosing `pull` for a
 node that was ahead. Fixing what the repair is **told** had to come first; the
 memo is one line at the end of that.
 
-## One Decision Site — and the removal of the second
+## One Decision Site, and No Prune Authority
 
-The question *"has the other side seen a state I am in?"* used to be asked in
-**two** places, and this section used to argue that they were genuinely
-distinct:
+**`antiEntropyDecision` is the only place that asks *"has the other side seen a
+state I am in?"*** It asks the chain first and falls back to heuristics only for
+a peer the chain cannot speak for — see
+[Deciding From Reachability](#deciding-from-reachability).
 
-| site | question | authorised |
-| --- | --- | --- |
-| `antiEntropyDecision` | on divergence, do I push / pull / merge? | a repair |
-| `senderSawMyState` | may this incoming tree **prune my files**? | deletions |
+There is deliberately no second site asking whether an incoming tree may
+**prune** local files. Such a rule can only read `[currentRef, lastAppliedRef]`
+against the other side's declared predecessors, and that input carries the
+ambiguity above: one generation of ancestry cannot separate "a peer deleted what
+we added" from "a peer forked from an ancestor we share". Narrowing it is what
+cost a discarded folder once and a livelock the second time.
 
-**The second one is gone, rule and enumeration together.** `senderSawMyState`
-and `PruneAuthorityView` were deleted from `fs-anti-entropy.ts`, and the
-enumeration that covered them (level 1's D5) with them.
+So **nothing prunes on a peer's authority at all.** A received tree may add and
+may overwrite; a file disappears only when some machine has *stated* its removal
+in the chain, and that statement is applied by `_applyIncomingRemovals` —
+ordered by `timeId`, bounded by the mass-delete guard, and walked back through
+`previous` so a deletion made during a partition is still found.
 
-It was removed rather than fixed because it was the wrong question. Both sites
-read `[currentRef, lastAppliedRef]` against the other side's declared
-predecessors, and both therefore inherited the same ambiguity: one generation
-of ancestry cannot separate "a peer deleted what we added" from "a peer forked
-from an ancestor we share". No rule over that input can be made correct, which
-is why narrowing one of them twice cost a discarded folder the first time and a
-livelock the second.
-
-What replaced it is not a better rule but a different input. **Nothing prunes
-on a peer's authority at all.** A received tree may add and may overwrite; a
-file disappears only when some machine has *stated* its removal in the chain,
-and that statement is applied by `_applyIncomingRemovals` — ordered by
-`timeId`, bounded by the mass-delete guard, and walked back through `previous`
-so a deletion made during a partition is still found.
-
-`senderSawMyState` had two escape hatches, both load-bearing and both measured:
-a transport carrying no ancestry always permitted the prune, and a push
-declaring no ancestry was left to the rule above it. Both are moot — there is
-no prune to authorise. The `causalOrdering` warning survives for a narrower
-reason: the predecessor refs it carries are what let the merge gate fire, so a
-transport without it reconciles no conflicting edit. It is not silent data loss
-any more.
-
-**One decision site remains**, and it is `antiEntropyDecision`, which asks the
-chain first and falls back to heuristics only for a peer the chain cannot speak
-for. See [Deciding From Reachability](#deciding-from-reachability).
+The `causalOrdering` warning is therefore not about data loss. The predecessor
+refs it names are what let the merge gate fire, so a transport without them
+reconciles no conflicting edit — that, and only that, is what it reports.
 
 ## A Delete Travels as a Fact (`collectRemovals` + `planRemovals`)
 
@@ -1126,7 +1095,7 @@ ancestor can be resolved. A partitioned node's cannot, and that is where the
 data loss was measured: 155 files of drift across four machines, and a file
 deleted from 3 642 that was back moments later. Four rules were built on that
 inference and all four were withdrawn; the one that is left is **not to
-infer**. See [One Decision Site](#one-decision-site--and-the-removal-of-the-second).
+infer**. See [One Decision Site](#one-decision-site-and-no-prune-authority).
 
 The chain carries the removal instead, as something the sender **states**.
 
@@ -1167,31 +1136,23 @@ removes almost nothing. A missing or malformed `timeId` is **not comparable**,
 never "older": judging silence as untrustworthy refused every deletion across
 twenty tests when it was last tried.
 
-### What this fixed, and how it was closed
+### Why a deletion gets out at all
 
-This section used to read *"the deleting node cannot re-announce its own
-deletion after adopting a peer's tree, so T4 is still a coin flip"*, because
-`antiEntropyDecision` re-announced only a state the node had AUTHORED
-(`_lastPushedRef`) — and a node that has applied a peer's tree no longer
-authors its current state, so it could only `pull` or `merge` and the deletion
-never went out.
+The deleting node has to be able to **re-announce** its own deletion, and two
+properties are what make that possible.
 
-Both halves are closed.
+**`ahead` does not require authorship.** A node that has applied a peer's tree
+no longer authors its current state; if `ahead` meant "a state I authored", such
+a node could only `pull` or `merge` and its deletion would never go out.
+Reachability proves "the other side is behind" whoever wrote the state.
 
-**`ahead` no longer requires authorship.** That condition existed only because,
-without a chain, "a state I authored" was the closest available stand-in for "a
-state the other side does not have yet" — and it is a bad one, for exactly the
-case above. Reachability proves the same thing properly, whoever authored it:
-if the chain says the other side is behind, this node pushes.
+**A node that is behind ASKS**, rather than waiting to be told. That is what
+refills a machine whose folder was wiped, and what holds the fleet-level
+invariant *every node ends on the last save*.
 
-**And a node that is behind now ASKS**, rather than waiting to be told. That is
-what refills a machine whose folder was wiped, and it is what closed the
-fleet-level invariant *every node ends on the last save*.
-
-T4 — *a delete made while cut off is not resurrected on rejoin* — was a coin
-flip through four work packages and is **8 of 8** under `bucketSync`. It is an
-ordinary assertion in `test/mesh/fs-mesh.spec.ts`; nothing in this package is
-committed inverted any more.
+T4 — *a delete made while cut off is not resurrected on rejoin* — is an ordinary
+assertion in `test/mesh/fs-mesh.spec.ts`, measured **8 of 8** under
+`bucketSync`.
 
 ## Refused Deletions Are Reported, Not Only Logged (`FsAgent.refusedDeletions`)
 
@@ -1228,16 +1189,14 @@ refusal is the correct behaviour and the gap is a missing dialog.
 **What this node deleted, remembered past the push.**
 
 A deleted file is simply absent from the next tree, so nothing in the content
-says the absence was deliberate. `_restoreTree` has always consulted
-`_pendingDeletes` — "never re-create a file deleted here and not yet announced"
-— and that set used to be cleared by `_rememberAnnounced`, one announcement
-after the delete. One push too early: "once peers have been told, a file's
-absence is theirs to know about" holds only for a peer that HEARD. A
-partitioned node's deletion reached nobody, and on rejoin the fleet's tree still
-contains the file.
+says the absence was deliberate. `_restoreTree` consults `_pendingDeletes` —
+"never re-create a file deleted here and not yet announced" — and the set is
+**persisted** in `.fsagent-state.json` beside `currentRef`, reloaded on start.
 
-The set is now persisted in `.fsagent-state.json` beside `currentRef` and
-reloaded on start.
+Clearing it on the next announcement is one push too early: "once peers have
+been told, a file's absence is theirs to know about" holds only for a peer that
+HEARD. A partitioned node's deletion reaches nobody, and on rejoin the fleet's
+tree still contains the file.
 
 | trigger | effect |
 | --- | --- |
@@ -1439,8 +1398,8 @@ to `treeKey`, which for fs IS the trees table. The fit is exact.
 
 **fs-agent creates them itself**, idempotently, via `createFsChainTables`.
 `@rljson/db`'s `createTable` is `createOrExtendTable`, so an init may run on
-every start. The One Client creates the trees table (`sl-server.ts`,
-`sl-client.ts`); an agent expecting tables its host had never created would fail
+every start. The host application creates the trees table (in its own server and
+client entry points); an agent expecting tables its host had never created fails
 at runtime on any node whose host is one release behind, which is exactly the
 mixed-version case a rollout guarantees. Creating our own removes the coupling
 rather than versioning it — the reason `@rljson/mongo-agent` could evolve its
@@ -1463,14 +1422,10 @@ schema without release-locking its host.
 so multiple parents are representable — it is only the manager that will not
 walk them.
 
-### The head, and what used to be a limit
+### The head, and why it is not a single slot
 
-This section used to say *"`FsEditChain` tracks a single head, chosen as the tip
-with the greatest `timeId` … Nothing reads this chain yet, so the limit is not
-reachable; the walk must replace it rather than build on it."*
-
-The chain is now the sync mechanism, so the limit became reachable and the walk
-did replace it. Three things changed:
+A chain that is only written has no use for more than one head, nor for a walk.
+A chain that **decides** needs both, in three ways:
 
 - **A head is parked per announced tree ref, not held in one slot.** When an
   announcement arrives, the sender's head is remembered against the tree ref it
@@ -1488,9 +1443,8 @@ did replace it. Three things changed:
   in the same millisecond break on a random tail, so it could name an entry its
   own successor had superseded.
 
-`@rljson/mongo-agent` had the single-slot bug too — lost updates root-caused to
-one `_lastApplied` slot rather than per-node lineages — and fixed it the same
-way.
+`@rljson/mongo-agent` holds per-node lineages for the same reason: a single
+`_lastApplied` slot there lost updates.
 
 **Tested by** `test/fs-edit-chain.spec.ts` (20), `test/fs-classify.spec.ts`
 (11), `test/fs-collect-removals.spec.ts` (31),
@@ -1592,14 +1546,13 @@ exists to prevent, so it does not depend on anyone having subscribed.
 
 ## Joining a Network (`planJoin`)
 
-The case the chain exists for, and the one that used to be decided by whatever
-the folder happened to hold.
+The case the chain exists for, and the one a folder's contents cannot decide.
 
-A joining node used to author a lineage root from its own contents and push it
-as the network's newest claim. That is one defect with two faces: every node
-got its own root, so `classify` answered `fork` to every announcement ever
-made; and a machine restored from a backup pushed a month of deletions back to
-the whole fleet.
+If a joining node authored a lineage root from its own contents and pushed it as
+the network's newest claim, that would be one defect with two faces: every node
+gets its own root, so `classify` answers `fork` to every announcement ever made;
+and a machine restored from a backup pushes a month of deletions back to the
+whole fleet.
 
 **The chain applies first, and the filesystem only then.** A folder with files
 and no history does not speak: it defers its first announcement and asks the

@@ -8,8 +8,9 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**70 files, 810 scenarios, 100 % coverage on statements, branches, functions and
-lines.** One command runs all of it:
+**70 files, 916 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 915 must pass; one is committed inverted, and §2.11 says which and why.
+One command runs all of it:
 
 ```bash
 pnpm test        # vitest --coverage --no-file-parallelism, then eslint
@@ -22,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 810 does
+This document says what the suite actually proves, because the number 916 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -140,10 +141,11 @@ save about one run in three.
 
 ### 2.5 That joining a network cannot destroy what is already there
 
-A joining node used to author a lineage root from whatever it happened to hold
-and push it as the network's newest claim. That is one defect with two faces:
-every node got its own root, so every announcement classified as a fork; and a
-machine restored from a backup pushed a month of deleted files back to the
+A folder's contents cannot say where a joining node belongs in the history. A
+node that authored a lineage root from whatever it happened to hold, and pushed
+it as the network's newest claim, would carry one defect with two faces: every
+node gets its own root, so every announcement classifies as a fork; and a
+machine restored from a backup pushes a month of deleted files back to the
 fleet.
 
 `fs-plan-join.spec.ts` (9) decides it against the chain, with every path in at
@@ -231,17 +233,13 @@ about the test changes.
 `fs-bucket-sync.spec.ts` (29) pins the format itself — message bodies are JSON
 because a POSIX filename may contain any byte but `/` and NUL.
 
-There is no longer a mixed-version test, because there is no longer a second
-format. `fs-mesh-mixed.spec.ts` ran half a fleet on plain tree refs and proved
-they converged; the switch it depended on
-(`FsAgentOptions.announceTreeRef`) was removed, since nothing is deployed that
-needs speaking to in a format it predates.
+There is no mixed-version test, because there is only one format — every node
+announces a chain head, and the fleet is upgraded together.
 
-What replaced it is stronger for the fleet we actually run: `every announcement
-carries a chain head`, in `mesh/fs-mesh-invariants.spec.ts`, records every ref
-each node puts on the wire and fails if any is bare. With the old format gone it
-covers the whole mesh tier — **zero bare refs** — and that is a census rather
-than a sample of two formats meeting.
+What holds that is a census rather than a sample: `every announcement carries a
+chain head`, in `mesh/fs-mesh-invariants.spec.ts`, records every ref each node
+puts on the wire across the whole mesh tier and fails if any is bare. **Zero
+bare refs.**
 
 ### 2.11 Reproductions, kept verbatim
 
@@ -251,6 +249,18 @@ in: a folder **wiped** (must not empty the fleet, must be refilled) and a
 folder **reverted** to an older copy. Several suites carry a backlog ID in
 their `describe` — `F1/D2`, `F1/D5`, `V2/D3`, `L2/D4`, `F5`, `F7`, `S5` — so
 the item that paid for the test is readable from the test.
+
+The reverted shape holds the package's **one inverted test**, *a node reverted
+to an older copy does not drag the fleet back*. A revert performed underneath a
+**running** agent is not decidable from the history: that node had adopted the
+edit whose file is now missing, which is the precise condition for a legitimate
+deletion, so its own watcher states the removal and every peer is right to obey
+it. Three detectors were built for it and each one suppressed ordinary work — a
+rename's target, an atomic save, a create/delete/recreate. The test carries that
+measurement and runs on every gate, so it turns red the day a protection exists.
+The field shape — a backup restored while the agent is **stopped** — is covered,
+because that node joins and `planJoin` renames what the history removed into
+`.fsagent-recovered/`.
 
 ---
 
@@ -308,7 +318,7 @@ adding a field is expected to change it.
 
 Named rather than implied.
 
-Of the 23 end-to-end file-sync recipes an integration environment runs, 14 are answered here at a tier that fails
+Of the 23 end-to-end file-sync scenarios an integration environment runs, 14 are answered here at a tier that fails
 the build. The rest are of two honest kinds:
 
 - **A budget or a size.** Sync latency, the cold-start budget, and the 44 MB
@@ -326,17 +336,17 @@ Open items are in
 
 ## 5. File index
 
-Counts are static `it(...)` declarations; the runtime total is higher because
-several suites generate cases in a loop.
+Counts are what `pnpm test` reports per file, so suites that generate cases in a
+loop are counted as they run. They sum to the 916 above.
 
 ### Mesh tier
 
 | file | n | what it covers |
 | --- | --- | --- |
 | `mesh/fs-mesh.spec.ts` | 6 | T1–T7, the scenarios the sync has to survive |
-| `mesh/fs-mesh-field-defects.spec.ts` | 10 | F1–F10, field defects reduced off-lab |
+| `mesh/fs-mesh-field-defects.spec.ts` | 10 | F1–F10, field defects reduced in process |
 | `mesh/fs-mesh-matrix.spec.ts` | 9 | the scenario matrix at mesh tier (L7, L8, I7, I10, J4+J5, J9 ×2) |
-| `mesh/fs-mesh-invariants.spec.ts` | 5 | invariants over the route, not the destination |
+| `mesh/fs-mesh-invariants.spec.ts` | 7 | invariants over the route, not the destination |
 | `mesh/fs-mesh-wiped-and-reverted.spec.ts` | 6 | a node comes back empty, or holding an older copy |
 | `mesh/fs-mesh-additive.spec.ts` | 3 | additive reconciliation (A1–A3) |
 | `mesh/fs-mesh-catchup-cost.spec.ts` | 2 | coming back does not cost what you missed |
@@ -348,24 +358,23 @@ several suites generate cases in a loop.
 
 | file | n | what it covers |
 | --- | --- | --- |
-| `client-server/shared-sync-tests.ts` | 35 | the shared production suite — **run twice**, below |
-| `client-server/socket-mock.spec.ts` | ×35 | the shared suite over `SocketMock` |
-| `client-server/socket-io.spec.ts` | ×35 | the shared suite over a real socket.io server at production's 50 MB limit |
+| `client-server/socket-mock.spec.ts` | 35 | the shared suite (`shared-sync-tests.ts`) over `SocketMock` |
+| `client-server/socket-io.spec.ts` | 35 | the same shared suite over a real socket.io server at production's 50 MB limit |
 | `client-server/advanced-sync.spec.ts` | 15 | three clients, catch-up, teardown and restart, 10 MB, 100 files, rapid overwrites |
-| `client-server/heals-after-forced-divergence.spec.ts` | 8 | deliberately dropped messages |
+| `client-server/heals-after-forced-divergence.spec.ts` | 15 | deliberately dropped messages |
 | `client-server/conflict-sync.spec.ts` | 2 | a real offline divergent edit, both versions preserved |
-| `client-server/simultaneous-edit.spec.ts` | 1 | five rounds of three nodes contesting one file |
+| `client-server/simultaneous-edit.spec.ts` | 4 | five rounds of three nodes contesting one file |
 
 ### Unit and decision tier
 
 | file | n | what it covers |
 | --- | --- | --- |
 | `fs-agent.spec.ts` | 90 | the agent's surface |
-| `fs-scanner.spec.ts` | 55 | scanning, watching, the scan cache |
+| `fs-scanner.spec.ts` | 56 | scanning, watching, the scan cache |
 | `fs-conflict-resolver.spec.ts` | 41 | tip ordering, winners, three-way merge, copy naming |
 | `fs-anti-entropy.spec.ts` | 38 | the repair decision, by example |
 | `fs-manifest.spec.ts` | 41 | buckets, digests, reconciliation plans |
-| `fs-agent-degradation.spec.ts` | 82 | what the agent does when a dependency fails, and the shapes no scenario reaches |
+| `fs-agent-degradation.spec.ts` | 87 | what the agent does when a dependency fails, and the shapes no scenario reaches |
 | `fs-collect-removals.spec.ts` | 31 | the removal walk |
 | `fs-bucket-sync.spec.ts` | 29 | the wire format |
 | `fs-ignore.spec.ts` | 28 | glob ignore patterns, and every legacy prefix |
@@ -374,14 +383,14 @@ several suites generate cases in a loop.
 | `fs-plan-removals.spec.ts` | 23 | which removals may be applied |
 | `fs-agent-mass-delete-guard.spec.ts` | 16 | refusing a deletion that looks like a loss, and reporting it |
 | `fs-agent-concurrent-write.spec.ts` | 9 | two writes of one path must not blend — 200 rounds per assertion |
-| `fs-agent-stale-reconnect.spec.ts` | 13 | a peer reconnecting with a stale tree |
+| `fs-agent-stale-reconnect.spec.ts` | 17 | a peer reconnecting with a stale tree |
 | `fs-scanner-vanish.spec.ts` | 12 | an entry that vanishes mid-scan |
 | `fs-classify.spec.ts` | 11 | behind / ahead / fork / incomplete |
-| `fs-anti-entropy-level1.spec.ts` | 10 | the same decision, **enumerated** |
-| `fs-agent-tombstone-log.spec.ts` | 9 | what a restart remembers it deleted |
+| `fs-anti-entropy-level1.spec.ts` | 12 | the same decision, **enumerated** |
+| `fs-agent-tombstone-log.spec.ts` | 14 | what a restart remembers it deleted |
 | `fs-plan-join.spec.ts` | 9 | joining, decided before anything is written |
 | `fs-agent-incremental-restore.spec.ts` | 8 | a restore writes only what changed |
-| `fs-agent-locked-file.spec.ts` | 7 | a file held open by another process |
+| `fs-agent-locked-file.spec.ts` | 8 | a file held open by another process |
 | `fs-agent-inbound-verdict.spec.ts` | 7 | is an inbound ref news to this agent |
 | `fs-agent-anti-entropy.spec.ts` | 7 | the anti-entropy wiring |
 | `fs-ref-vs-content.spec.ts` | 6 | ref identity vs content identity |
@@ -395,14 +404,14 @@ several suites generate cases in a loop.
 | `blob-io.spec.ts` | 5 | storing a file as a blob |
 | `fs-agent-ancestry-warning.spec.ts` | 4 | a transport with no ancestry must say so |
 | `fs-divergence-is-content.spec.ts` | 4 | a divergence is a difference in CONTENT |
-| `fs-hostile-tree.spec.ts` | 4 | a peer's tree is not trusted with paths |
+| `fs-hostile-tree.spec.ts` | 7 | a peer's tree is not trusted with paths |
 | `fs-impossible-filename.spec.ts` | 4 | a path the filesystem refuses |
 | `fs-scanner-scan-coalescing.spec.ts` | 4 | a burst collapses into at most two passes |
 | `fs-agent-silent-joiner.spec.ts` | 4 | an agent with nothing to say does not speak |
 | `fs-stage-timings.spec.ts` | 4 | per-stage timings |
 | `fs-agent-authorship.spec.ts` | 3 | a node claims only what it changed |
 | `fs-agent-blob-stream.spec.ts` | 3 | a restore streams the blob |
-| `fs-clock-skew.spec.ts` | 3 | a file is visible whatever its timestamp says |
+| `fs-clock-skew.spec.ts` | 6 | a file is visible whatever its timestamp says |
 | `fs-disk-full.spec.ts` | 3 | a full disk |
 | `fs-scale.spec.ts` | 3 | scale and endurance |
 | `fs-slow-copy.spec.ts` | 3 | a file being written is not distributed half-done |

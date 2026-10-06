@@ -33,7 +33,7 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 // A push that names itself can never do that, so every deletion it carries is
 // refused by everyone it reaches. When the state being announced is the result
 // of a deletion, the deletion simply does not arrive — which is what the
-// folder-delta recipe reports as "was deleted but is still on node-A".
+// folder-delta scenario reports as "was deleted but is still on node-A".
 //
 // **The obvious mechanism is NOT the one.** The push takes its parent from
 // `_currentRef`, captured before the store, so an agent that has just applied
@@ -44,7 +44,7 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 //
 // So this is an INVARIANT test, not a reproduction. It holds the one property
 // that must be true of every push, on the one path where it can be driven
-// end-to-end, and it rules out the first hypothesis. The lab's five
+// end-to-end, and it rules out the first hypothesis. The field report's five
 // self-parented pushes in thirty-eight came from somewhere else, and finding
 // it needs the sender's own state logged at the moment it decides — which is
 // the next step, not a guess dressed as a fix.

@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.1.0]
+
+The edit chain becomes the sync mechanism. A folder's state is no longer a bare
+content hash passed between machines; it is a chain of Edits, each naming what
+changed, what was removed, which Edits it came from, and when. Every rule in the
+package now asks that chain instead of inferring an answer from what a folder
+happens to hold.
+
+### Breaking
+
+- **Every tree ref in the fleet changes.** Content identity fixes a canonical
+  child order and no longer includes file modification times — a modification
+  time does not survive a restore byte for byte, and on Windows regularly does
+  not, so the same bytes used to hash differently per machine and a node's
+  deletions were refused by everybody. Nothing is destroyed and no data moves,
+  but the fleet reads divergent until every machine has re-scanned. **Upgrade
+  machines together.**
+- **Announcements carry a chain head (`~H~`), not a bare tree ref.** A build
+  that does not speak it cannot take part, and there is no compatibility switch:
+  `FsAgentOptions.announceTreeRef` is removed.
+- `bucketSync` (additive reconciliation) is **on by default**.
+
+### A deletion is a stated fact
+
+A tree records what a folder holds, so an absence used to be read as a deletion
+— by the receiver, and then, when that was removed, by the sender on its behalf.
+Both are gone. A removal is only ever stated for a file this agent **watched**
+being deleted, and only a stated removal deletes anything anywhere.
+
+- Nothing prunes on a peer's authority. A received tree may add and may
+  overwrite; a file disappears when some machine has said so in the chain.
+- Removals are ordered by the chain's `timeId` and walked back through
+  `previous`, so a deletion made during a partition is still found on rejoin.
+- `ManifestEntry` carries `editedAt`, so an old tombstone cannot beat a newer
+  write to the same path.
+- The tombstone log is persisted in `.fsagent-state.json` and reloaded on start,
+  rather than cleared one announcement after the delete.
+
+### Repairs decide from reachability
+
+`antiEntropyDecision` asks the chain — `behind` → pull, `ahead` → push, `fork` →
+merge, a truncated walk → **`blocked`**, reported and not repaired. A node that
+is behind now **asks** rather than waiting to be told, which is what refills a
+machine whose folder was wiped. `ahead` no longer requires having authored the
+state, so a node that adopted a peer's tree can still propagate its own
+deletion.
+
+### Conflicts
+
+Two people saving one file get a three-way merge, a winner chosen on the chain's
+`timeId` rather than on whichever content hash sorts higher, the losing copy kept
+under a conflicted-copy name, and a conflict **signal** the caller can read.
+
+### Joining a network
+
+A folder with files and no history does not speak: it asks the network for a head
+and applies it before the filesystem. `planJoin` then puts every path in at most
+one of four buckets, deciding each against the chain — so a machine restored from
+a backup no longer pushes a month of deletions to the fleet, and files it holds
+that the history never named are kept as new work.
+
+### Other fixes
+
+- Two concurrent in-place writes no longer blend bytes; there is one
+  write-a-file module instead of three.
+- A copy still being written is held back on its first sight whatever its
+  timestamp says, so a stalled writer cannot get a truncated file published.
+- Ignore patterns accept globs.
+- Mass-delete refusals are reported through `FsAgent.refusedDeletions`, not only
+  logged, so a host application can diagnose a refusal it did not cause.
+- The package builds. `crypto` was not externalised, so `pnpm build` had never
+  produced a bundle on this line of work; the test run in `prebuild` hid it.
+
+### Documentation
+
+`README.api.md` is new and covers every export. `README.architecture.md`,
+`README.tests.md` and `README.public.md` are rewritten against the code — the old
+"Client A → Client B" flow described a mechanism this package no longer uses. The
+suite is 70 files and 916 scenarios at 100 % coverage, and `README.tests.md` says
+what they prove and what they cannot.
+
 ## [0.0.85]
 
 ### Reverts the 0.0.84 fork fix — it caused a livelock
@@ -22,7 +103,7 @@ can be discarded on a fork, deletions propagate, one side always yields.
 
 ### The defect is recorded, not forgotten
 
-`doc/known-limits.md` gains the fork case in full, and the decision test now pins
+the known-constraints register gains the fork case in full, and the decision test now pins
 the WRONG answer with both halves of the trap written down — the fix and what it
 cost — so the next person does not rediscover either.
 
@@ -63,7 +144,7 @@ a node holding new work conclude it was behind.
 const statesIAmIn = authored ? [currentRef] : [currentRef, lastAppliedRef];
 ```
 
-The lab case now falls through to the deletion check and then to `merge` — both
+The measured case now falls through to the deletion check and then to `merge` — both
 sides kept — or to `push` when the hub sits on the very state our work was made
 from. Never a silent discard.
 
@@ -88,7 +169,7 @@ a genuine forward is still pulled.
  the whole matching ref log in one `socket.emit` — 124 kB for a full log, 203 kB
  with predecessors); db bounds the RATE at which one is asked for (an answer is
  processed ref by ref, so any ref in it that jumped another sender's sequence
- asked again). The cloud EventHub served 858 answers in 18.2 seconds before
+ asked again). A cloud relay served 858 answers in 18.2 seconds before
  dying of `Reached heap limit` at 990 MB. Either half survives that; together a
  reconnect costs a couple of 25 kB messages.
 
@@ -131,13 +212,13 @@ pulls. Before that release it returned a deserialised `{}` over any real socket 
 
 ### Changed
 
-- **The simultaneous-write contest now measures what the One Client ships, and
+- **The simultaneous-write contest now measures what a host client ships, and
  passes.** `simultaneous-edit.spec.ts` built its agents without a hub state
  beacon, so the anti-entropy had no announcement to compare against and could
  never repair what three simultaneous writes left behind; the shipped case was
  therefore encoded as an expected failure. With the beacon on, both cases
  converge — five rounds, three runs, every round on one version within
- 18-23 s. `doc/known-limits.md` records what this does and does not fix: the
+ 18-23 s. the known-constraints register records what this does and does not fix: the
  divergence is repaired, the choice of winner is still arrival order.
 
 ## [Unreleased]

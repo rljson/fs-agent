@@ -24,7 +24,7 @@ import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
  * the network to agree again with nobody doing anything.
  *
  * Every change reaches a peer as exactly one message, and nothing ever asked
- * afterwards whether it arrived. The lab's defects of the last months — the
+ * afterwards whether it arrived. The field defects of the last months — the
  * lost deletion, the node that went quiet, the forward that never landed —
  * all end the same way: two machines on two states, permanently, with nothing
  * saying so. This is the test that would have caught nearly all of them,

@@ -138,10 +138,10 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     agent.scanner.stopWatch();
   });
 
-  // The third outcome, and the one a real fleet measured. A node in the middle of
-  // catching up holds a SUBSET of the sender's tree, and announcing that is how
-  // a burst turns into a rollback: trees arrived at the writer carrying 1008
-  // files, then 892, then 907, every one stamped newestFromSender=true —
+  // The third outcome, and the one a real fleet measured. A node in the middle
+  // of catching up holds a SUBSET of the sender's tree, and announcing that is
+  // how a burst turns into a rollback: trees arrived at the writer carrying
+  // 1008 files, then 892, then 907, every one stamped newestFromSender=true —
   // correctly, because they came from different peers, each monotonic for
   // itself. Nothing downstream could tell "still catching up" from "deleted
   // 116 files".
@@ -248,8 +248,8 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   });
 
   // The opposite failure to everything else in this file, and the last one the
-  // lab found: not a stale tree deleting current work, but a CURRENT tree
-  // deleting NEWER work.
+  // field report found: not a stale tree deleting current work, but a CURRENT
+  // tree deleting NEWER work.
   //
   // Measured on four machines with 1200 files converged — a file was created
   // and vanished from every node including the one that created it, one run in
@@ -266,8 +266,8 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   //
   // That prune ran on the peer-apply path, and the peer-apply path no longer
   // prunes: an absence is not a deletion, and a real one arrives stated in the
-  // chain. The only caller left is a deliberate `restore({ cleanTarget: true })`
-  // — somebody saying "make this folder be exactly this tree" — and
+  // chain. The only caller left is a deliberate `restore({ cleanTarget: true
+  // })` — somebody saying "make this folder be exactly this tree" — and
   // second-guessing that with a guard about what peers know would be answering
   // a question nobody asked. The test below covers what that caller gets.
   it('prunes exactly what the tree lacks, for a caller who asked for that', async () => {

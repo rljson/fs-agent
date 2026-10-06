@@ -8,8 +8,8 @@
 // Q3 BACKLOG X3 (Kritisch): glob patterns in the ignore list.
 //
 // The old rule was `name === pattern || name.startsWith(pattern)`, which
-// cannot express an extension — and the One Client has shipped `'*.log'` in
-// its default list all along, matching nothing. X3's own words: *"Die
+// cannot express an extension — and the host application has shipped `'*.log'`
+// in its default list all along, matching nothing. X3's own words: *"Die
 // gelieferte Liste wäre nicht anwendbar"*.
 //
 // Two halves to prove, and the second matters more than the first:

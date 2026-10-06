@@ -122,17 +122,17 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
 
   // The same rule, on the configuration a host client actually runs.
   //
-  // **The lab incident of 2026-09-19.** Nine files were written into the synced
+  // **A field incident.** Nine files were written into the synced
   // folder on one machine while it was — unknowingly — attached to a server
   // that had lost the hub election. Thirty-seven minutes later those files were
   // deleted from the machine that wrote them, by a peer pushing the older,
   // empty state of the folder without declaring what it descended from.
   //
   // The rule above would have refused that prune. It did not run, because it
-  // was gated on `resolveConflicts`, which a One Client deliberately leaves off
-  // — an earlier attempt to turn the whole merge on dropped the four-node lab
-  // to 4 of 11. But the client DOES set `causalOrdering`, so ancestry is on the
-  // wire and its absence means exactly what the rule says it means.
+  // was gated on `resolveConflicts`, which a host client deliberately leaves
+  // off — an earlier attempt to turn the whole merge on dropped the four-node
+  // fleet to 4 of 11. But the client DOES set `causalOrdering`, so ancestry is
+  // on the wire and its absence means exactly what the rule says it means.
   it('never prunes on a no-ancestry push from a causally-ordered peer', async () => {
     const db = await makeDb();
     const bs = new BsMem();
@@ -147,7 +147,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
       await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
-    // A One Client's fs-client, exactly: conflict resolution OFF, causal
+    // A host client, exactly: conflict resolution OFF, causal
     // ordering ON.
     const agent = new FsAgent(targetDir, bs, {
       ...ORIGIN_FIXTURE,
@@ -318,7 +318,8 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     // are "real, just old" — which is wrong when the stale state predates a
     // deletion: its files include the one just deleted, so the deletion is
     // undone BY ADDITION. Measured: with the additive version, a periodic
-    // re-advertisement made a delete-propagation recipe fail two runs in four.
+    // re-advertisement made a delete-propagation scenario fail two runs in
+    // four.
     it('is ignored outright — it neither adds nor deletes', async () => {
       const db = await makeDb();
       const bs = new BsMem();
@@ -412,7 +413,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     // state — because *"mtimes do not always survive a restore byte for byte,
     // and on Windows they regularly do not"*, so a receiver's re-scan of
     // applied content produced a different ref. Measured at the time: with
-    // `_currentRef` alone, three lab runs in four converged perfectly on
+    // `_currentRef` alone, three runs in four converged perfectly on
     // 1 201 files and none of them could delete one.
     //
     // Since mtime left the content identity there is ONE name. That is what

@@ -107,7 +107,8 @@ await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
 const agent = new FsAgent('./my-project', new BsMem(), {
   ignore: ['node_modules', '.git', 'dist', '*.log'],
 
-  // Reconciles two edits to one file and keeps both versions. The One Client
+  // Reconciles two edits to one file and keeps both versions. The host
+  // application
   // sets this; a hub deliberately leaves it off to stay a dumb relay. Off,
   // a conflicting edit is never merged.
   resolveConflicts: true,
@@ -144,12 +145,12 @@ agent.dispose();
 
 ### Against a `Client` from `@rljson/server`
 
-What the One Client does, and **the path that defaults to the configuration
-above**. `fromClient` builds the `Db`, the `Connector` and the blob store from
-an initialised client, adds two convenience wrappers, and defaults
-`resolveConflicts`, `causalOrdering` and `includeClientIdentity` to `true`
-because that is the only mode integrated into the product and measured in the
-lab. Your own values still win if you pass them.
+What the host application does, and **the path that defaults to the
+configuration above**. `fromClient` builds the `Db`, the `Connector` and the
+blob store from an initialised client, adds two convenience wrappers, and
+defaults `resolveConflicts`, `causalOrdering` and `includeClientIdentity` to
+`true`, because that is the only mode this package measures end to end. Your own
+values still win if you pass them.
 
 `new FsAgent(...)` keeps the primitive defaults — it is the building block, and
 the quick start above sets them explicitly for exactly that reason.
@@ -398,15 +399,14 @@ rewriting a whole catalogue.
   come back from the history on the next sync.
 
   This is a deliberate trade, and the reason is worth knowing. A removal is
-  only ever announced for a file the agent WATCHED being deleted. It used to be
-  announced for any file missing from the folder — which is the same "an
-  absence is a deletion" inference the edit chain exists to remove, surviving
-  on the sending side: the receiver stopped guessing, and the sender went on
-  guessing on its behalf. The chain then carried that guess as a stated,
-  ordered, authoritative removal, and every peer obeyed it — correctly, because
+  only ever announced for a file the agent WATCHED being deleted — never for
+  any file merely missing from the folder. Announcing an absence is the same "an
+  absence is a deletion" inference the edit chain exists to remove, just moved
+  to the sending side, and the chain would then carry that guess as a stated,
+  ordered, authoritative removal that every peer obeys — correctly, because
   obeying a stated removal is the whole design. A node whose idea of its own
-  last state had drifted could therefore tell the entire fleet to delete files
-  nobody had touched.
+  last state had drifted could tell the entire fleet to delete files nobody had
+  touched.
 
   So the asymmetry is chosen on purpose: a file that comes back is visible and
   recoverable — delete it again with the client running and it propagates

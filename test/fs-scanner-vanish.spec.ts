@@ -45,8 +45,8 @@ vi.mock('fs/promises', async (importOriginal) => {
   return {
     ...actual,
     stat: wrap('stat', actual.stat as never),
-    // `open`, not `readFile`: the scanner opens a file's content now, so that is
-    // where a vanished file announces itself — and holding the descriptor is
+    // `open`, not `readFile`: the scanner opens a file's content now, so that
+    // is where a vanished file announces itself — and holding the descriptor is
     // what keeps a delete from truncating the transfer that follows.
     open: wrap('open', actual.open as never),
     readdir: wrap('readdir', actual.readdir as never),
@@ -152,8 +152,8 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
   //
   // A tree is applied by peers as authoritative. Publish one that merely MISSED
   // a file and every other machine reads it as a file DELETED. Tolerating the
-  // race without this turned a four-node concurrency recipe from green into two
-  // failures in three runs — the writer kept its file, every peer lost it.
+  // race without this turned a four-node concurrency scenario from green into
+  // two failures in three runs — the writer kept its file, every peer lost it.
   describe('never publishes a partial picture', () => {
     it('keeps the last complete tree when a later scan skips an entry', async () => {
       await writeFile(join(testDir, 'a.txt'), 'a');

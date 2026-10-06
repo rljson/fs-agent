@@ -396,7 +396,7 @@ export class FsScanner {
       // reads as a file DELETED, on every other machine.
       //
       // Measured, not theorised: making the walk survive without this guard
-      // turned a four-node concurrency recipe from green into two failures in
+      // turned a four-node concurrency scenario from green into two failures in
       // three runs, with the writer keeping its file and every peer losing it.
       //
       // So keep the last picture that WAS complete. Nothing is lost — the
@@ -603,7 +603,8 @@ export class FsScanner {
           //
           // That is not exotic. Clock skew between these machines is a known
           // problem in its own right (`the weakness register` F7/S3/M6 —
-          // *"the host application lässt Rechner nur auf BIOS-Uhren hören"*), an archive can
+          // the host application lets a machine take its time from the BIOS
+          // clock alone), an archive can
           // carry any timestamp it likes, and a file copied from a machine
           // running fast arrives dated ahead. None of those is a file being
           // written, so none of them may be held back.
@@ -611,31 +612,59 @@ export class FsScanner {
           const inTheFuture = mtimeMs > now;
           const seen = this._growing.get(childRelPath);
           const growing = seen !== undefined && seen !== childStats.size;
-          if (growing) {
-            this._growing.set(childRelPath, childStats.size);
-          } else {
-            this._growing.delete(childRelPath);
-          }
 
-          // A file this scanner has never completed a scan with, and which was
-          // touched a moment ago.
+          // A file this scanner has never completed a scan with, and for which
+          // it has not recorded a size either.
           //
           // This is the only condition that can catch the FIRST sight of a
           // copy in progress, and the growth check above cannot: a file on its
           // way to 24 MB is 512 KB at some point, so no size threshold
           // excludes it and no second observation exists yet. It is also the
-          // only half that costs anything — a newly written file waits up to
-          // `settleMs` before it can be announced.
+          // only half that costs anything — a newly seen file is published one
+          // scan later than it otherwise would be.
           //
           // Worth it: without it a large copy is announced truncated and
           // *"dort gilt sie als gültig"* on every peer — `the weakness register`
           // D3, rated kritisch. A file being MODIFIED pays nothing, because
           // the last scan knew it; only the first sight of a new one waits.
-          const firstSight =
+          //
+          // Two signals, and the file waits if EITHER fires. Each one alone
+          // has a hole the other covers.
+          //
+          // `touchedJustNow` — a timestamp inside `settleMs` — is the strong
+          // one while a copy is actually writing: its mtime keeps moving, so
+          // the file is deferred scan after scan for as long as the writing
+          // lasts. Its hole is a writer that STALLS longer than the window. A
+          // loaded machine, a slow disk or a network share can stall one
+          // `fsync` past 100 ms, and the file is then seen "cold" — a
+          // timestamp that looks finished, a size that has not moved since the
+          // last scan — and published truncated. Measured at roughly one run
+          // in ten of `fs-clock-skew.spec.ts`.
+          //
+          // `seen === undefined` covers that hole with no clock term at all:
+          // the very first sight of a file this scanner has never read waits
+          // once, whatever its timestamp says. It terminates through
+          // `_growing` rather than through a window — the first sight records
+          // the size, so the next scan has `seen !== undefined` and reads the
+          // file if its size has stopped moving.
+          //
+          // Neither replaces the other. Dropping the window and keeping only
+          // the first sight was measured too, and it is WORSE: it leaves a
+          // copy in progress with only the size comparison to protect it, and
+          // one stalled `fsync` between two scans then reads the file. Three
+          // truncated hashes of a 24 MB copy in one run, where the union gives
+          // none.
+          const neverRead = !this._blobCache.has(childRelPath);
+          const touchedJustNow =
             !inTheFuture &&
-            !this._blobCache.has(childRelPath) &&
             now - mtimeMs < (this._options.settleMs as number);
-          if (firstSight) this._growing.set(childRelPath, childStats.size);
+          const firstSight = neverRead && (touchedJustNow || seen === undefined);
+
+          if (growing || firstSight) {
+            this._growing.set(childRelPath, childStats.size);
+          } else {
+            this._growing.delete(childRelPath);
+          }
 
           // And only while WATCHING. A deferral is a promise to come back, and
           // only a watching scanner can keep it: a one-shot `extract()` or
@@ -849,7 +878,8 @@ export class FsScanner {
     // for over eight minutes across six merge repairs, logging "equivalent
     // content, skipping restore" every time. The apply path correctly saw
     // nothing to transfer; the anti-entropy correctly saw two refs; neither was
-    // wrong. See `PLAN-fs-edit-chain.md` §2.1b and `test/fs-ref-vs-content.spec.ts`.
+    // wrong. See `README.architecture.md`, "One Folder, One Ref", and
+    // `test/fs-ref-vs-content.spec.ts`.
     //
     // Sorting makes the ref a function of CONTENT alone, which is what a
     // content hash was always supposed to be.

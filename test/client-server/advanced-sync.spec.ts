@@ -238,7 +238,7 @@ describe('Advanced Sync Tests', () => {
     });
 
     it('should propagate a deletion to BOTH peers, not just one', async () => {
-      // The two-agent version of this passes. On the four-machine lab exactly
+      // The two-agent version of this passes. On a four-machine fleet exactly
       // one of three peers applied the deletion and the other two kept the
       // file, so a mesh reaches a ref by more paths than a pair does and the
       // dedup retirement has to cover all of them.

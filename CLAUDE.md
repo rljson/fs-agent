@@ -9,7 +9,7 @@ Synchronizes filesystem changes with RLJSON databases using tree structures and 
 - **Never work on an in-repo copy of a dependency.** If code belongs to an
   `@rljson/*` package, it is changed **in that package**, released, and consumed
   from the registry — never vendored into this repo's `src/`. A repo-local copy
-  forks silently. On 2026-09-10 a long-lived branch of `cos-one-client` carried
+  forks silently. A long-lived branch of a consuming application once carried
   359 lines written into a copy of `@rljson/mongo-agent` that `main` had deleted
   two days earlier; the branches could not be merged until that code was ported
   into the package and released from a third repository. Rule of thumb: a
@@ -296,7 +296,7 @@ pnpm publish
 | 4 | `@rljson/server` | `@rljson/rljson`, `@rljson/io`, `@rljson/bs`, `@rljson/db`, `@rljson/network` |
 | 5 | `@rljson/fs-agent` | all of the above |
 | 6 | `@rljson/mongo-agent` | all of the above |
-| 7 | consuming app (e.g. `cos-one-client`) | all of the above |
+| 7 | the consuming application | all of the above |
 
 After publishing an upstream package, each downstream package pins the new
 version EXPLICITLY, runs its own tests against it, and publishes from its own

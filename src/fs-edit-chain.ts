@@ -12,10 +12,10 @@
 // a state it held earlier re-derives that state's exact hash. "We returned to
 // an old state" and "we never left it" are literally the same string — which
 // is why two data-loss failures in opposite directions were measured on the
-// same day (`README.public.md`, "Known constraints"), and why neither could be fixed by reading
-// the anti-entropy decision more cleverly. A change that restores earlier
-// content is a NEW entry here with a new ref, so the ambiguity cannot occur
-// inside the chain.
+// same day (`README.public.md`, "Known constraints"), and why neither could be
+// fixed by reading the anti-entropy decision more cleverly. A change that
+// restores earlier content is a NEW entry here with a new ref, so the ambiguity
+// cannot occur inside the chain.
 //
 // WHAT IT RECORDS
 // One entry per folder-changing scan: the resulting tree ref, what changed,
@@ -46,7 +46,7 @@
 // Nothing yet, deliberately. This is written and announced to nobody, so the
 // fleet accumulates real chains before anything depends on their shape — they
 // are the fixtures the walk needs, and a week of production ancestry is worth
-// more than any fixture we could write. See `PLAN-fs-edit-chain.md` §13.6.
+// more than any fixture we could write.
 // .............................................................................
 
 import type { Db } from '@rljson/db';
@@ -127,12 +127,14 @@ export interface FsChainEntry {
 /**
  * Creates the three tables an fs chain needs, idempotently.
  *
- * **fs-agent creates its own tables.** The One Client creates the trees table
- * (`sl-server.ts`, `sl-client.ts`), and an agent that expected tables its host
- * had never created would fail at runtime on any node whose host is one release
- * behind — exactly the mixed-version case a rollout guarantees. `@rljson/db`'s
- * `createTable` is `createOrExtendTable`, so calling this on every init costs
- * nothing and removes the coupling rather than versioning it.
+ * **fs-agent creates its own tables.** The host application creates the trees
+ * table
+ * (in its own server and client entry points), and an agent that expected
+ * tables its host had never created would fail at runtime on any node whose
+ * host is one release behind — exactly the mixed-version case a rollout
+ * guarantees. `@rljson/db`'s `createTable` is `createOrExtendTable`, so calling
+ * this on every init costs nothing and removes the coupling rather than
+ * versioning it.
  * @param db - The route's database.
  * @param treeKey - The trees table key, e.g. `fileTree`.
  */
@@ -387,9 +389,9 @@ export class FsEditChain {
     // rather than taste. A running-minimum loop takes its "this one is older"
     // branch only when the rows arrive in an order that has an older row after
     // a newer one — so whether that branch is exercised depends on what the
-    // database happened to return. Measured: the same test covered it standalone
-    // and left it uncovered in the full suite, which is the 98.22 %/99.11 %
-    // pattern this repository has been bitten by before.
+    // database happened to return. Measured: the same test covered it
+    // standalone and left it uncovered in the full suite, which is the 98.22
+    // %/99.11 % pattern this repository has been bitten by before.
     //
     // `compareTimeId` is a total order, so the first element is the oldest
     // whatever order the rows come in, and there is no branch left to be lucky

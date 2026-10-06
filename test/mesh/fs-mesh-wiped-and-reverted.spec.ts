@@ -275,10 +275,10 @@ describe('a node comes back empty, or holding an older copy', () => {
   // WHAT WOULD ACTUALLY CLOSE IT is not a chain rule. It is the mass-delete
   // guard, which exists for exactly this and does not fire here: OLD removed
   // 2 of 2 files, far below `ALL_GONE_MIN_FILES`. A small folder has no
-  // protection at all, which is the same band recorded as J10b in
-  // the same scenario seen from the other side — and the approval path
-  // asks for is the product-level answer. Either a guard that works on small
-  // folders, or a trash, or a user who is asked.
+  // protection at all, which is the same band recorded as J10b in the same
+  // scenario seen from the other side. The answer is at product level, not
+  // here: either a guard that works on small folders, or a trash, or a user
+  // who is asked before a folder is emptied.
   //
   // THE FIELD SHAPE IS COVERED. A backup is restored while the agent is NOT
   // running, so that node JOINS, and `planJoin` renames every path the

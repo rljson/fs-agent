@@ -9,12 +9,13 @@
 //
 // The rule used to be `name === pattern || name.startsWith(pattern)`, which
 // cannot express a file EXTENSION: `*.exe` matches nothing, because no file is
-// called `*.exe` and none begins with it. The One Client has shipped `'*.log'`
-// in its default ignore list all along — a line that has never had any effect —
-// and `ensureSystemIgnores` in that package actively STRIPS `~$*`, `~*.tmp` and
-// `.~lock.*` from older configs, with the comment *"FsScanner uses startsWith,
-// so '~$*' is a literal prefix that never matches anything useful"*. Somebody
-// wrote globs, they did nothing, and the workaround was to delete them.
+// called `*.exe` and none begins with it. The host application has shipped
+// `'*.log'` in its default ignore list all along — a line that has never had
+// any effect — and `ensureSystemIgnores` in that package actively STRIPS `~$*`,
+// `~*.tmp` and `.~lock.*` from older configs, with the comment *"FsScanner uses
+// startsWith, so '~$*' is a literal prefix that never matches anything
+// useful"*. Somebody wrote globs, they did nothing, and the workaround was to
+// delete them.
 //
 // Q3 backlog X3, Kritisch: *"Die gelieferte Liste wäre nicht anwendbar"* — the
 // ignore list a deployment is given cannot be applied at all.

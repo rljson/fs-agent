@@ -691,7 +691,7 @@ describe('FsScanner', () => {
       // fires, while no single pause ever lasts long enough to look stuck —
       // every rescan is dropped, and the stuck threshold is never reached.
       // The node stays silent about its own write for as long as the traffic
-      // keeps up, which is what turned a 3s recipe into a 121s timeout that
+      // keeps up, which is what turned a 3s scenario into a 121s timeout that
       // converged once a real fleet went quiet.
       //
       // Remembering the drop ends that: the next resume rescans, whatever the

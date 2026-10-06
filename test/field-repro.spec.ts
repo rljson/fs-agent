@@ -7,7 +7,7 @@
 // .............................................................................
 // The register's own reproduction scripts, run verbatim.
 //
-// `cos-one-client/the weakness register` supplies two of these as code, with
+// the host application's weakness register supplies two of these as code, with
 // timings and the line that fails. They are followed exactly rather than
 // reinterpreted: the whole value of a field observation is that somebody wrote
 // down what they saw, and an approximation of it is a different test.
@@ -170,7 +170,7 @@ describe('the weakness register reproductions, verbatim', () => {
   // So this test asserts the invariant that holds with no ancestry at all —
   // the file is never lost from the NETWORK, only from its author — and the
   // per-node guarantee is asserted below, in the configuration the product
-  // actually ships. Which is the one that matters: a One Client sets
+  // actually ships. Which is the one that matters: a host client sets
   // `causalOrdering` on, and this bare shape is reachable only by turning it
   // off.
   // ...........................................................................
@@ -259,7 +259,7 @@ describe('the weakness register reproductions, verbatim', () => {
   }, 60_000);
 
   // ...........................................................................
-  // §3 again, with the configuration a One Client actually ships.
+  // §3 again, with the configuration a host client actually ships.
   //
   // The bare case above is the register's script, and it uses a `Connector`
   // with no `SyncConfig` — so no ancestry reaches the wire at all. The prune
@@ -270,8 +270,8 @@ describe('the weakness register reproductions, verbatim', () => {
   // So the bare case cannot be fixed by reasoning about ancestry — there is
   // none. What matters is whether the configuration the product ships is fixed,
   // and that is this test: `causalOrdering` and `includeClientIdentity` on,
-  // `resolveConflicts` on, exactly as `cos-one-client/src/config/
-  // fs-sync-options.ts` sets them.
+  // `resolveConflicts` on, exactly as the host application's sync
+  // configuration sets them.
   // ...........................................................................
   it('§3 in the shipped configuration: neither node loses its own file', async () => {
     const folderA = join(base, 'a');

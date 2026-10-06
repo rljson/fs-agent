@@ -1645,12 +1645,12 @@ describe('FsAgent — degradation when a dependency fails', () => {
   // ...........................................................................
   describe('answering a tree this node refuses to apply', () => {
     // A refusal is the one case where going quiet is actively harmful, and the
-    // lab forced the correction. The peer that sent the sparse tree is the one
-    // MISSING data; this node holds the fuller copy. Suppressing this node's
-    // advertisements leaves the sender stranded with nothing to catch up from,
-    // and with every node that has the files refusing its pushes the network
-    // livelocks — measured on four nodes, two of them sat at 5 and 15 of 121
-    // files and could not recover.
+    // field measurement forced the correction. The peer that sent the sparse
+    // tree is the one MISSING data; this node holds the fuller copy.
+    // Suppressing this node's advertisements leaves the sender stranded with
+    // nothing to catch up from, and with every node that has the files refusing
+    // its pushes the network livelocks — measured on four nodes, two of them
+    // sat at 5 and 15 of 121 files and could not recover.
     //
     // "Keeps talking about it" was aspirational for a while: the refusal only
     // stopped SUPPRESSING advertisements, and a node whose own content had not

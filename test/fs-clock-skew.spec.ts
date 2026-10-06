@@ -9,7 +9,8 @@
 //
 // *"Solange die Reihenfolge an der Uhr hängt, entscheidet eine falsch gehende
 // Uhr darüber, wessen Arbeit zählt."* And the reason that is not hypothetical
-// here: *"the host application lässt Rechner nur auf BIOS-Uhren hören."*
+// here: the host application lets a machine take its time from the BIOS clock
+// alone.
 //
 // This is also a regression guard for a defect introduced by the settle rule
 // that keeps a half-copied file off the wire. Both halves of that rule compare

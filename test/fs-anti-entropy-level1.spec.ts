@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 // .............................................................................
-// LEVEL 1 — the decision function, exhaustively (PLAN-fs-edit-chain.md §7.3).
+// LEVEL 1 — the decision function, exhaustively.
 //
 // `antiEntropyDecision` is pure, so the whole of §1 is reachable here in
 // MILLISECONDS, with no folders and no sockets. That matters more than it

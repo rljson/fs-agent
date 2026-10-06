@@ -17,7 +17,7 @@
 // NO NEW SOCKETS, NO NEW ROUTES
 // Every message travels on the existing ref channel, prefixed, exactly as
 // `@rljson/mongo-agent` does it: *"distinguished from collection names because
-// a the host application collection name never starts with `~`"*. A tree ref is a content hash
+// a collection name never starts with `~`"*. A tree ref is a content hash
 // and never starts with `~` either, so the ref channel carries both without
 // ambiguity. This is also how the chain head travels (`~H~`), so the trick is
 // already load-bearing here.

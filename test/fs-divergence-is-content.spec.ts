@@ -10,19 +10,19 @@
 // There are two definitions of "the same folder" in this codebase, asked by
 // different halves of the sync:
 //
-//   the tree ref                     a hash of the whole tree   → am I diverged?
-//   `_treesHaveEquivalentContent`    path → blobId + dirs       → is there work?
+//   the tree ref                  a hash of the whole tree  → am I diverged?
+//   `_treesHaveEquivalentContent`  path → blobId + dirs      → is there work?
 //
 // While they can disagree, one of them is lying on every disagreement — and
-// Herman measured what that costs. After a forced 40 s partition both machines
-// held identical content (38 files, identical hashes) and one reported
-// `diverged: true` for over EIGHT MINUTES across six merge repairs, logging
-// "equivalent content, skipping restore" each time. The apply path correctly
-// concluded there was nothing to transfer; the anti-entropy correctly concluded
-// the refs differed; neither was wrong, and the system deadlocked against
-// itself by design. It costs nothing in data and it makes the divergence signal
-// — which every repair decision and the UI's "weicht ab" are built on —
-// permanently untrustworthy.
+// A field measurement recorded what that costs. After a forced 40 s partition
+// both machines held identical content (38 files, identical hashes) and one
+// reported `diverged: true` for over EIGHT MINUTES across six merge repairs,
+// logging "equivalent content, skipping restore" each time. The apply path
+// correctly concluded there was nothing to transfer; the anti-entropy correctly
+// concluded the refs differed; neither was wrong, and the system deadlocked
+// against itself by design. It costs nothing in data and it makes the
+// divergence signal — which every repair decision and the UI's "weicht ab" are
+// built on — permanently untrustworthy.
 //
 // The mechanism was that the apply path had ALREADY computed the answer and
 // kept it to itself. `agreedOn` existed, and only a completed bucket round fed

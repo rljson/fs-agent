@@ -47,7 +47,7 @@ describe('FsAgent — restore streams the blob', () => {
   it('restores a file larger than one socket message could carry', async () => {
     // The ceiling this lifts: a blob over the transport's 50 MB
     // `maxHttpBufferSize` could not be fetched at all, because the whole file
-    // was one message. One 63 MB file left three of four lab nodes permanently
+    // was one message. One 63 MB file left three of four machines permanently
     // holding a file the fourth had deleted, and the largest observed document
     // was 45.9 MB against the same cap.
     //
@@ -77,7 +77,8 @@ describe('FsAgent — restore streams the blob', () => {
   });
 
   it('treats a transfer that breaks off mid-file as an unfetchable blob', async () => {
-    // Attribution, and it matters to a person. A locked file is a the host application document
+    // Attribution, and it matters to a person. A locked file is a document the
+    // host application holds open
     // somebody still has open and the answer is "retry in a minute"; an
     // unreachable peer is an infrastructure answer. Before streaming, a fetch
     // failure could only happen before the write, so the two never mixed. Now a

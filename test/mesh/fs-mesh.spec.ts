@@ -38,8 +38,8 @@
 // that passes is a regression guard, and because narrowing the rule they
 // depend on is what caused T4's sibling failure.
 //
-// Read `PLAN-fs-edit-chain.md` §7 in the workspace root for why this exists
-// and `README.public.md`, "Known constraints" for the two failures it was written from.
+// Read `README.architecture.md` for why this exists, and `README.public.md`,
+// "Known constraints", for the two failures it was written from.
 //
 // Every scenario asserts on FOLDER CONTENTS AND STABILITY, never on refs. See
 // the header of `fs-mesh.ts`.
@@ -166,8 +166,8 @@ describe('fs mesh', () => {
   // Telling them apart needs the CHAIN: WP3 (walk and pull) and WP4 (decide
   // from reachability).
   //
-  // See `README.public.md`, "Known constraints" → "A node's own new work can be discarded when
-  // the hub has forked", and the pinned decision case in
+  // See `README.public.md`, "Known constraints" → "A node's own new work can be
+  // discarded when the hub has forked", and the pinned decision case in
   // `test/fs-anti-entropy.spec.ts`.
   // ...........................................................................
   it('T1: keeps a node’s own addition when the fleet forked meanwhile', async () => {
@@ -263,7 +263,7 @@ describe('fs mesh', () => {
   // T4 — the DELETING node is the one that was away.
   //
   // **GREEN, 8 of 8 on the default path.** The one scenario of the seven that
-  // reproduced a field data loss off-lab, and the measurement that mattered
+  // reproduced a field data loss in process, and the measurement that mattered
   // most through this whole plan.
   //
   // Its history, because the numbers are the argument:
@@ -295,8 +295,8 @@ describe('fs mesh', () => {
     // THE PARTITION MUST OUTLIVE THE MERGE'S REACH.
     //
     // §13.1b, measured on two real machines: a short partition on a small
-    // folder is a test of the MERGE, which already works — Herman's fork
-    // converged because his ancestor was resolvable. The field's did not,
+    // folder is a test of the MERGE, which already works — the field report's
+    // fork converged because his ancestor was resolvable. The field's did not,
     // because the divergence outlived the grace period and a `pull` repair
     // bypassed the merge entirely. **The trigger is scale and timing, not
     // topology.**
@@ -402,8 +402,8 @@ describe('fs mesh', () => {
   // measurement says is that its absence is a SCALE effect, not a logic one:
   // 400 files settle inside a single scan, so no peer ever sees the partial
   // state. Held at 400 rather than the plan's 1 200 so it runs in the ordinary
-  // suite; the a production folder-scale measurement, the memory budget and the gate all
-  // belong to WP5, which is where a number here would be meaningful.
+  // suite; a production-scale measurement, the memory budget and the gate all
+  // belong elsewhere, which is where a number here would be meaningful.
   //
   // Kept as a regression guard: it is the only scenario that would notice a
   // cold start deadlocking.

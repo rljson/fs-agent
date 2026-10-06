@@ -1477,7 +1477,7 @@ describe('FsAgent', () => {
       // used to abandon the whole tree. Nothing else in it was written and
       // `_pruneExtraneous` never ran, so no deletion the tree carried was
       // applied — one 63 MB file (above the 50 MB socket cap) left three of
-      // four lab nodes permanently holding a file the fourth had deleted.
+      // four machines permanently holding a file the fourth had deleted.
       const io = new IoMem();
       await io.init();
       const db = new Db(io);

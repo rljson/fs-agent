@@ -16,7 +16,7 @@
 // paths are: one has to delete a file to make room for a directory, the other
 // has to remove a whole subtree to make room for a file.
 //
-// It is not an exotic shape. A user replaces `Projekte` (a stray file) with the
+// It is not an exotic shape. A user replaces `Reports` (a stray file) with the
 // folder it should have been; an export writes a single `.PRJ` where a `.PRJZ`
 // directory used to be unpacked. And the register's own D5 note applies: to
 // this system such a change is "delete everything and re-add", which is the

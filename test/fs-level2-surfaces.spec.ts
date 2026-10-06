@@ -157,7 +157,7 @@ describe('level 2 — surfaces', () => {
   // S3 — the chain is readable.
   //
   // GREEN as of WP1a for a node's own entries. §7.6.5 asks for one more thing
-  // before the level-4 `chain-is-complete` recipe can be written: the same
+  // before the level-4 `chain-is-complete` scenario can be written: the same
   // read exposed on the node API. That is not this level's job.
   // ...........................................................................
   it('S3 GUARD: each entry’s ref, predecessors and locality are readable', async () => {

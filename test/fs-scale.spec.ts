@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 // .............................................................................
-// V2/D8 and E2/T1 — the two measurements that need time, not a lab.
+// V2/D8 and E2/T1 — the two measurements that need time, not a fleet.
 //
 // D8: *"Jede Änderung rechnet den ganzen Ordner durch, alle 5 Sekunden noch
 // einmal. Erster Start am echten Katalog rund 48 Minuten."*
@@ -105,7 +105,7 @@ describe('scale and endurance', () => {
       reads++;
       return realSetBlob(content);
     };
-    // A cache path, because that is what a One Client should be configured
+    // A cache path, because that is what a host client should be configured
     // with — and without it the reuse is unavailable, which is worth knowing
     // as its own fact (see the GUARD below).
     const agent = new FsAgent(dir, bs, {

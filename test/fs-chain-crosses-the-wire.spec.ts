@@ -21,7 +21,7 @@
 // work first.
 //
 // Real `Server`, real `Client`, real socket pair, real `IoMulti` — the wiring
-// the One Client ships. A stub that served rows from a shared store would
+// the host application ships. A stub that served rows from a shared store would
 // answer the wrong question.
 // .............................................................................
 

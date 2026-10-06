@@ -23,7 +23,7 @@ import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
  * Every existing test of "both clients modify the same file" is sequential on
  * purpose — *A writes, wait for convergence, then B writes* — and says so. So
  * the case a real fleet actually fails is the one nothing here covers: the
- * `conflict-resolution` recipe writes from every participant at once and then
+ * `conflict-resolution` scenario writes from every participant at once and then
  * requires that all of them end on the same content, whichever version wins.
  *
  * Measured on four machines, 2026-09-19:
@@ -35,18 +35,18 @@ import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
  *
  * The configuration below is the one a host client ships:
  * `causalOrdering` on, `resolveConflicts` OFF. That gate is deliberate (turning
- * the merge on once dropped a real fleet to 4 of 11), and what this test exists to
- * establish is what it COSTS.
+ * the merge on once dropped a real fleet to 4 of 11), and what this test exists
+ * to establish is what it COSTS.
  *
  * **Since an earlier change it costs nothing here.** Both cases converge, the shipped one
  * included — because the hub now announces what it holds (the state beacon) and
  * the anti-entropy repairs a node that disagrees with it for longer than the
- * grace period. Measured 2026-09-28: five rounds, three runs, every round on one
- * version within 18-23 s.
+ * grace period. Measured 2026-09-28: five rounds, three runs, every round on
+ * one version within 18-23 s.
  *
- * What is NOT repaired, and is still written down in `README.public.md`, "Known constraints": WHO
- * wins. The winner is the last advertisement to arrive, not the later save.
- * Convergence is the promise; "the newer edit survives" is not.
+ * What is NOT repaired, and is still written down in `README.public.md`, "Known
+ * constraints": WHO wins. The winner is the last advertisement to arrive, not
+ * the later save. Convergence is the promise; "the newer edit survives" is not.
  */
 
 /**
@@ -73,7 +73,7 @@ interface Node {
 
 describe.each([
   { merge: true, label: 'with conflict resolution' },
-  { merge: false, label: 'without it — as a One Client ships' },
+  { merge: false, label: 'without it — as a host client ships' },
 ])('three clients writing the same file at once, $label', ({ merge }) => {
   // Its own directory per case: two describes sharing one would have each
   // one's `afterEach` deleting the other's folders.
@@ -93,7 +93,7 @@ describe.each([
     const serverIo = new IoMem();
     await serverIo.init();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-    // The hub announces what it holds — the state beacon a One Client hub
+    // The hub announces what it holds — the state beacon a host client hub
     // ships (30 s there; 500 ms here so five rounds stay a test). Without an
     // announcement the anti-entropy has nothing to compare its own state
     // against, which is why this contest used to end stuck.
@@ -169,11 +169,12 @@ describe.each([
       }),
     );
 
-  // BOTH CASES CONVERGE. The second one did not until an earlier change: without
-  // `resolveConflicts` three simultaneous writes settled on three different
-  // versions and stayed there, measured on four machines on 2026-09-19, and it
-  // was committed here as `it.fails` — green while the body diverged, red the
-  // day it stopped. That is what happened, so the inversion is gone.
+  // BOTH CASES CONVERGE. The second one did not until an earlier change:
+  // without `resolveConflicts` three simultaneous writes settled on three
+  // different versions and stayed there, measured on four machines on
+  // 2026-09-19, and it was committed here as `it.fails` — green while the body
+  // diverged, red the day it stopped. That is what happened, so the inversion
+  // is gone.
   //
   // The anti-entropy is what repairs it: each node notices it disagrees with
   // the hub for longer than the grace period and pulls, so the contest ends on
@@ -187,7 +188,7 @@ describe.each([
     // writes again. Nothing else touched the file, so the second version must
     // reach every peer — there is no disagreement to resolve.
     //
-    // The lab's `content-variety` recipe does exactly this (`shrink.txt`:
+    // The `content-variety` scenario does exactly this (`shrink.txt`:
     // "long original content here", converge, then "tiny") and reported, with
     // the merge enabled on the sandbox route:
     //
@@ -198,10 +199,10 @@ describe.each([
     // already replaced.
     //
     // **It does not reproduce here**, with or without the merge — so whatever
-    // a real fleet hit needs more than two sequential writes. The recipe writes
-    // five files first, one of them 200 KB, and the second edit lands while
-    // that is still moving. This test stays as the invariant it asserts: a
-    // lone writer's second edit must reach every peer, because nothing
+    // a real fleet hit needs more than two sequential writes. The scenario
+    // writes five files first, one of them 200 KB, and the second edit lands
+    // while that is still moving. This test stays as the invariant it asserts:
+    // a lone writer's second edit must reach every peer, because nothing
     // competed for it. If that ever stops being true in THIS shape, it is a
     // much simpler bug than the one on a real fleet.
     const writer = nodes[0]!;

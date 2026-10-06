@@ -5,14 +5,14 @@
 // found in the LICENSE file in the root of this package.
 
 // .............................................................................
-// The field defects from `cos-one-client/the weakness register`, reduced.
+// The field defects from the host application's weakness register, reduced.
 //
 // WHY THIS FILE EXISTS SEPARATELY
-// `fs-mesh.spec.ts` holds the scenarios `PLAN-fs-edit-chain.md` named, and the
-// plan was written from two incidents on one day. The One Client's register is
-// the longer list — sixteen entries, several REPRODUCED more than once, with
-// machine names and frequencies against them — and four of its filesystem
-// entries were not covered by anything here.
+// `fs-mesh.spec.ts` holds the scenarios the edit-chain plan named, and that
+// plan was written from two incidents on one day. The host application's
+// register is the longer list — sixteen entries, several REPRODUCED more than
+// once, with machine names and frequencies against them — and four of its
+// filesystem entries were not covered by anything here.
 //
 // Each test below names its register entry, its measured frequency, and the
 // reduction the register itself asked for. Where the register supplies a
@@ -28,7 +28,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { CONFLICT_LOG_FILE } from '../../src/fs-agent.ts';
 import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
-describe('field defects, reduced off-lab', () => {
+describe('field defects, reduced in process', () => {
   let mesh: FsMesh | undefined;
 
   const root = (name: string) => join(process.cwd(), `test-temp-field-${name}`);
@@ -49,8 +49,8 @@ describe('field defects, reduced off-lab', () => {
   //
   // The register is emphatic that this is not the same finding as the
   // file-level one it had just closed: *"that one ran `folder-delta` and
-  // `projekte-shape`, which delete files IN PLACE. This deletes a DIRECTORY
-  // with a file inside it. A rename or a directory removal is 'delete
+  // the large-folder shape, which delete files IN PLACE. This deletes a
+  // DIRECTORY with a file inside it. A rename or a directory removal is 'delete
   // everything and re-add' to this system, and nothing in the 20-of-20 run
   // covered that case. The old measurement is not wrong; it measured something
   // narrower than the entry claimed."*
@@ -61,8 +61,8 @@ describe('field defects, reduced off-lab', () => {
   // The reduction is the register's own: *"create `dir/inner/a.txt`, sync,
   // remove the directory, assert the peer's tree loses it."* It asks for two
   // nodes; this uses FOUR, and deletes on the LAST of them, because that is
-  // the detail a real fleet log turns on — *"the deleting node was the fourth, so
-  // the deletion was applied locally and reached nobody"*.
+  // the detail a real fleet log turns on — *"the deleting node was the fourth,
+  // so the deletion was applied locally and reached nobody"*.
   //
   // The difference is not cosmetic and was measured: at two nodes this went
   // 8 of 8 GREEN against the broken code and red only once in a longer run, so
@@ -122,7 +122,7 @@ describe('field defects, reduced off-lab', () => {
   // deliberately SEQUENTIAL; its comment reads 'Sequential to avoid sync
   // contention with 3 clients'. Simultaneity, which is the entire risk, was
   // never exercised."* Still true of this repo until now — and it is the
-  // `simultaneous-adds-both-survive` recipe the plan listed and never wrote.
+  // `simultaneous-adds-both-survive` scenario the plan listed and never wrote.
   //
   // No partition here, deliberately. This is the ordinary case.
   // ...........................................................................
@@ -200,7 +200,7 @@ describe('field defects, reduced off-lab', () => {
   //
   // Four nodes, four different trees, each refusing the others' as a mass
   // delete — and the refusal is SYMMETRIC, so nothing propagates while it
-  // lasts and every recipe fails for a reason unrelated to what it tests. It
+  // lasts and every scenario fails for a reason unrelated to what it tests. It
   // did not resolve on its own; it was cleared by hand.
   //
   // *"Why this matters beyond a real fleet. The provoking condition was leftover
@@ -279,7 +279,7 @@ describe('field defects, reduced off-lab', () => {
     });
     expect((await mesh.converged()).converged).toBe(true);
 
-    // The lab's shape exactly: every node edits the same path at once, each
+    // The field shape exactly: every node edits the same path at once, each
     // with content only it has.
     await Promise.all(
       names.map((name) =>
@@ -293,8 +293,8 @@ describe('field defects, reduced off-lab', () => {
     });
     expect(result.converged, whyNot(result)).toBe(true);
 
-    // Stable file LISTS are not agreement — a real fleet's four nodes all listed
-    // the same one file and held three different versions of it.
+    // Stable file LISTS are not agreement — a real fleet's four nodes all
+    // listed the same one file and held three different versions of it.
     const contents = await Promise.all(
       names.map((name) => mesh!.node(name).read('conflict/shared.txt')),
     );
@@ -316,7 +316,7 @@ describe('field defects, reduced off-lab', () => {
   //   file "churn-survivor.txt" not found on node-C
   //     [node-A=ok, node-D=ok, node-B=ok, node-C=missing]
   //
-  // *"The recipe's other assertions pass — the watcher survives the churn, a
+  // *"The scenario's other assertions pass — the watcher survives the churn, a
   // later write reaches every peer, no churned file is left behind. Only the
   // file written DURING the churn goes missing, on one node."*
   //
@@ -347,7 +347,7 @@ describe('field defects, reduced off-lab', () => {
 
     // Churn and survivor interleaved, not sequenced: the survivor lands while
     // scans are in flight, which is the whole point. Writing it first or last
-    // tests nothing — the recipe's own "a later write reaches every peer"
+    // tests nothing — the scenario's own "a later write reaches every peer"
     // assertion already passed on a real fleet.
     const churning = (async () => {
       for (let i = 0; i < CHURN; i++) {
@@ -397,7 +397,7 @@ describe('field defects, reduced off-lab', () => {
   // folder — deliberately under the mass-delete guard's threshold, so a red is
   // about ordering rather than the guard refusing a catastrophe."*
   //
-  // The sizes here are the recipe's, not reduced: 100 of 400 is 25%, under
+  // The sizes here are the scenario's, not reduced: 100 of 400 is 25%, under
   // `MASS_DELETE_MAX_RATIO`, and the point of the test evaporates if the guard
   // is what stops it. The register also asks for the sending-side count —
   // *"if 100 unlinks produce fewer than 100 removals across the announced
@@ -450,7 +450,7 @@ describe('field defects, reduced off-lab', () => {
   //   file "held-open.dbf" not found on node-B
   //     [node-B=missing, node-D=ok, node-A=missing, node-C=missing]
   //
-  // *"The recipe exists to prove a file held open by another process does not
+  // *"The scenario exists to prove a file held open by another process does not
   // block the rest of sync. It reached one node of four."*
   //
   // The register's first question is whether the existing pattern already
@@ -522,7 +522,7 @@ describe('field defects, reduced off-lab', () => {
   // Not one of the four nodes, after two minutes of polling. *"The contrast
   // that makes this interesting: `large-file-near-cap` PASSED in the same run,
   // in 17.9 s. So a file close to the transport limit crossed fine while this
-  // one reached nobody at all"* — the recipe's 8 MB was always INSIDE the
+  // one reached nobody at all"* — the scenario's 8 MB was always INSIDE the
   // 50 MB cap, so size alone never explained it.
   //
   // And §2, "an oversized file leaves residue that is never cleaned up", which
@@ -536,7 +536,7 @@ describe('field defects, reduced off-lab', () => {
   // measured pass, so this measures it, and the two halves belong in one test
   // because the second only means anything if the first worked.
   //
-  // 8 MB is the recipe's own size, kept rather than reduced.
+  // 8 MB is the scenario's own size, kept rather than reduced.
   // ...........................................................................
   it('F9: a multi-megabyte file crosses, and deleting it leaves no residue', async () => {
     const MB = 8;

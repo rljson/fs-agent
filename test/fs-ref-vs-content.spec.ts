@@ -13,8 +13,9 @@
 //   the tree ref                     the whole tree row hash   →  am I diverged?
 //   `_treesHaveEquivalentContent`    path → blobId + dirs      →  is there work?
 //
-// While they can disagree, one of them is lying on every disagreement. Herman
-// measured what that costs: after a forced 40 s partition both machines held
+// While they can disagree, one of them is lying on every disagreement, and a
+// field measurement recorded what that costs: after a forced 40 s partition
+// both machines held
 // identical content — 38 files, same hashes — and one reported `diverged: true`
 // for over EIGHT MINUTES across six merge repairs, logging "equivalent content,
 // skipping restore" each time. The apply path correctly concluded there was

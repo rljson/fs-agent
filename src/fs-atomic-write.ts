@@ -106,7 +106,7 @@ export const atomicWriteFile = async (
  * cost 500 MB of Buffer on the receiving agent, another copy in the socket
  * parser, and the same again on the serving hub — memory that is work in
  * flight rather than garbage, so no collection can reclaim any of it. That is
- * the shape that killed the cloud EventHub.
+ * the shape that exhausted a cloud relay.
  * @param filePath - Destination path.
  * @param stream - The bytes.
  * @param wrapReadError - Optional: given a failure that came from READING the

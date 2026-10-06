@@ -11,7 +11,7 @@
 // `relativePath`, joined it to the folder, and wrote there — and
 // `join(target, '../escaped.txt')` resolves outside the target. Measured
 // before the guard existed: a tree carrying `../escaped.txt` put a file NEXT TO
-// the sync folder and the restore reported success. On a the host application machine that is
+// the sync folder and the restore reported success. On a user's machine that is
 // an arbitrary file write with the agent's privileges, on every node that
 // applies the tree.
 //
