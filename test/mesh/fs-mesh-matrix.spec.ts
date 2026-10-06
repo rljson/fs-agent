@@ -74,7 +74,27 @@ describe('the scenario matrix, at the mesh tier', () => {
     const result = await mesh.converged({ timeoutMs: 60_000, stableMs: 3_000 });
     expect(result.converged, whyNot(result)).toBe(true);
 
-    const onB = await mesh.node('B').files();
+    // WAITED FOR, not sampled the instant the fleet agrees.
+    //
+    // `converged()` answers "do all nodes hold the same thing", and they can
+    // agree on a state that is still wrong. Deleting a watched DIRECTORY is
+    // exactly where that happens: on Linux the children are unlinked and then
+    // the directory is, and when the directory goes its inotify watch goes
+    // with it — any queued child events are dropped. macOS FSEvents does not
+    // behave that way, so this passes 4 of 4 locally and failed twice in a row
+    // on CI with the identical signature, `old/f1.txt` … `old/f5.txt`: the
+    // first unlink observed, the rest lost with the watch.
+    //
+    // The watcher is an event SOURCE and the safety rescan is what covers its
+    // gaps — see `doc/safety-rescan.md`. So the end state is the thing to
+    // assert, and it has to be given the interval that mechanism runs on.
+    // `settlesOn` polls for the exact list and returns what it last saw, so a
+    // failure still prints the real contents and the assertion below is
+    // unchanged.
+    const want = [
+      ...Array.from({ length: 6 }, (_, i) => `new/f${i}.txt`),
+    ].sort();
+    const onB = await mesh.node('B').settlesOn(want, 30_000);
     expect(
       onB.filter((f) => f.startsWith('new/')).length,
       'the renamed directory did not arrive',
