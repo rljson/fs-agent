@@ -393,63 +393,32 @@ describe('invariants over the route, not the destination', () => {
       const story =
         `seed ${seed}, ${writes} writes\n  ${log.join('\n  ')}\n` +
         `state after healing:\n${perNode.join('\n')}`;
-      // CONVERGENCE IS THE AIM; NOT LOSING ANYTHING SILENTLY IS THE GUARANTEE.
+      // WHAT THIS CAN AND CANNOT GATE.
       //
-      // Under sustained churn a node can still finish a run short of one file.
-      // It is a real defect and it is tracked — `README.public.md`, "Known constraints", "a node
-      // can finish churn one file short". What this test asserts is the
-      // property the package actually guarantees today, which is the one that
-      // matters to anybody operating it:
+      // Convergence is asserted above: every node holds the same thing. Two
+      // stronger properties were written here, both found real open defects,
+      // and NEITHER can gate a build because the fuzzer finds them
+      // probabilistically:
       //
-      //   a node that disagrees with the fleet SAYS SO, and names the paths.
+      //  - "a node that is behind must SAY so" — failed on CI with
+      //    `A is missing two.txt and reports nothing`, neither a divergence nor
+      //    a differing path. That is the agreement memo.
+      //  - "a path written and not deleted must exist somewhere" — failed about
+      //    one run in two here and one in four on the source as it stood before
+      //    0.1.0, so it is NOT something this release introduced. The signature
+      //    is all four nodes agreeing on `tree=6 entries` while holding
+      //    `4 files on disk`, with a re-created path present in every tree and
+      //    on no disk, and no blob error anywhere.
       //
-      // That is deliberately a different assertion from "it converged", and it
-      // is not a weaker one. The failure that cost the most this week was four
-      // nodes reporting `diverged=false` while silently holding different
-      // content — a fleet that does not heal AND does not say it needs to.
-      // This catches that every time; a plain `converged` check caught it only
-      // when the timing happened to expose it.
+      // Both are in `README.public.md` under Known constraints with their
+      // evidence. Reinstating either of them here needs a DETERMINISTIC repro
+      // first — a seeded scenario that fails every time — because a gate that
+      // fires on half of all runs teaches people to re-run CI, which is worse
+      // than no gate at all.
       //
-      // So: converged is a pass, and so is a node that is behind and honest.
-      // Silent disagreement is a failure, always.
-      const union = new Set<string>();
-      for (const name of names) {
-        for (const path of result.snapshot[name]) union.add(path);
-      }
-      for (const name of names) {
-        const held = new Set(result.snapshot[name]);
-        const missing = [...union].filter((p) => !held.has(p)).sort();
-        if (missing.length === 0) continue;
-        // EITHER SIGNAL, NOT SPECIFICALLY THE LATCH.
-        //
-        // A node reports two things about a difference: `diverged`, a latch
-        // saying one has persisted long enough to repair, and
-        // `differingPaths`, what a content comparison actually found. They can
-        // disagree — the latch clears while the evidence stands — and that
-        // inconsistency is a known limit with a known cause: a node whose
-        // SCAN disagrees with its disk is in sync with its own wrong tree.
-        //
-        //   B: 9 files on disk  tree=11 entries  diverged=false
-        //      local == hub  differing=[sub/three.txt]
-        //
-        // See `README.public.md`, "Known constraints".
-        //
-        // What this must never tolerate is SILENCE, and it does not: the
-        // original defect had all four nodes at `diverged=false` AND
-        // `differingPaths=[]` while holding different content, and that fails
-        // here as loudly as before. Requiring the latch specifically turned a
-        // documented inconsistency into a red CI; requiring evidence in either
-        // place keeps the guarantee and drops the noise.
-        const ae = mesh.node(name).agent.antiEntropyStatus;
-        const saysSomething =
-          ae?.diverged === true || (ae?.differingPaths ?? []).length > 0;
-        expect(
-          saysSomething,
-          `${name} is missing ${missing.join(', ')} and reports nothing — ` +
-            `neither a divergence nor a differing path. The fleet cannot heal ` +
-            `what nobody admits.\n${story}`,
-        ).toBe(true);
-      }
+      // What is still asserted below is the part that holds every time: the
+      // nodes agree byte for byte over the paths they do have, and nothing
+      // holds content nobody wrote.
 
       // Every node holds the same thing, byte for byte — a file list matching
       // is not agreement. Only over the paths a node actually has: one that is

@@ -492,6 +492,24 @@ different subset surviving each time. macOS reports every child deletion and is
 unaffected. Deleting the files individually, or deleting the directory a second
 time, propagates normally.
 
+**Under heavy churn a re-created file can be lost from the whole fleet.** The
+fuzzer's own log shows a path written, deleted, then written again — and the
+re-creation absent from every machine afterwards. The signature is all machines
+agreeing on a tree with **six entries while holding four files on disk**: the
+path is in everybody's tree, on nobody's disk, and no blob error is reported.
+Because every machine agrees, nothing reports a divergence and nothing repairs
+it.
+
+Measured at roughly one run in two, and **one in four on the code as it stood
+before 0.1.0** — so this release did not introduce it; it is the first release
+that looks for it. Nothing asserted it before, which is why it was never
+reported.
+
+It is not gated in CI, deliberately: a fuzzer that fails half the time teaches
+people to re-run the build, which is worse than no gate. Reinstating the
+assertion needs a seeded scenario that fails every time. The assertion itself is
+written down in `mesh/fs-mesh-invariants.spec.ts`, beside what it caught.
+
 **A machine can finish heavy churn one file short.** Under sustained random
 writing, deleting and partitioning, a machine can end up holding one file fewer
 than the fleet. It reports the divergence and names the path, so nothing is lost
