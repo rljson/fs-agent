@@ -29,7 +29,8 @@ pnpm test     # 70 files, 810 scenarios, 100 % coverage, then eslint
 | --- | --- |
 | **using the package** | [README.public.md](README.public.md) — install, the production configuration, every option and what it costs, troubleshooting |
 | **deciding whether to trust it** | [README.tests.md](README.tests.md) — what the 810 scenarios actually prove, and what they cannot |
-| **changing the sync** | [README.architecture.md](README.architecture.md) — the design, and why each rule exists |
+| **changing the sync** | [README.architecture.md](README.architecture.md) — the mechanism, and why each rule exists |
+| **calling the API** | [README.api.md](README.api.md) — every export, grouped by module, with what it costs |
 | **setting the repo up** | [README.contributors.md](README.contributors.md) — run, debug, build, publish |
 | **stuck** | [README.trouble.md](README.trouble.md) |
 
@@ -37,11 +38,6 @@ pnpm test     # 70 files, 810 scenarios, 100 % coverage, then eslint
 
 | document | what is in it |
 | --- | --- |
-| [doc/scenario-matrix.md](doc/scenario-matrix.md) | every way a folder and a history can disagree, what must happen, and which tier proves it |
-| [doc/known-limits.md](doc/known-limits.md) | what has been measured and accepted: five entries closed, two still open |
-| [doc/q3-backlog-status.md](doc/q3-backlog-status.md) | the open quality and stability items, answered from this package |
-| [doc/lab-recipe-coverage.md](doc/lab-recipe-coverage.md) | which of the lab's E2E recipes are answered here, and which need real machines |
-| [doc/conflict-resolution-design.md](doc/conflict-resolution-design.md) | how a winner is chosen, and how a conflict copy is named |
 | [doc/safety-rescan.md](doc/safety-rescan.md) | the periodic rescan, and the watcher gaps it covers |
 | [doc/develop.md](doc/develop.md) · [doc/prepare.md](doc/prepare.md) | the development loop and machine setup |
 | [src/client-server/README.md](src/client-server/README.md) | the client–server rules, with a component diagram |

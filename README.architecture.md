@@ -41,10 +41,12 @@ drift across four machines and a file deleted from 3 642 that came back moments
 later. A removal is therefore **stated**, by the machine that performed it, and
 nothing is pruned on a peer's authority.
 
-**What is transferred is a reference, not a payload.** A machine announces a
-ref; a machine that does not hold that state fetches what it needs. That makes
-a receiver's cost proportional to what actually changed rather than to how long
-it was away.
+**What is transferred is a decision, not a payload.** A machine announces the
+ADDRESS OF AN EDIT — not its folder, not a file list, not a tree. A receiver
+resolves the address, reads the Edit, and fetches only the tree rows and blobs
+it is missing. That makes a receiver's cost proportional to what actually
+changed rather than to how long it was away: twenty saves of one document are
+twenty small row reads and one blob.
 
 **Everything is bounded.** Every async step has a timeout, every growing
 structure has a cap, and every walk has a budget — because an unbounded step is
@@ -61,12 +63,16 @@ a silent hang and an unbounded list is tomorrow's memory ceiling.
 | how a lost message heals | [Anti-Entropy](#anti-entropy-srcfs-anti-entropyts) |
 | why two folders agree on one ref | [One Folder, One Ref](#one-folder-one-ref--the-canonical-child-order) |
 | how a divergence is repaired without replacing a folder | [Additive Reconciliation](#additive-reconciliation-fs-manifestts--fs-bucket-syncts) |
+| why a node sometimes gives no verdict about itself | [A Verdict Is Only About This Folder](#a-verdict-is-only-about-this-folder-while-the-head-names-it) |
 | how a deletion travels | [A Delete Travels as a Fact](#a-delete-travels-as-a-fact-collectremovals--planremovals) |
+| why a big deletion is refused, and how to find out | [Refused Deletions Are Reported](#refused-deletions-are-reported-not-only-logged-fsagentrefuseddeletions) |
 | what a restart remembers | [Tombstone Log](#tombstone-log-_pendingdeletes--fsagent-statejson) |
+| why an old deletion cannot beat a newer write | [Ordering a Tombstone](#ordering-a-tombstone-against-the-write-it-supersedes-manifestentryeditedat) |
 | the history itself | [Edit Chain](#edit-chain-srcfs-edit-chaints) |
 | what a joining machine does | [Joining a Network](#joining-a-network-planjoin) |
 | who is recorded as having changed a file | [Authorship](#authorship-a-node-claims-only-what-it-changed) |
 | which files are skipped | [Ignore Matching](#ignore-matching-srcfs-ignorets) |
+| the signature of anything named here | [README.api.md](README.api.md) |
 
 ## Pull-Based Reference Architecture
 
@@ -350,163 +356,211 @@ await agentB.loadFromDb(serverDb, 'sharedTree', rootRef);
 
 ## Data Synchronization Flow (How It Works)
 
-### The Peer-to-Peer Architecture with Central Server Coordination
+**Read this section before any other.** It is the mechanism, and the rest of
+the document is the rules that protect it.
 
-The fs-agent implements a distributed peer-to-peer synchronization pattern where:
+### What travels, and what does not
 
-1. **Each client stores data locally** in its own `Io` (database) and `Bs` (blob storage)
-2. **References are broadcast** through the server via Connector
-3. **Data is pulled on-demand** when a client needs data it doesn't have
-4. **The server coordinates** but doesn't own the data - it routes requests between clients
+Three things exist, and only one of them is broadcast:
 
-### Step-by-Step Sync Flow: Client A → Client B
+| | what it is | how it moves |
+| --- | --- | --- |
+| **blob** | the bytes of one file | pulled by id, on demand |
+| **tree** | `path → blobId` for a whole folder, as rows | pulled by ref, on demand |
+| **Edit** | what changed, what was removed, which Edits it came from, and when | **its address is broadcast** |
 
-**Message Routing via Connector:**
+An announcement is a short string — `~H~<editHistoryRef>` — plus the sender's
+identity and a sequence number. No file content, no path list, no tree. A
+receiver resolves the address, reads the Edit, and only then fetches the tree
+and the blobs it is missing.
 
-```
-Client A                          Server                          Client B
---------                          ------                          --------
+So a message is never "here is my folder". It is **"here is the decision I
+made"**, and the folder is what you get by applying it.
 
-1. File changes detected
-   ↓
-2. FsAgent extracts tree
-   ↓
-3. connector.send(treeRef)
-   │
-   ├─→ Local Socket Echo                6. Server._multicastRefs()
-   │   (Client A's listener triggered)      filters sender
-   │                                        ↓
-   └─→ socket.emit(route, {r: ref})       7. Checks: clientIdA !== clientIdB
-             ↓                                 ↓
-       Server receives on                  8. Broadcasts to OTHER clients
-       socket.on(route, ...)                  (Client A excluded)
-                                               ↓
-                                          socketB.emit(route, {
-                                            r: ref,
-                                            __origin: clientIdA
-                                          })
-                                                    ↓
-                                                    → Client B
-                                                      ↓
-                                                    9. Client B's connector
-                                                       .listen() triggered
-                                                       ↓
-                                                    10. syncFromDb callback
-                                                        processes ref
+### An Edit
+
+```ts
+interface FsChainEntry {
+  head: string;        // this Edit's identity — what gets announced
+  timeId: string;      // fleet-wide order, minted once by its author
+  treeRef: string;     // the state the folder ended up at
+  previous: string[];  // the Edits this one was made from
+  changed: string[];   // paths added OR modified
+  removed: string[];   // paths removed — stated, never inferred
+}
 ```
 
-**Key Points:**
-- Client A's connector receives its own message via **local socket echo** (step 1 branch)
-- FsAgent's `_lastSentRef` filtering prevents processing this echo
-- Server receives the message and broadcasts to **all OTHER clients** (step 6-8)
-- The `__origin` field prevents infinite forwarding loops in the server
-- Client B receives the message and pulls data via IoMulti/BsMulti (see below)
+`changed` does not distinguish an addition from a modification, because both
+mean the same thing: the bytes at this path are now whatever the tree says.
+`removed` is separate because only a removal needs an author — **an absence is
+not a deletion**, and a node that merely lacks a file is behind, not
+authoritative.
 
-**Data Pull Flow (when Client B needs data):**
+Two links matter. `previous` joins **Edit to Edit** — that is the chain.
+`treeRef` joins **Edit to state** — which is how one Edit names a complete
+folder rather than only a delta.
+
+### Sending: a local change becomes an Edit
+
+`syncToDb` watches the folder. On a change, in this order:
 
 ```
-Client A                          Server                          Client B
---------                          ------                          --------
-
-1. File changes detected
-   ↓
-2. FsAgent extracts tree
-   ↓
-3. Blobs stored in clientA.bs (local BsMem)
-   ↓
-4. Tree stored in clientDbA (local IoMem)
-   via storeInDb()
-   ↓
-5. connector.send(treeRootRef)
-   ↓ socket →→→
-                              6. Server receives ref
-                                 ↓
-                                 7. Multicasts to all clients
-                                         ↓ socket →→→
-                                                            8. connectorB receives ref
-                                                               ↓
-                                                            9. syncFromDb callback triggered
-                                                               ↓
-                                                            10. loadFromDb(treeRef) called
-                                                                ↓
-                                                            11. Query clientDbB for tree data
-                                                                ↓
-                                                            12. clientDbB.io (IoMulti) checks:
-                                                                - localIoB: NOT FOUND
-                                                                - IoPeer: Query server
-                                         ← socket ←←
-                              13. Server routes to Client A
-          ← socket ←←
-14. Client A's Io returns tree data
-          → socket →→
-                              15. Data flows back to Server
-                                         → socket →→
-                                                            16. Tree data arrives at Client B
-                                                                ↓
-                                                            17. Tree data stored in localIoB
-                                                                ↓
-                                                            18. For each file in tree:
-                                                                clientB.bs.getBlob(blobId)
-                                                                ↓
-                                                            19. clientB.bs (BsMulti) checks:
-                                                                - localBsB: NOT FOUND
-                                                                - BsPeer: Query server
-                                         ← socket ←←
-                              20. Server routes to Client A
-          ← socket ←←
-21. Client A's Bs returns blob
-          → socket →→
-                              22. Blob flows back to Server
-                                         → socket →→
-                                                            23. Blob arrives at Client B
-                                                                ↓
-                                                            24. Blob stored in localBsB
-                                                                ↓
-                                                            25. File written to filesystem
-                                                                ↓
-                                                            26. Sync complete!
+ 1  scanner event                        FsScanner.onChange
+ 2  debounce 300 ms                      coalesce a burst into one push
+ 3  content key of the scanned tree      _contentKeyFromTree
+ 4  unchanged?  ──► RETURN               nothing is sent
+ 5  which state do we descend from       _ancestryPrevious
+ 6  write blobs + tree rows              storeFsTree({ skipNotification: true })
+ 7  remember + persist the new ref       _currentRef, .fsagent-state.json
+ 8  already announced this ref? ─► RETURN
+ 9  APPEND THE EDIT                      _recordChainEntry  ◄── before the wire
+10  announce its head                    _sendRef → `~H~<head>`
 ```
+
+Three steps are easy to get wrong and are load-bearing:
+
+- **step 4 compares CONTENT, not refs.** A folder that returns to a state it
+  held before re-derives that state's exact ref, and a ref-based check would
+  call the return an echo. Deleting a file created in the same session is
+  exactly that shape — A → B → A — and under a ref check the deletion reached
+  no peer at all.
+- **step 6 passes `skipNotification: true`.** `Connector` observes local
+  inserts and broadcasts the raw `<table>Ref` — a bare tree ref. Writing the
+  tree *is* an announcement unless it is suppressed, and an unsuppressed write
+  announces a state before the Edit for it exists.
+- **step 9 precedes step 10.** The head is the Edit's identity; announcing
+  before appending has nothing to announce, and `_announceAs` would fall back
+  to the bare ref.
+
+### Receiving: an Edit becomes a folder
+
+`syncFromDb` registers one callback with `connector.listen`. What arrives is an
+address, so the first job is to find out what it names:
+
+```
+    announcement arrives
+            │
+   ┌────────┴─────────┐
+   │ bucket envelope? │ ~BQ~ ~BR~ ~BG~ ~BE~  ──►  FsBucketSync.receive, return
+   └────────┬─────────┘      (a control protocol; it names no tree)
+            │
+   ┌────────┴──────────┐
+   │ starts with ~H~ ? │
+   └───┬───────────┬───┘
+      no          yes
+       │           │
+       │     _resolveAnnouncement ──► { treeRef, entry }   (bounded read)
+       │           │                        │
+       │           │                 park the head         _rememberAnnouncedHead
+       │           │                 collect its removals  _collectIncomingRemovals
+       │           │
+  schedule(ref) ◄──┘        debounced, so N announcements cost one apply
+       │
+  + ask the chain anyway    _collectRemovalsForTreeRef
+```
+
+Then the apply, with the watcher paused for its whole duration:
+
+```
+ 1  pause the watcher                    so the restore is not read as user edits
+ 2  apply the sender's STATED removals   _applyIncomingRemovals
+ 3  fetch the tree by ref                _fetchTreeFromDb   (may reach a peer)
+ 4  same content already? ─► skip        _treesHaveEquivalentContent
+ 5  ASK THE CHAIN                        _classifyAnnouncedRef
+       ahead     ──► ignore it: we have left that state
+       fork      ──► merge               _resolveConflictInline
+       behind    ──► restore             additive; prune only under the rules
+       incomplete──► do nothing destructive
+ 6  re-scan, and compare what we derived with what we applied
+ 7  adopt the sender's head, or park it as a second parent
+ 8  resume the watcher
+```
+
+Step 5 is the whole design. Every other branch in this file exists because the
+chain could not answer — and `incomplete` is a real answer, not a failure: a
+node whose own head does not name its own folder is not entitled to a verdict
+about anybody else's.
+
+### Healing: when no announcement arrives
+
+An announcement can be lost, and nothing above notices — the mechanism is
+driven by messages. So `FsAntiEntropy` reads the hub's beacon **directly off
+the socket**, not through `listen`, because the connector correctly drops a
+heartbeat it has already delivered and that is exactly the repeat that would
+reveal a disagreement.
+
+```
+hub beacon ──► _reachabilityOf ──► observe({ ref, predecessors, reachability })
+                                        │
+                              antiEntropyDecision(hub, view, attempt)
+                                        │
+          in-sync · blocked  ──► nothing
+          pull · push · merge ──► repair
+                                        │
+                        bucket round first, if enabled  ──► additive, cannot destroy
+                        otherwise: push = re-announce where we are
+                                   pull/merge = schedule the hub's state
+```
+
+A node that is behind also **asks** rather than only listening
+(`ANTI_ENTROPY_ASK_MS`): it reads the fleet's newest entry locally and offers it
+to the anti-entropy as though it had been announced — which is what it would
+have been, had the message not been lost.
+
+### Where the hub fits
+
+The hub relays and never arbitrates. `Server._multicastRefs` forwards each ref
+to every client except the sender, tagging it with `__origin` so a relay cannot
+loop, and `_latestRef` keeps the last ref it relayed — prefix intact — so a
+late joiner can be bootstrapped with it.
+
+It stores no folder. Its `Io` and `Bs` exist for its own needs, and a client
+that needs a tree or a blob the hub happens to hold reads it the same way it
+reads a peer's.
 
 ### Key Architectural Components
 
-**IoMulti (inside client.io):**
+**`IoMulti` (inside `client.io`)** combines this machine's local `Io` with an
+`IoPeer` to the hub. A read checks local first, then asks the peer, and caches
+what it gets. Reads are bounded per source and per priority group: a source that
+is open but never answers is set aside rather than waited on, because "nobody
+has this row" is the common case for an unreplicated ref, not the rare one.
 
-- Combines local IoMem with IoPeer (server connection)
-- When data is requested: first checks local, then queries peer via socket
-- Automatically caches retrieved data locally
-- Transparent to the application - just use `client.io`
+**`BsMulti` (inside `client.bs`)** is the same for blobs. **Hand an agent a bare
+`BsMem` and it can store its own blobs and never fetch anybody else's** — every
+restore then fails on its first file and nothing propagates, which looks exactly
+like a sync defect. Use `client.bs`.
 
-**BsMulti (inside client.bs):**
+**`Connector`** carries the announcement: `~H~<editHistoryRef>` plus the
+sender's identity, a sequence number, and the predecessor TREE refs. It
+deduplicates by ref on both sides, which is why `_sendRef` clears a ref the
+folder has legitimately returned to.
 
-- Combines local BsMem with BsPeer (server connection)
-- When blob is requested: first checks local, then queries peer via socket
-- Automatically caches retrieved blobs locally
-- Transparent to the application - just use `client.bs`
+It also observes local inserts and broadcasts the raw `<table>Ref` of anything
+written to the route's root table. That is a **bare tree ref** — an
+announcement the chain cannot be asked about — so every write this agent makes
+passes `skipNotification: true` and announces for itself.
 
-**Connector:**
+**`Server`** relays and never arbitrates. `_multicastRefs` forwards each ref to
+every client but the sender, tagged with `__origin` so a relay cannot loop, and
+`_latestRef` keeps the last ref relayed — prefix intact — to bootstrap a late
+joiner. It stores no folder; its own `Io` and `Bs` are for its own needs.
 
-- Broadcasts tree references (not full data) via socket
-- Triggers `syncFromDb` callbacks on receiving clients
-- Minimal bandwidth - only sends references
+### Why it is built this way
 
-**Server:**
+- **no master copy** — every machine owns its folder, and a decision must be
+  reachable identically on all of them from data they all have
+- **a decision is cheap to send** — an address is a short string; folders are
+  not
+- **cost follows change, not absence** — coming back after a week costs what
+  changed, not what you missed
+- **it works across a network** — real sockets, real partitions, not an
+  in-process mock
 
-- Routes data requests between clients
-- Maintains connections to all clients via sockets
-- Does NOT store client data - purely acts as coordinator/router
-- Has its own serverIo and serverBs for server-specific needs only
-
-### Why This Architecture Matters
-
-This peer-to-peer pattern with server coordination enables:
-
-✅ **Distributed storage**: Each client owns its data locally
-✅ **Bandwidth efficiency**: Only references broadcast, data pulled on-demand
-✅ **Scalability**: Server doesn't store all client data
-✅ **Offline capability**: Clients can work with locally cached data
-✅ **Real-world deployment**: Works across networks, not just in-memory mocks
-
-**This is why clients must NEVER access server Io/Bs directly** - it would bypass the entire peer-to-peer mechanism and make the system only work in single-process scenarios.
+**A client must never read the server's `Io` or `Bs` directly.** It bypasses
+`IoMulti`/`BsMulti` entirely, so the code appears to work in one process and
+cannot work between machines — and the failure arrives later, as a sync defect
+rather than as a wiring error.
 
 ## Bounce-Back Prevention
 
@@ -961,6 +1015,64 @@ is what makes one node's history reachable from another's. Consumed once:
 naming it on every later entry would claim to descend from it repeatedly and
 grow every walk for nothing.
 
+## A Verdict Is Only About This Folder While the Head Names It
+
+`FsEditChain.classify` compares two chain **heads**. A node's head can lag its
+own folder — a write is on disk and in `_currentRef` before
+`_recordChainEntry` has appended the entry for it, and an apply that re-derives
+a different ref leaves the head naming the state it came from.
+
+Asked inside that window the chain answers truthfully about a state the node
+has already left:
+
+```
+ours=fZ79puL0 theirs=KDeHB45d -> behind
+  chainHeadTree=B4-SH9ZX current=hd3PHz1r
+```
+
+`behind` was correct about `fZ79puL0` and wrong about the folder, which was at
+`hd3PHz1r` and held a file no peer had. The repair read `behind` as `pull`,
+replaced the folder, and the divergence reopened — **45 times in 89 seconds**.
+
+So `_classifyAnnouncedRef` answers `incomplete` unless
+`_chainHead.treeRef === _currentRef`. `antiEntropyDecision` turns that into
+`blocked`: nothing applied, nothing latched, retried. `fork` was tried instead,
+on the reasoning that a fork's repair is additive and therefore safe, and
+measured **worse** — 3 of 8 churn runs failing against 1 of 8. A merge invented
+from a verdict the node is not entitled to is still a merge.
+
+This is the same family as `fork-is-not-a-lag`: a marker that does not mean
+"where I am" used as though it did.
+
+### It is what made the agreement memo correctable
+
+`FsAntiEntropy` memoises "the hub's ref X describes the same content as the
+state I am in". That is a statement about **two** sides, true only while
+neither moves — and it was keyed on X alone, so it survived this node changing
+underneath it. A later announcement of X then cleared the divergence with no
+content check at all, for ever.
+
+The cost was not a misreported flag. The repair is **gated** on it:
+
+```
+A: 11 files  diverged=false  hub=goDX1oLq  local=kderYtfA  differing=[]
+B: 10 files  diverged=false  hub=goDX1oLq  local=goDX1oLq  differing=[sub/three.txt]
+```
+
+B had deleted `sub/three.txt`, nobody re-created it, and A, C and D all held it
+while reporting no divergence — so none of them ever repaired. The fleet did
+not heal **and** did not say it needed to.
+
+The key is now the pair, with the local side read from `view` on each call
+rather than from `_localRef` — that field is assigned as announcements arrive,
+so it lags its own folder and keying on it reintroduces exactly the staleness
+the pair removes.
+
+It had been tried twice before and reverted both times, because correcting it
+turns the detector back on and the repair behind it was choosing `pull` for a
+node that was ahead. Fixing what the repair is **told** had to come first; the
+memo is one line at the end of that.
+
 ## One Decision Site — and the removal of the second
 
 The question *"has the other side seen a state I am in?"* used to be asked in
@@ -1081,6 +1193,36 @@ flip through four work packages and is **8 of 8** under `bucketSync`. It is an
 ordinary assertion in `test/mesh/fs-mesh.spec.ts`; nothing in this package is
 committed inverted any more.
 
+## Refused Deletions Are Reported, Not Only Logged (`FsAgent.refusedDeletions`)
+
+The mass-delete guard refuses any incoming deletion that would remove most of a
+folder, on three routes — an incoming whole tree, a bucket round's drop list,
+and a peer's stated removals. It refuses on **every** node, so a user who
+deletes 10 000 files on purpose ends up with one machine short of them and the
+rest unchanged, and no further message closes that gap.
+
+The guard is right anyway, because the two cases are indistinguishable from
+inside this package: a machine that was wiped telling the fleet to wipe, and a
+person deleting a project. Both arrive as "most of the folder is gone". The
+guard exists because the first one happened — a peer that had been emptied
+produced a round dropping **39 of 40** files, and before the floors covered
+that shape, 39 files were deleted on every node with no refusal logged at all.
+
+What changed is that the refusal is now **readable**. One place
+(`_refuseDeletion`) reports it three ways, so they cannot drift apart as the
+three copies had:
+
+| where | what it carries |
+| --- | --- |
+| the log | `MASS DELETE REFUSED on <folder>: <route> would remove N of M files.` |
+| `.sync-errors.log` | the key `restore/`, `bucketSync/` or `removals/massDeleteGuard` |
+| the API | `FsAgent.refusedDeletions` — `{ atMs, route, wouldRemove, held, paths }` |
+
+A UI cannot grep a log on a machine it is not running on, and *"why did my
+deletion not arrive"* is exactly the question it has to answer. Fixing it
+properly is a product decision — an approval path — and until that exists the
+refusal is the correct behaviour and the gap is a missing dialog.
+
 ## Tombstone Log (`_pendingDeletes` + `.fsagent-state.json`)
 
 **What this node deleted, remembered past the push.**
@@ -1188,94 +1330,6 @@ exactly the same local history as one whose write superseded it. Its own chain
 cannot tell the two apart, and in `I7b` it provably cannot: B was partitioned
 when C re-created the path, so C's write is unreachable from B's head. The
 ordering has to come from the side that holds the fact, which is why it travels.
-
-## A Verdict Is Only About This Folder While the Head Names It
-
-`FsEditChain.classify` compares two chain **heads**. A node's head can lag its
-own folder — a write is on disk and in `_currentRef` before
-`_recordChainEntry` has appended the entry for it, and an apply that re-derives
-a different ref leaves the head naming the state it came from.
-
-Asked inside that window the chain answers truthfully about a state the node
-has already left:
-
-```
-ours=fZ79puL0 theirs=KDeHB45d -> behind
-  chainHeadTree=B4-SH9ZX current=hd3PHz1r
-```
-
-`behind` was correct about `fZ79puL0` and wrong about the folder, which was at
-`hd3PHz1r` and held a file no peer had. The repair read `behind` as `pull`,
-replaced the folder, and the divergence reopened — **45 times in 89 seconds**.
-
-So `_classifyAnnouncedRef` answers `incomplete` unless
-`_chainHead.treeRef === _currentRef`. `antiEntropyDecision` turns that into
-`blocked`: nothing applied, nothing latched, retried. `fork` was tried instead,
-on the reasoning that a fork's repair is additive and therefore safe, and
-measured **worse** — 3 of 8 churn runs failing against 1 of 8. A merge invented
-from a verdict the node is not entitled to is still a merge.
-
-This is the same family as `fork-is-not-a-lag`: a marker that does not mean
-"where I am" used as though it did.
-
-### It is what made the agreement memo correctable
-
-`FsAntiEntropy` memoises "the hub's ref X describes the same content as the
-state I am in". That is a statement about **two** sides, true only while
-neither moves — and it was keyed on X alone, so it survived this node changing
-underneath it. A later announcement of X then cleared the divergence with no
-content check at all, for ever.
-
-The cost was not a misreported flag. The repair is **gated** on it:
-
-```
-A: 11 files  diverged=false  hub=goDX1oLq  local=kderYtfA  differing=[]
-B: 10 files  diverged=false  hub=goDX1oLq  local=goDX1oLq  differing=[sub/three.txt]
-```
-
-B had deleted `sub/three.txt`, nobody re-created it, and A, C and D all held it
-while reporting no divergence — so none of them ever repaired. The fleet did
-not heal **and** did not say it needed to.
-
-The key is now the pair, with the local side read from `view` on each call
-rather than from `_localRef` — that field is assigned as announcements arrive,
-so it lags its own folder and keying on it reintroduces exactly the staleness
-the pair removes.
-
-It had been tried twice before and reverted both times, because correcting it
-turns the detector back on and the repair behind it was choosing `pull` for a
-node that was ahead. Fixing what the repair is **told** had to come first; the
-memo is one line at the end of that.
-
-## Refused Deletions Are Reported, Not Only Logged (`FsAgent.refusedDeletions`)
-
-The mass-delete guard refuses any incoming deletion that would remove most of a
-folder, on three routes — an incoming whole tree, a bucket round's drop list,
-and a peer's stated removals. It refuses on **every** node, so a user who
-deletes 10 000 files on purpose ends up with one machine short of them and the
-rest unchanged, and no further message closes that gap.
-
-The guard is right anyway, because the two cases are indistinguishable from
-inside this package: a machine that was wiped telling the fleet to wipe, and a
-person deleting a project. Both arrive as "most of the folder is gone". The
-guard exists because the first one happened — a peer that had been emptied
-produced a round dropping **39 of 40** files, and before the floors covered
-that shape, 39 files were deleted on every node with no refusal logged at all.
-
-What changed is that the refusal is now **readable**. One place
-(`_refuseDeletion`) reports it three ways, so they cannot drift apart as the
-three copies had:
-
-| where | what it carries |
-| --- | --- |
-| the log | `MASS DELETE REFUSED on <folder>: <route> would remove N of M files.` |
-| `.sync-errors.log` | the key `restore/`, `bucketSync/` or `removals/massDeleteGuard` |
-| the API | `FsAgent.refusedDeletions` — `{ atMs, route, wouldRemove, held, paths }` |
-
-A UI cannot grep a log on a machine it is not running on, and *"why did my
-deletion not arrive"* is exactly the question it has to answer. Fixing it
-properly is a product decision — an approval path — and until that exists the
-refusal is the correct behaviour and the gap is a missing dialog.
 
 ## Edit Chain (`src/fs-edit-chain.ts`)
 
@@ -1444,6 +1498,98 @@ way.
 `test/fs-agent-announced-heads.spec.ts` (the cap) and
 `test/fs-chain-crosses-the-wire.spec.ts` (a peer walking `previous` through
 entries it never held).
+
+## Conflicts: two people saved the same file (`src/fs-conflict-resolver.ts`)
+
+Everything else in this document is about folders that disagree because a
+message was lost or late. This is the case where both machines are right: two
+people edited one path while neither could see the other.
+
+Enabled by `resolveConflicts`. With it off the resolver is not constructed, and
+a conflicting edit is never merged — which is correct for a hub, since a hub
+relays and must not arbitrate.
+
+### The three-way merge
+
+`FsConflictResolver.resolve` is given a `dagBranch` conflict — two tips of one
+table — and works out one result:
+
+1. **`findCommonAncestor`** walks both lineages for the newest state they share.
+   That is the `o` of the three-way. It tolerates a dangling predecessor and a
+   diamond, and returns `null` when there is no shared ancestor at all.
+2. **`threeWayMerge(o, ours, theirs, …)`** decides per path:
+
+   | `ours` vs `theirs` | result |
+   | --- | --- |
+   | equal | keep it (including both-absent and both-added-identically) |
+   | only theirs diverged from `o` | take theirs |
+   | only ours diverged from `o` | take ours |
+   | both diverged, differently | **a conflict** — including edit-vs-delete |
+
+3. For a real conflict, one side keeps the path and **the other side's bytes are
+   preserved under a renamed copy.** That is the property that makes either
+   verdict safe: no answer loses content.
+
+### Which side keeps the path
+
+By the chain, per path — not by which branch is "newer".
+
+`winnerFor` is built from `lastEditOfPath` on both tips and compared with
+`compareTimeId`. A side that touched the path beats a side that did not; where
+both touched it, the later edit of **that path** wins; where the chain cannot
+speak for either, the branch order stands.
+
+The branch order alone was the whole rule once, and it is the defect the chain
+was brought in to remove: it ordered a *tip*, so a tip could win files it never
+opened. Measured — a machine came back from being offline, wrote one unrelated
+file, and that newer tip took `doc.txt` with it, moving the writer's own folder
+from v8 back to v5. "Cannot say" is never read as "did not touch it".
+
+### The name of the losing copy
+
+```
+document.txt  →  document (conflicted copy <machine> 2026-06-18 091500).txt
+```
+
+Inserted before the final extension; appended when there is none; a leading-dot
+name is treated as extensionless. Repeats get a numeric suffix, and the
+candidate is checked against every real path **and** every copy already planned,
+so a copy can never collide.
+
+The identity and timestamp come from the **losing revision**, not from the clock
+of the machine doing the merge — so every peer computes the identical name and
+the copy does not itself become a conflict. Where no identity is available the
+marker degrades to the timestamp plus a short ref rather than printing an empty
+one: `(conflicted copy  2026-…)` with a double space is the kind of detail a
+user reports as a bug.
+
+### What the merge revision is
+
+One state with **two parents** — the only shape in the chain that has them. It
+is announced as a chain head like any other state, and
+`_resolveConflictInline` adopts the incoming side's head first, so the Edit
+names both branches.
+
+That ordering is load-bearing. A merge that resolves both branches but descends
+from one is classified `fork` by the very peer whose branch it merged, for ever
+— announcing such a head converts a finished merge into a standing
+disagreement.
+
+### And a merge claims only what it made
+
+Choosing between two versions is not writing one. A merge that resolves
+`doc.txt` by keeping one side's existing bytes has not edited `doc.txt`, and
+claiming it would make this machine the newest author of content it did not
+write — which then out-ranks the real writer. So the claim is filtered to the
+paths whose merged bytes came from neither side: the conflict copies, which this
+machine genuinely made.
+
+### Telling somebody
+
+`onConflict` fires with the reports as they are resolved, for a UI that is
+running now. `.fsagent-conflicts.json` records them, bounded, for one that
+starts later. Both, not either — a conflict nobody hears about is the thing this
+exists to prevent, so it does not depend on anyone having subscribed.
 
 ## Joining a Network (`planJoin`)
 

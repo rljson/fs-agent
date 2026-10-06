@@ -56,7 +56,6 @@ data:
 4. **No `await` in the push path.** The yield between "this is what I am
    announcing" and "this is the entry for it" lets another apply land in the
    middle. That alone cost a node its place in a ten-round run.
-5. [doc/scenario-matrix.md](doc/scenario-matrix.md) — if the behaviour you are
    changing is a row there, that row names the test that must still pass.
 
 ## How to measure a change

@@ -5559,7 +5559,7 @@ export class FsAgent {
         // (`J9`, two scenarios): node A emitted 4 refs, all `~H~` heads; node B
         // emitted 2, both bare, both from this line. That is the whole of
         // "announcements carry no chain head" recorded in
-        // `doc/convergence-contract.md` — not the hub, which relays faithfully
+        // not the hub, which relays faithfully
         // whatever it was handed, but this store.
         //
         // A receiver given a bare ref cannot ask the chain anything about it,
@@ -6660,15 +6660,14 @@ export class FsAgent {
         // relays exactly that, so the hub is faithful. The unmarked refs were
         // this package's own: `storeMerge` and the initial store let
         // `Connector`'s db observer broadcast a raw tree ref. Both fixed; see
-        // `doc/convergence-contract.md`, "Where the headless announcements came
-        // from", and the invariant `every announcement carries a chain head`.
+        // the invariant `every announcement carries a chain head`.
         //
         // The lookup stays. Not for an old peer — that format is gone — but
         // because a bare ref is what any sender produces whose chain could not
         // name the state it is announcing, and that is a runtime condition
         // rather than a version one. Whether it is still REACHABLE is a
-        // measurement, not an assumption: see the ref census in
-        // `doc/convergence-contract.md`.
+        // measurement, not an assumption: the invariant `every announcement
+        // carries a chain head` is the census.
         //
         // Scheduled FIRST and synchronously, then the lookup — because a query
         // is a peer read and awaiting one before queueing an apply is how a

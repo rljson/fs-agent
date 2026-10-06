@@ -53,7 +53,6 @@ pnpm update --latest
 - [Debug & debug with Vscode](./debug-with-vscode.md)
 - [Update Goldens](./update-goldens.md)
 - [Rename classes](./rename-classes.md)
-- [Super hero tricks](./super-hero.md)
 
 ## Commit
 

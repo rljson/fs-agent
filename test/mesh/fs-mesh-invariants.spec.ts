@@ -589,8 +589,7 @@ describe('invariants over the route, not the destination', () => {
   // and the marked twin arrived after it had acted.
   //
   // Neither was findable from the agent's own logs, which is the point of
-  // asserting at the connector. See `doc/convergence-contract.md`, "Where the
-  // headless announcements came from".
+  // asserting at the connector.
   it('every announcement carries a chain head', async () => {
     mesh = await buildFsMesh({
       root: root('headed'),

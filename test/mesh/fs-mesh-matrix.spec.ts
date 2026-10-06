@@ -7,7 +7,7 @@
 // .............................................................................
 // THE SCENARIO MATRIX, at the tier that proves it.
 //
-// `doc/scenario-matrix.md` enumerates every way a folder and a history can
+// This file enumerates every way a folder and a history can
 // disagree. Most rows had a test; these are the ones that had none, or none
 // above the decision tier — a pure function proves the RULE and not that the
 // rule is reached, and the gap between those two is where this package's

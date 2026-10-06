@@ -276,7 +276,7 @@ describe('a node comes back empty, or holding an older copy', () => {
   // guard, which exists for exactly this and does not fire here: OLD removed
   // 2 of 2 files, far below `ALL_GONE_MIN_FILES`. A small folder has no
   // protection at all, which is the same band recorded as J10b in
-  // `scenario-matrix.md` seen from the other side — and the approval path L1
+  // the same scenario seen from the other side — and the approval path
   // asks for is the product-level answer. Either a guard that works on small
   // folders, or a trash, or a user who is asked.
   //

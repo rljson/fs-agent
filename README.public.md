@@ -383,12 +383,11 @@ rewriting a whole catalogue.
 
 **It does not:**
 
-- **split a large file into blocks.** A file transfers whole. With the largest
-  real file at 92 % of the transport limit this is the live ceiling — V1 in
-  [doc/q3-backlog-status.md](doc/q3-backlog-status.md);
+- **split a large file into blocks.** A file transfers whole, so the transport's
+  message limit is the per-file ceiling;
 - **let you approve a mass deletion.** One that looks like a loss is refused
-  and reported; there is no override yet (L1);
-- **collect garbage.** Every superseded version stays on every machine (L2);
+  and reported through `agent.refusedDeletions`; there is no override yet;
+- **collect garbage.** Every superseded version stays on every machine;
 - **promise a latency.** Nothing in the suite asserts an arrival deadline, so
   nothing here should be read as one;
 - **repair a folder reverted under a running agent.** Restoring a backup while
@@ -441,8 +440,7 @@ is deliberate.
 **A machine sits empty after its folder was wiped.** Above a hundred files the
 agent recognises the loss and re-joins. Between eleven and ninety-nine it
 announces the emptiness, the fleet correctly refuses it, and that machine is
-not refilled — no data is lost anywhere, but it needs a restart. J10b in
-[doc/scenario-matrix.md](doc/scenario-matrix.md).
+not refilled — no data is lost anywhere, but it needs a restart.
 
 **The first start takes minutes.** A cold scan reads and hashes every file.
 Pass `scanCachePath`.
@@ -497,12 +495,8 @@ tree. See [doc/known-limits.md](doc/known-limits.md).
 | document | what is in it |
 | --- | --- |
 | [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, additive reconciliation, anti-entropy |
+| [README.api.md](README.api.md) | every export, grouped by module — the shape, where this document gives the advice |
 | [README.tests.md](README.tests.md) | the 810 scenarios this package ships, by what they prove |
-| [doc/scenario-matrix.md](doc/scenario-matrix.md) | every way a folder and a history can disagree, and which tier proves it |
-| [doc/known-limits.md](doc/known-limits.md) | what has been measured and accepted, and what was closed |
-| [doc/q3-backlog-status.md](doc/q3-backlog-status.md) | the open quality and stability items |
-| [doc/lab-recipe-coverage.md](doc/lab-recipe-coverage.md) | which lab recipes are answered here, and which need real machines |
-| [doc/conflict-resolution-design.md](doc/conflict-resolution-design.md) | how a winner is chosen and a copy is named |
 
 Related packages: `@rljson/rljson` (trees), `@rljson/db` (database and
 `Connector`), `@rljson/io` (sockets and storage), `@rljson/bs` (blobs),

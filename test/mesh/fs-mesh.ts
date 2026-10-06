@@ -462,7 +462,7 @@ export const buildFsMesh = async (opts: {
   //
   // Extracted from the start-up loop so a node can also arrive LATER, at a
   // network that is already running and already has a history. That is the
-  // whole J section of `doc/scenario-matrix.md` — a client joining with files
+  // whole JOIN class of scenarios — a client joining with files
   // of its own, some of them new work and some of them a stale copy — and it
   // could not be expressed at all while every node had to exist before the
   // first byte was written.
@@ -695,7 +695,7 @@ export const buildFsMesh = async (opts: {
   /**
    * Adds a node to a network that is ALREADY RUNNING.
    *
-   * The J section of `doc/scenario-matrix.md`: a client arrives with a folder
+   * The JOIN scenarios: a client arrives with a folder
    * of its own and no history, and what happens to its files has to be decided
    * against the chain. `seed` writes that folder BEFORE the agent starts, which
    * is the only faithful order — a backup restore, or a user who copied a

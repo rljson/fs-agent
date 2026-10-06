@@ -15,9 +15,10 @@ lines.** One command runs all of it:
 pnpm test        # vitest --coverage --no-file-parallelism, then eslint
 ```
 
-`--no-file-parallelism` is not a preference. Twenty-six of these files drive
-real servers, real sockets, real watchers and real timers; run in parallel they
-fight over the cores and invent failures. Four different tests once failed
+`--no-file-parallelism` is not a preference. **Thirty-seven of these files**
+drive a real `Server`, a real socket pair or the mesh harness — with real
+watchers and real timers; run in parallel they fight over the cores and invent
+failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
@@ -335,8 +336,8 @@ several suites generate cases in a loop.
 | --- | --- | --- |
 | `mesh/fs-mesh.spec.ts` | 6 | T1–T7, the scenarios the sync has to survive |
 | `mesh/fs-mesh-field-defects.spec.ts` | 10 | F1–F10, field defects reduced off-lab |
-| `mesh/fs-mesh-matrix.spec.ts` | 7 | the scenario matrix at mesh tier (L7, L8, I7, I10, J4+J5, J9 ×2) |
-| `mesh/fs-mesh-invariants.spec.ts` | 4 | invariants over the route, not the destination |
+| `mesh/fs-mesh-matrix.spec.ts` | 9 | the scenario matrix at mesh tier (L7, L8, I7, I10, J4+J5, J9 ×2) |
+| `mesh/fs-mesh-invariants.spec.ts` | 5 | invariants over the route, not the destination |
 | `mesh/fs-mesh-wiped-and-reverted.spec.ts` | 6 | a node comes back empty, or holding an older copy |
 | `mesh/fs-mesh-additive.spec.ts` | 3 | additive reconciliation (A1–A3) |
 | `mesh/fs-mesh-catchup-cost.spec.ts` | 2 | coming back does not cost what you missed |
@@ -363,15 +364,17 @@ several suites generate cases in a loop.
 | `fs-agent.spec.ts` | 90 | the agent's surface |
 | `fs-scanner.spec.ts` | 55 | scanning, watching, the scan cache |
 | `fs-conflict-resolver.spec.ts` | 41 | tip ordering, winners, three-way merge, copy naming |
-| `fs-anti-entropy.spec.ts` | 36 | the repair decision, by example |
-| `fs-manifest.spec.ts` | 36 | buckets, digests, reconciliation plans |
+| `fs-anti-entropy.spec.ts` | 38 | the repair decision, by example |
+| `fs-manifest.spec.ts` | 41 | buckets, digests, reconciliation plans |
+| `fs-agent-degradation.spec.ts` | 82 | what the agent does when a dependency fails, and the shapes no scenario reaches |
 | `fs-collect-removals.spec.ts` | 31 | the removal walk |
 | `fs-bucket-sync.spec.ts` | 29 | the wire format |
 | `fs-ignore.spec.ts` | 28 | glob ignore patterns, and every legacy prefix |
 | `fs-blob-adapter.spec.ts` | 26 | file ↔ blob |
 | `fs-edit-chain.spec.ts` | 20 | the chain |
-| `fs-plan-removals.spec.ts` | 19 | which removals may be applied |
-| `fs-agent-mass-delete-guard.spec.ts` | 15 | refusing a deletion that looks like a loss |
+| `fs-plan-removals.spec.ts` | 23 | which removals may be applied |
+| `fs-agent-mass-delete-guard.spec.ts` | 16 | refusing a deletion that looks like a loss, and reporting it |
+| `fs-agent-concurrent-write.spec.ts` | 9 | two writes of one path must not blend — 200 rounds per assertion |
 | `fs-agent-stale-reconnect.spec.ts` | 13 | a peer reconnecting with a stale tree |
 | `fs-scanner-vanish.spec.ts` | 12 | an entry that vanishes mid-scan |
 | `fs-classify.spec.ts` | 11 | behind / ahead / fork / incomplete |
@@ -387,7 +390,7 @@ several suites generate cases in a loop.
 | `fs-agent-no-laundering.spec.ts` | 6 | a node does not re-advertise what it adopted |
 | `fs-db-adapter.spec.ts` | 6 | storing a tree with its predecessors |
 | `fs-agent-conflict-log.spec.ts` | 5 | recording a resolved conflict |
-| `fs-conflict-integration.spec.ts` | 5 | conflict resolution end to end |
+| `fs-conflict-integration.spec.ts` | 6 | conflict resolution end to end |
 | `fs-filenames.spec.ts` | 5 | unicode and case |
 | `fs-level2-surfaces.spec.ts` | 5 | the model must be able to EXPRESS it |
 | `blob-io.spec.ts` | 5 | storing a file as a blob |
