@@ -821,28 +821,49 @@ flag during the rollout window — §2.1b's symptom — and clears once every no
 has re-scanned. **Upgrade machines together**, and expect the flag until the
 last one has.
 
-**`~H~` is unintelligible to an older build.** Avoidable, and
-`FsAgentOptions.announceTreeRef` avoids it: a new node speaks the OLD wire
-format and is understood by everyone, while still resolving its own ancestry —
-an entry can be found from the tree ref it produced
-(`FsEditChain.entryForTreeRef`). So the rollout is **"deploy with the switch
-on, then turn it off"**, not "stop the fleet".
+**`~H~` is unintelligible to an older build, and that is now accepted rather
+than worked around.** The agent used to offer a way out:
+`FsAgentOptions.announceTreeRef` made a new node speak the OLD wire format
+while still resolving its own ancestry, so a rollout could be "deploy with the
+switch on, then turn it off" rather than "stop the fleet".
 
-That the fallback works at all was measured rather than assumed. Finding a row
-BY a field is a query, not a content read, and whether a relay serves one across
-`IoPeer` was the reason the head was chosen in the first place. It does —
-verified against a real `Server`/`Client` pair.
+**That switch is gone.** Nothing is in production anywhere, so there is no
+older build to be understood by, and the cost was a second dialect inside every
+decision: a build that cannot parse `~H~` cannot parse `~BQ~` either, so the
+switch also had to disable the bucket protocol, which is why `bucketSync`
+defaulted to "on unless the old format is on". One flag quietly selected two
+different consistency models. Removed with it: the harness's `oldWireFormat`
+option and `fs-mesh-mixed.spec.ts`.
 
-The fallback is the fallback for a reason: a tree ref is a content hash, so a
-folder that returns to earlier content produces a SECOND entry with the same
-`dataRef` — §2.1 exactly, the ambiguity the chain exists to remove. The newest
-by `timeId` is the right pick and is still a pick. And it is never used on the
-apply path: a query is a peer read, and awaiting one before scheduling an apply
-is how a late joiner's bootstrap was lost.
+So the rollout rule is now the simple one: **upgrade machines together.** The
+ref change above already requires that; this no longer adds an alternative.
 
-**Tested by** `test/mesh/fs-mesh-mixed.spec.ts` — four nodes, half on each
-format, exercising new→new, new→old, old→new and old→old, including a deletion
-crossing from a new node to an old one.
+### What stayed, and why it is not compatibility
+
+Two paths were justified by the old format AND by a second case. Only the
+version justification expired:
+
+- **`_ancestryRelation`**, the whole-`InsertHistory` ancestry walk, is kept for
+  a node whose chain failed to **initialise**. That is degradation, not a
+  version: a node that cannot read its own history still has to sync, it just
+  cannot contribute an ordering.
+- **the bare-ref receive path**, because a bare ref is what any sender produces
+  whose chain could not name the state it is announcing — a runtime condition.
+
+Whether the second is still REACHABLE is a measurement rather than an
+assumption. With no old-format nodes left in the suite, the invariant `every
+announcement carries a chain head` passes across the whole mesh tier: **zero
+bare refs**. Coverage stayed at 100% through the deletion, so nothing was
+relying on the old dialect to be covered. That is the evidence for deleting the
+receive path, whenever it is deleted.
+
+What the fallback taught is still worth keeping: finding a row BY a field is a
+query, not a content read, and a relay does serve one across `IoPeer` —
+verified against a real `Server`/`Client` pair. And a tree ref is a content
+hash, so a folder that returns to earlier content produces a SECOND entry with
+the same `dataRef` — §2.1 exactly, the ambiguity the chain exists to remove.
+The newest by `timeId` is the right pick and is still a pick, which is why the
+head is the primary and the lookup never runs on the apply path.
 
 ## What Grows, and What Bounds It
 
@@ -1098,6 +1119,163 @@ The other half needs the edit chain below. See `doc/known-limits.md`.
 **Not yet bounded.** Deleting a large folder writes one tombstone per file and
 keeps them. `@rljson/mongo-agent` routes tombstone application through the same
 mass-delete circuit breaker that bounds a prune; fs does not yet.
+
+## Ordering a Tombstone Against the Write It Supersedes (`ManifestEntry.editedAt`)
+
+A bucket round compares two manifests. A manifest says what a node **holds**;
+until this release it never said **when the node decided**. So `reconcile` took
+a peer's tombstone as authority on its own:
+
+```ts
+if (theirsIsTombstone) {
+  plan.drop.push(path);   // no comparison with the write that superseded it
+}
+```
+
+A deletion made *before* a re-creation therefore still won, and the file was
+lost on every node that heard the older side. Measured by `I7b: a delivered
+deletion does not beat a later re-creation` — B deletes `flip.txt` while
+connected, is cut off, C re-creates it, and B's rejoin round dropped it from
+everybody.
+
+`reconcile` already knew this about itself. Its comment on the conflict branch
+says the conflict resolver *"had the same defect — winners were chosen by
+content hash — and was fixed by ordering on the chain; this rule survived
+because it is the one that must work with no history at all."* That holds for
+the hash tie-break, which is the fallback for two nodes sharing no history. It
+does not hold for a tombstone, where a history exists and says plainly which
+came first.
+
+### The fix: the Edit's own identity travels
+
+`ManifestEntry` gains a fourth element:
+
+```ts
+readonly [path: string, blobId: string, claimed?: 0 | 1, editedAt?: string]
+```
+
+`editedAt` is the `timeId` of the newest edit known for that path — the write
+that produced the blob, or the removal that produced the tombstone. It is not a
+wall-clock reading taken at send time; it is the identity of an Edit, minted
+once by whoever made it, so **both sides of a round order it identically**.
+
+Both tombstone branches then became symmetric, and the mirror matters as much
+as the rule:
+
+- their tombstone older than our write → **keep** the file
+- our tombstone older than their write → **fetch** it, rather than re-asserting
+  a deletion the fleet has moved past
+
+Without the second half each side holds its own position for ever and the round
+never converges.
+
+Absent means "the sender did not say", exactly as for `claimed`, and the rules
+that predate the field decide — which is also what happens after a restart
+until edits have been noted again. `editedAt` is read from `_pathEditTimes`,
+persisted in `.fsagent-state.json` beside the tombstones: without that the
+defect returns on every restart, because a node that cannot date its edits
+sends no time and the comparison has one operand.
+
+### What was tried first, and why it cannot work
+
+A receiver-side rule: refuse a drop whenever this node's own chain has a newer
+write for the path. It fixed `I7b` and broke three deletion deliveries —
+*delivers a deletion a peer never received*, *does not undo a peer deletion it
+missed*, and the churn fuzzer.
+
+The reason is structural. A node that has never **heard** a deletion has
+exactly the same local history as one whose write superseded it. Its own chain
+cannot tell the two apart, and in `I7b` it provably cannot: B was partitioned
+when C re-created the path, so C's write is unreachable from B's head. The
+ordering has to come from the side that holds the fact, which is why it travels.
+
+## A Verdict Is Only About This Folder While the Head Names It
+
+`FsEditChain.classify` compares two chain **heads**. A node's head can lag its
+own folder — a write is on disk and in `_currentRef` before
+`_recordChainEntry` has appended the entry for it, and an apply that re-derives
+a different ref leaves the head naming the state it came from.
+
+Asked inside that window the chain answers truthfully about a state the node
+has already left:
+
+```
+ours=fZ79puL0 theirs=KDeHB45d -> behind
+  chainHeadTree=B4-SH9ZX current=hd3PHz1r
+```
+
+`behind` was correct about `fZ79puL0` and wrong about the folder, which was at
+`hd3PHz1r` and held a file no peer had. The repair read `behind` as `pull`,
+replaced the folder, and the divergence reopened — **45 times in 89 seconds**.
+
+So `_classifyAnnouncedRef` answers `incomplete` unless
+`_chainHead.treeRef === _currentRef`. `antiEntropyDecision` turns that into
+`blocked`: nothing applied, nothing latched, retried. `fork` was tried instead,
+on the reasoning that a fork's repair is additive and therefore safe, and
+measured **worse** — 3 of 8 churn runs failing against 1 of 8. A merge invented
+from a verdict the node is not entitled to is still a merge.
+
+This is the same family as `fork-is-not-a-lag`: a marker that does not mean
+"where I am" used as though it did.
+
+### It is what made the agreement memo correctable
+
+`FsAntiEntropy` memoises "the hub's ref X describes the same content as the
+state I am in". That is a statement about **two** sides, true only while
+neither moves — and it was keyed on X alone, so it survived this node changing
+underneath it. A later announcement of X then cleared the divergence with no
+content check at all, for ever.
+
+The cost was not a misreported flag. The repair is **gated** on it:
+
+```
+A: 11 files  diverged=false  hub=goDX1oLq  local=kderYtfA  differing=[]
+B: 10 files  diverged=false  hub=goDX1oLq  local=goDX1oLq  differing=[sub/three.txt]
+```
+
+B had deleted `sub/three.txt`, nobody re-created it, and A, C and D all held it
+while reporting no divergence — so none of them ever repaired. The fleet did
+not heal **and** did not say it needed to.
+
+The key is now the pair, with the local side read from `view` on each call
+rather than from `_localRef` — that field is assigned as announcements arrive,
+so it lags its own folder and keying on it reintroduces exactly the staleness
+the pair removes.
+
+It had been tried twice before and reverted both times, because correcting it
+turns the detector back on and the repair behind it was choosing `pull` for a
+node that was ahead. Fixing what the repair is **told** had to come first; the
+memo is one line at the end of that.
+
+## Refused Deletions Are Reported, Not Only Logged (`FsAgent.refusedDeletions`)
+
+The mass-delete guard refuses any incoming deletion that would remove most of a
+folder, on three routes — an incoming whole tree, a bucket round's drop list,
+and a peer's stated removals. It refuses on **every** node, so a user who
+deletes 10 000 files on purpose ends up with one machine short of them and the
+rest unchanged, and no further message closes that gap.
+
+The guard is right anyway, because the two cases are indistinguishable from
+inside this package: a machine that was wiped telling the fleet to wipe, and a
+person deleting a project. Both arrive as "most of the folder is gone". The
+guard exists because the first one happened — a peer that had been emptied
+produced a round dropping **39 of 40** files, and before the floors covered
+that shape, 39 files were deleted on every node with no refusal logged at all.
+
+What changed is that the refusal is now **readable**. One place
+(`_refuseDeletion`) reports it three ways, so they cannot drift apart as the
+three copies had:
+
+| where | what it carries |
+| --- | --- |
+| the log | `MASS DELETE REFUSED on <folder>: <route> would remove N of M files.` |
+| `.sync-errors.log` | the key `restore/`, `bucketSync/` or `removals/massDeleteGuard` |
+| the API | `FsAgent.refusedDeletions` — `{ atMs, route, wouldRemove, held, paths }` |
+
+A UI cannot grep a log on a machine it is not running on, and *"why did my
+deletion not arrive"* is exactly the question it has to answer. Fixing it
+properly is a product decision — an approval path — and until that exists the
+refusal is the correct behaviour and the gap is a missing dialog.
 
 ## Edit Chain (`src/fs-edit-chain.ts`)
 

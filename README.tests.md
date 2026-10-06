@@ -8,7 +8,7 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**69 files, 806 scenarios, 100 % coverage on statements, branches, functions and
+**70 files, 810 scenarios, 100 % coverage on statements, branches, functions and
 lines.** One command runs all of it:
 
 ```bash
@@ -21,7 +21,7 @@ fight over the cores and invent failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 806 does
+This document says what the suite actually proves, because the number 810 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -225,12 +225,22 @@ bounded structures sampled while the folder churns. Short by default;
 `FS_SOAK_MS=14400000` runs the four hours the register asks for and nothing
 about the test changes.
 
-### 2.10 That an upgrade does not split the fleet
+### 2.10 That the wire format is what it claims to be
 
-`fs-mesh-mixed.spec.ts` runs half the fleet on the old wire format: they
-converge, ancestry still crosses, and a deletion travels from a new node to an
-old one. `fs-bucket-sync.spec.ts` (29) pins the wire format itself — message
-bodies are JSON because a POSIX filename may contain any byte but `/` and NUL.
+`fs-bucket-sync.spec.ts` (29) pins the format itself — message bodies are JSON
+because a POSIX filename may contain any byte but `/` and NUL.
+
+There is no longer a mixed-version test, because there is no longer a second
+format. `fs-mesh-mixed.spec.ts` ran half a fleet on plain tree refs and proved
+they converged; the switch it depended on
+(`FsAgentOptions.announceTreeRef`) was removed, since nothing is deployed that
+needs speaking to in a format it predates.
+
+What replaced it is stronger for the fleet we actually run: `every announcement
+carries a chain head`, in `mesh/fs-mesh-invariants.spec.ts`, records every ref
+each node puts on the wire and fails if any is bare. With the old format gone it
+covers the whole mesh tier — **zero bare refs** — and that is a census rather
+than a sample of two formats meeting.
 
 ### 2.11 Reproductions, kept verbatim
 
@@ -329,7 +339,6 @@ several suites generate cases in a loop.
 | `mesh/fs-mesh-invariants.spec.ts` | 4 | invariants over the route, not the destination |
 | `mesh/fs-mesh-wiped-and-reverted.spec.ts` | 6 | a node comes back empty, or holding an older copy |
 | `mesh/fs-mesh-additive.spec.ts` | 3 | additive reconciliation (A1–A3) |
-| `mesh/fs-mesh-mixed.spec.ts` | 3 | a mixed-version fleet |
 | `mesh/fs-mesh-catchup-cost.spec.ts` | 2 | coming back does not cost what you missed |
 | `fs-editor-patterns.spec.ts` | 6 | how real programs save |
 | `fs-chain-crosses-the-wire.spec.ts` | 4 | the chain crosses the wire |

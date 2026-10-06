@@ -224,8 +224,7 @@ costs.
 | `resolveConflicts` | `false` on the constructor, **`true` via `fromClient`** | Reconciles two edits to one file, keeping the loser as a renamed copy. Off, a conflicting edit is never merged — the resolver is not even constructed. The constructor keeps the primitive default because a hub may relay without arbitrating |
 | `onConflict` | — | Called with the conflict reports. Without it a conflict is resolved and nobody is told |
 | `joinWaitMs` | `1500` | How long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
-| `bucketSync` | `true` | Repairs a divergence by comparing manifests and fetching only what is missing, instead of replacing a folder. Defaults to `false` only when `announceTreeRef` is on |
-| `announceTreeRef` | `false` | Announces plain tree refs instead of chain refs — the **old wire format**, for rolling out into a fleet that has not upgraded. Turn it off once every machine has |
+| `bucketSync` | `true` | Repairs a divergence by comparing manifests and fetching only what is missing, instead of replacing a folder |
 | `antiEntropy` | `DEFAULT_ANTI_ENTROPY` | The periodic comparison that heals a lost announcement. A machine that is behind **asks**, rather than waiting to be told |
 | `syncConfig` | **`causalOrdering` and `includeClientIdentity` default to `true` via `fromClient`** | Forwarded to every `Connector` the agent builds. Without `causalOrdering` the wire carries no predecessor refs, so no conflicting edit can be merged — the agent warns once, loudly |
 | `clientIdentity` | — | Who this machine is, on the wire |
@@ -331,12 +330,13 @@ matcher.ignores('src/server.log'); // true
 | --- | --- |
 | `agent.stageTimings` | milliseconds per stage of the **last** cycle — scan, hash, store, announce, fetch, write, re-derive. A total says a run was slow; this says where |
 | `agent.antiEntropyStatus` | whether this machine agrees with the hub, and what it last did about it |
+| `agent.refusedDeletions` | deletions the mass-delete guard **refused**, newest last — `{ atMs, route, wouldRemove, held, paths }`. Read this to answer "why did my deletion not arrive": the guard refuses on every machine, so a deliberate mass deletion stalls the whole fleet and the only other trace is a line in each machine's log. Bounded at `REFUSED_DELETION_LOG_MAX`, in memory, and it refills on the next announcement |
 | `agent.scanner.onChange(cb)` | every filesystem event the scanner accepted |
 | `onConflict` | conflicts, as they are resolved |
 | `SYNC_ERROR_FILE` | `.sync-errors.log` in the folder: a keyed, append-only record of every refusal and failure — a locked file, an unfetchable blob, an impossible path, a refused mass deletion |
 | `.fsagent-conflicts.json` | resolved conflicts, bounded |
 | `.fsagent-recovered/` | files a join kept but deliberately did not announce |
-| `.fsagent-state.json` | what this machine remembers deleting, across restarts |
+| `.fsagent-state.json` | what this machine remembers across restarts: the state it was last at, the paths it deleted, and **when each path was last edited**. The edit times are what let a peer's tombstone be ordered against the write it claims to supersede — a machine that has forgotten them sends no time, and the comparison has one operand |
 
 All of these live inside the synced folder and all are ignored by the scanner —
 otherwise the notification would itself be content, propagate, and be rewritten
@@ -473,7 +473,22 @@ runner.
 **An upgrade changes every tree ref in the fleet.** Content identity now
 excludes mtime and fixes a canonical child order, so the same bytes hash
 differently than in older releases. Nothing is destroyed, but the fleet reads
-divergent until every machine has re-scanned. **Upgrade machines together.**
+divergent until every machine has re-scanned. **Upgrade machines together** —
+there is no longer a switch for speaking the previous wire format, because
+nothing is deployed that needs one.
+
+**A deliberate mass deletion does not arrive.** Deleting most of a folder is
+refused on every machine, and nothing asks the user — see "what it does not do"
+above. Read `agent.refusedDeletions` to find out it happened: the guard cannot
+tell a person deleting a project from a machine that was wiped telling the fleet
+to wipe, and the second one is why the guard exists.
+
+**A machine can finish heavy churn one file short.** Under sustained random
+writing, deleting and partitioning, a machine can end up holding one file fewer
+than the fleet. It reports the divergence and names the path, so nothing is lost
+silently, and it does not catch up inside the test's window. The cause is
+recorded: its scan disagrees with its disk, so it is in sync with its own wrong
+tree. See [doc/known-limits.md](doc/known-limits.md).
 
 ---
 
@@ -482,7 +497,7 @@ divergent until every machine has re-scanned. **Upgrade machines together.**
 | document | what is in it |
 | --- | --- |
 | [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, additive reconciliation, anti-entropy |
-| [README.tests.md](README.tests.md) | the 806 scenarios this package ships, by what they prove |
+| [README.tests.md](README.tests.md) | the 810 scenarios this package ships, by what they prove |
 | [doc/scenario-matrix.md](doc/scenario-matrix.md) | every way a folder and a history can disagree, and which tier proves it |
 | [doc/known-limits.md](doc/known-limits.md) | what has been measured and accepted, and what was closed |
 | [doc/q3-backlog-status.md](doc/q3-backlog-status.md) | the open quality and stability items |
