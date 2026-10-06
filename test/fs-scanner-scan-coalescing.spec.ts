@@ -19,7 +19,7 @@ import { FsScanner } from '../src/fs-scanner';
 // per event, and `fs.watch` does not await its callback — so copying 1 200
 // tiny files into a watched folder started 1 200 concurrent full scans. The
 // CPU sat 82% idle waiting on the filesystem, RSS climbed from 263 MB to
-// 785 MB, and the peer received nothing for two minutes. On a customer's
+// 785 MB, and the peer received nothing for two minutes. On a production
 // 3 702-file folder the same burst wedged the client outright.
 describe('FsScanner — scan coalescing', () => {
   let root: string;
@@ -60,7 +60,7 @@ describe('FsScanner — scan coalescing', () => {
 
   // The part that cannot be traded away for speed. Joining a scan that began
   // BEFORE the event would let a push carry a tree that predates the file that
-  // triggered it — which is exactly what the lab saw advertised: trees of 64,
+  // triggered it — which is exactly what a real fleet saw advertised: trees of 64,
   // then 103, then 204 nodes, each a stale snapshot of a folder that already
   // held twelve hundred files.
   it('never answers with a pass that started before the caller asked', async () => {

@@ -15,6 +15,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 
 import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
 
@@ -23,13 +24,13 @@ import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
  * the network to agree again with nobody doing anything.
  *
  * Every change reaches a peer as exactly one message, and nothing ever asked
- * afterwards whether it arrived. The lab's defects of the last months — the
+ * afterwards whether it arrived. The field defects of the last months — the
  * lost deletion, the node that went quiet, the forward that never landed —
  * all end the same way: two machines on two states, permanently, with nothing
  * saying so. This is the test that would have caught nearly all of them,
  * because it does not care WHICH message went missing.
  *
- * The configuration is the one a CARAT One Client ships: `causalOrdering` and
+ * The configuration is the one a host client ships: `causalOrdering` and
  * client identity on, the bootstrap heartbeat OFF, and the server's STATE
  * BEACON carrying the hub's state to a node that missed it. The heartbeat is
  * run as a second signal: the anti-entropy must work with either.
@@ -170,6 +171,7 @@ describe.each([
       await new Db(localIo).core.createTableWithInsertHistory(treeCfg);
 
       const agent = new FsAgent(folder, sharedBs, {
+      ...ORIGIN_FIXTURE,
         timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
         antiEntropy,
       });
@@ -306,7 +308,7 @@ describe.each([
       expect(await until('burst-2.txt', '2')).toEqual(all('2'));
     }, 40_000);
 
-    // The review's case (ONE-446). Another machine writes every few hundred
+    // The review's case (an earlier change). Another machine writes every few hundred
     // milliseconds, so the hub's state never holds still — and B loses every
     // forward. The grace period used to restart on each hub change, so B was
     // repaired only once the writer STOPPED: "weicht ab, noch kein

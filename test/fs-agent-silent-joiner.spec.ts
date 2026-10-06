@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 // A machine joining an idle network made EMPTINESS the current state.
 //
@@ -23,7 +24,7 @@ import { FsAgent } from '../src/fs-agent.ts';
 // cannot make the joiner's folder fill: with its own empty tree as the latest
 // ref there is nothing for the bootstrap to deliver.
 //
-// Measured on a real customer folder: 0 of 3642 files after 60 s, twice.
+// Measured on a large production folder: 0 of 3 642 files after 60 s, twice.
 describe('FsAgent — an agent with nothing to say does not speak', () => {
   const dir = join(process.cwd(), 'test-temp-silent-joiner');
 
@@ -54,6 +55,7 @@ describe('FsAgent — an agent with nothing to say does not speak', () => {
 
   const agentFor = (bs: BsMem) =>
     new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
 

@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FsAgent } from '../src/fs-agent.ts';
 import { FsConflictResolver } from '../src/fs-conflict-resolver.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 /**
  * End-to-end conflict resolution against a real Db + real filesystem. Exercises
@@ -39,7 +40,10 @@ describe('FsAgent conflict resolution (integration)', () => {
     db = new Db(io);
     await db.core.createTableWithInsertHistory(createTreesTableCfg(TREE));
 
-    agent = new FsAgent(testDir, undefined, { resolveConflicts: true });
+    agent = new FsAgent(testDir, undefined, {
+    ...ORIGIN_FIXTURE,
+    resolveConflicts: true,
+  });
   });
 
   afterEach(async () => {
@@ -87,13 +91,34 @@ describe('FsAgent conflict resolution (integration)', () => {
     expect([...(conflict?.branches ?? [])].sort()).toEqual([tipB, tipC].sort());
 
     // Resolve via the agent's own wiring.
+    //
+    // `announce` is REQUIRED, and this test is why it is not optional. The
+    // merge store suppresses `Connector`'s db observer, so if nothing
+    // announces afterwards the merge revision never leaves the node at all.
+    // An optional parameter would make that the silent default for any future
+    // caller who forgets it — which is the defect this argument exists to fix.
+    // See `_buildConflictResolverDeps`.
+    const announced: string[] = [];
     const resolver = new FsConflictResolver(
-      (agent as unknown as {
-        _buildConflictResolverDeps: (db: Db, t: string) => never;
-      })._buildConflictResolverDeps(db, TREE),
+      (
+        agent as unknown as {
+          _buildConflictResolverDeps: (
+            db: Db,
+            t: string,
+            announce: (ref: string) => Promise<void>,
+          ) => never;
+        }
+      )._buildConflictResolverDeps(db, TREE, async (ref) => {
+        announced.push(ref);
+      }),
     );
     const mergeRef = await resolver.resolve(conflict!);
     expect(mergeRef).toBeTruthy();
+
+    // The merge went out, and it went out NAMING THE STATE IT PRODUCED.
+    expect(announced, 'the merge revision was never announced').toEqual([
+      mergeRef,
+    ]);
 
     // Fork collapsed → single tip.
     expect(await db.detectDagBranch(TREE)).toBeNull();
@@ -135,12 +160,23 @@ describe('FsAgent conflict resolution (integration)', () => {
     await storeRevision([tipO]);
 
     const conflict = await db.detectDagBranch(TREE);
+    const announced: string[] = [];
     const resolver = new FsConflictResolver(
-      (agent as unknown as {
-        _buildConflictResolverDeps: (db: Db, t: string) => never;
-      })._buildConflictResolverDeps(db, TREE),
+      (
+        agent as unknown as {
+          _buildConflictResolverDeps: (
+            db: Db,
+            t: string,
+            announce: (ref: string) => Promise<void>,
+          ) => never;
+        }
+      )._buildConflictResolverDeps(db, TREE, async (ref) => {
+        announced.push(ref);
+      }),
     );
     await resolver.resolve(conflict!);
+    // A merge that only DELETES is still a state, and still has to be said.
+    expect(announced, 'the merge revision was never announced').toHaveLength(1);
 
     expect(await db.detectDagBranch(TREE)).toBeNull();
     // Each branch's deletion wins for its own file → both removed, no copies.
@@ -258,4 +294,99 @@ describe('FsAgent conflict resolution (integration)', () => {
     expect(await readFile(join(testDir, 'f.txt'), 'utf8')).toBe('DDD');
     teardown();
   });
+  // ...........................................................................
+  it('merges a fork nothing can name, on a folder never scanned', async () => {
+    // TWO SHAPES NO SCENARIO IN THE SUITE PRODUCES, and both are ordinary.
+    //
+    // 1. A FORK THE CHAIN CANNOT NAME. The merge adopts the incoming side's
+    //    head so the merge revision descends from BOTH branches — without
+    //    that, the peer whose branch was merged classifies the result as a
+    //    fork against its own head and resolves it again, for ever. But a
+    //    peer on the old wire format announces a plain tree ref and records
+    //    no head, so there is nothing to adopt. The merge must still happen,
+    //    and must simply not claim a parent it cannot name.
+    //
+    // 2. A FOLDER NEVER SCANNED. `beforeMerge` is read from the scan, and a
+    //    conflict can land before the first one completes — a restart into an
+    //    already-diverged network. The empty tree is what makes
+    //    `_recordReceived` treat everything as delivered rather than crash.
+    await putFiles({ 'doc.txt': 'v0' });
+    const tipO = await storeRevision();
+
+    await putFiles({ 'doc.txt': 'vB', 'onlyB.txt': 'b0' });
+    const tipB = await storeRevision([tipO]);
+    const ourRef = (await db.getRefOfTimeId(TREE, tipB)) as string;
+
+    await putFiles({ 'doc.txt': 'vC', 'onlyC.txt': 'c0' });
+    const tipC = await storeRevision([tipO]);
+    const theirRef = (await db.getRefOfTimeId(TREE, tipC)) as string;
+    const theirTree = await agent.extract();
+
+    // A FRESH AGENT, because `_scanner.tree` has only a getter and the only
+    // honest way to have never scanned is to never have scanned. This is the
+    // restart-into-a-diverged-network shape: the folder is on disk, the
+    // history is in the db, and this process has not looked at either yet.
+    const fresh = new FsAgent(testDir, undefined, {
+      ...ORIGIN_FIXTURE,
+      resolveConflicts: true,
+    });
+    // It is at B, and has no chain at all — so nothing names C.
+    (fresh as unknown as { _currentRef: unknown })._currentRef = ourRef;
+    (fresh as unknown as { _chain: unknown })._chain = undefined;
+    (fresh as unknown as { _chainHead: unknown })._chainHead = undefined;
+    expect(
+      (fresh as unknown as { _scanner: { tree?: unknown } })._scanner.tree,
+      'the fresh agent had already scanned, so the shape under test is gone',
+    ).toBeFalsy();
+
+    const connector = new Connector(
+      db,
+      Route.fromFlat(`/${TREE}`),
+      new SocketMock(),
+    );
+    const announced: string[] = [];
+    (connector as unknown as { send: (r: string) => void }).send = (
+      r: string,
+    ) => {
+      announced.push(r);
+    };
+
+    const merging = (
+      fresh as unknown as {
+        _resolveConflictInline: (
+          db: Db,
+          treeKey: string,
+          incomingRef: string,
+          incomingTree: unknown,
+          predecessorRefs: string[],
+          connector: Connector,
+        ) => Promise<void>;
+      }
+    )._resolveConflictInline(
+      db,
+      TREE,
+      theirRef,
+      theirTree,
+      [ourRef],
+      connector,
+    );
+
+    // AND IT FAILS LOUDLY, which is the third thing worth pinning here. This
+    // agent has no blob store reaching the peer that authored C, so the merge
+    // cannot materialise it. The alternative — writing what it could fetch and
+    // calling the merge done — would publish a revision claiming content it
+    // does not hold, and every peer would then fetch THAT.
+    await expect(merging).rejects.toThrow(/could not fetch/);
+
+    // Nothing was claimed on the way. The adoption is what makes a merge
+    // descend from both branches, and a branch nothing names cannot be
+    // adopted — so the field stays empty rather than holding a guess.
+    expect(
+      (fresh as unknown as { _adoptedChainHead?: string })._adoptedChainHead,
+      'a parent was claimed that nothing names',
+    ).toBeUndefined();
+    // And no half-merged state was announced.
+    expect(announced, 'a merge that failed was announced anyway').toEqual([]);
+    fresh.dispose();
+  }, 30_000);
 });

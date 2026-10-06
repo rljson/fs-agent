@@ -1,5 +1,16 @@
 # Socket.IO Production Architecture
 
+> **`cleanTarget` on the sync path does nothing any more.** It used to be how a
+> deletion propagated: a received tree was applied with a prune, so a path
+> missing from it was removed. That is exactly the inference the edit chain
+> exists to remove — a tree lacks a path because the sender deleted it, or
+> because the sender never had it, and a content hash cannot tell the two
+> apart. `syncFromDb` now always applies **additively** and overrides the flag;
+> a deletion arrives STATED in the chain, written down by the node that
+> performed it. `restore({ cleanTarget: true })` still prunes, for a caller
+> asserting that the tree is the whole truth.
+
+
 This document describes the production-ready Socket.IO implementation for real-time filesystem synchronization using `@rljson/fs-agent`.
 
 ## Overview
@@ -151,7 +162,7 @@ const agent = await FsAgent.fromClient(
 
 // Simple sync methods - no db/connector/treeKey needed!
 await agent.syncToDbSimple({ notify: true });
-await agent.syncFromDbSimple({ cleanTarget: true });
+await agent.syncFromDbSimple();
 
 console.log('Client syncing...');
 ```
@@ -168,7 +179,7 @@ const agent = new FsAgent('./my-folder', client.bs);
 
 // Bidirectional sync with explicit parameters
 await agent.syncToDb(db, connector, 'sharedTree', { notify: true });
-await agent.syncFromDb(db, connector, 'sharedTree', { cleanTarget: true });
+await agent.syncFromDb(db, connector, 'sharedTree');
 
 console.log('Client syncing...');
 ```

@@ -15,37 +15,38 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 
 /**
  * Three clients, one file, written at the SAME INSTANT.
  *
  * Every existing test of "both clients modify the same file" is sequential on
  * purpose — *A writes, wait for convergence, then B writes* — and says so. So
- * the case the lab actually fails is the one nothing here covers: the
- * `conflict-resolution` recipe writes from every participant at once and then
+ * the case a real fleet actually fails is the one nothing here covers: the
+ * `conflict-resolution` scenario writes from every participant at once and then
  * requires that all of them end on the same content, whichever version wins.
  *
  * Measured on four machines, 2026-09-19:
  *
  *     nodes diverged on conflict/shared.txt after 60s: 3 distinct versions
- *     [NB-21624=263d5dab, NB-2505=4ca963ab, NB-2510=19c23d89, NB-2744=19c23d89]
+ *     [node-A=263d5dab, node-D=4ca963ab, node-B=19c23d89, node-C=19c23d89]
  *
  * — three stable answers, not a race still settling.
  *
- * The configuration below is the one a CARAT One Client ships:
+ * The configuration below is the one a host client ships:
  * `causalOrdering` on, `resolveConflicts` OFF. That gate is deliberate (turning
- * the merge on once dropped the lab to 4 of 11), and what this test exists to
- * establish is what it COSTS.
+ * the merge on once dropped a real fleet to 4 of 11), and what this test exists
+ * to establish is what it COSTS.
  *
- * **Since ONE-446 it costs nothing here.** Both cases converge, the shipped one
+ * **Since an earlier change it costs nothing here.** Both cases converge, the shipped one
  * included — because the hub now announces what it holds (the state beacon) and
  * the anti-entropy repairs a node that disagrees with it for longer than the
- * grace period. Measured 2026-09-28: five rounds, three runs, every round on one
- * version within 18-23 s.
+ * grace period. Measured 2026-09-28: five rounds, three runs, every round on
+ * one version within 18-23 s.
  *
- * What is NOT repaired, and is still written down in `doc/known-limits.md`: WHO
- * wins. The winner is the last advertisement to arrive, not the later save.
- * Convergence is the promise; "the newer edit survives" is not.
+ * What is NOT repaired, and is still written down in `README.public.md`, "Known
+ * constraints": WHO wins. The winner is the last advertisement to arrive, not
+ * the later save. Convergence is the promise; "the newer edit survives" is not.
  */
 
 /**
@@ -72,7 +73,7 @@ interface Node {
 
 describe.each([
   { merge: true, label: 'with conflict resolution' },
-  { merge: false, label: 'without it — as a One Client ships' },
+  { merge: false, label: 'without it — as a host client ships' },
 ])('three clients writing the same file at once, $label', ({ merge }) => {
   // Its own directory per case: two describes sharing one would have each
   // one's `afterEach` deleting the other's folders.
@@ -92,7 +93,7 @@ describe.each([
     const serverIo = new IoMem();
     await serverIo.init();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-    // The hub announces what it holds — the state beacon a One Client hub
+    // The hub announces what it holds — the state beacon a host client hub
     // ships (30 s there; 500 ms here so five rounds stay a test). Without an
     // announcement the anti-entropy has nothing to compare its own state
     // against, which is why this contest used to end stuck.
@@ -112,6 +113,7 @@ describe.each([
       await new Db(localIo).core.createTableWithInsertHistory(treeCfg);
 
       const agent = new FsAgent(folder, sharedBs, {
+      ...ORIGIN_FIXTURE,
         resolveConflicts: merge,
         timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
         // On by default; two seconds rather than the shipped ten so five
@@ -167,17 +169,18 @@ describe.each([
       }),
     );
 
-  // **The second case is expected to FAIL, and that is the measurement.**
-  // `it.fails` passes while the body does not converge and turns red the day it
-  // does — so the cost of shipping with the merge switched off is recorded
-  // here rather than rediscovered on four machines, and improving it cannot
-  // pass unnoticed.
-  // Both cases converge now. Until ONE-446 the second one did not: without
-  // `resolveConflicts` three simultaneous writes settled on three different
-  // versions and stayed there — measured on four machines on 2026-09-19, and
-  // encoded here as `it.fails`. The anti-entropy repairs it: each node notices
-  // it disagrees with the hub for longer than the grace period and pulls, so
-  // the contest ends on one version without the merge being switched on.
+  // BOTH CASES CONVERGE. The second one did not until an earlier change:
+  // without `resolveConflicts` three simultaneous writes settled on three
+  // different versions and stayed there, measured on four machines on
+  // 2026-09-19, and it was committed here as `it.fails` — green while the body
+  // diverged, red the day it stopped. That is what happened, so the inversion
+  // is gone.
+  //
+  // The anti-entropy is what repairs it: each node notices it disagrees with
+  // the hub for longer than the grace period and pulls, so the contest ends on
+  // one version even with the merge switched off. The alias below is kept
+  // because the second case is the CONTEST and the first deliberately is not,
+  // and reading `contest(...)` says which is which.
   const contest = it;
 
   it('lets one writer\'s second edit win, which is not a conflict at all', async () => {
@@ -185,23 +188,23 @@ describe.each([
     // writes again. Nothing else touched the file, so the second version must
     // reach every peer — there is no disagreement to resolve.
     //
-    // The lab's `content-variety` recipe does exactly this (`shrink.txt`:
+    // The `content-variety` scenario does exactly this (`shrink.txt`:
     // "long original content here", converge, then "tiny") and reported, with
     // the merge enabled on the sandbox route:
     //
-    //     file "shrink.txt" content mismatch on NB-21624
-    //     [NB-21624=other-content, NB-2505=other-content, NB-2744=other-content]
+    //     file "shrink.txt" content mismatch on node-A
+    //     [node-A=other-content, node-D=other-content, node-C=other-content]
     //
     // Three peers agreeing with each other on the version the writer had
     // already replaced.
     //
     // **It does not reproduce here**, with or without the merge — so whatever
-    // the lab hit needs more than two sequential writes. The recipe writes
-    // five files first, one of them 200 KB, and the second edit lands while
-    // that is still moving. This test stays as the invariant it asserts: a
-    // lone writer's second edit must reach every peer, because nothing
+    // a real fleet hit needs more than two sequential writes. The scenario
+    // writes five files first, one of them 200 KB, and the second edit lands
+    // while that is still moving. This test stays as the invariant it asserts:
+    // a lone writer's second edit must reach every peer, because nothing
     // competed for it. If that ever stops being true in THIS shape, it is a
-    // much simpler bug than the one on the lab.
+    // much simpler bug than the one on a real fleet.
     const writer = nodes[0]!;
 
     await writeFile(join(writer.folder, 'shared.txt'), 'long original content');

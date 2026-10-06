@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // Deleting a file propagated only when the DELETER had created it. A client
@@ -54,10 +55,11 @@ describe('FsAgent — leaving a state by its own edit retires that state', () =>
     // content hash, so deriving it here yields the same string the agent does.
     const bs = new BsMem();
     const seedRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(dir, bs).extract(),
+      await new FsAgent(dir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const connector = new Connector(db, Route.fromFlat('/fsTree+'), new SocketMock());

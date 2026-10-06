@@ -11,6 +11,7 @@ import { createTreesTableCfg, Route } from '@rljson/rljson';
 import { Client, Server } from '@rljson/server';
 
 import { FsAgent } from '../../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from '../origin-fixture.ts';
 import { defineProductionSyncTests } from './shared-sync-tests.ts';
 
 // =============================================================================
@@ -46,7 +47,7 @@ defineProductionSyncTests(
     await clientA.init();
     const dbA = new Db(clientA.io!);
     const connectorA = new Connector(dbA, route, clientSocketA);
-    const agentA = new FsAgent(folderA, clientA.bs);
+    const agentA = new FsAgent(folderA, clientA.bs, ORIGIN_FIXTURE);
 
     // --- Client B ---
     const [serverSocketB, clientSocketB] = createSocketPair();
@@ -62,7 +63,7 @@ defineProductionSyncTests(
     await clientB.init();
     const dbB = new Db(clientB.io!);
     const connectorB = new Connector(dbB, route, clientSocketB);
-    const agentB = new FsAgent(folderB, clientB.bs);
+    const agentB = new FsAgent(folderB, clientB.bs, ORIGIN_FIXTURE);
 
     return {
       treeKey,

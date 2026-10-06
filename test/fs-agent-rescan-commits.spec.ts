@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // Reported from a live pair, on a real 3 702-file folder:
@@ -63,6 +64,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
       return realSend(ref);
     };
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     return { db, connector, agent, sent, socket };
@@ -121,18 +123,42 @@ describe('FsAgent — a change found only by the safety rescan', () => {
     // the harness rather than the agent. Built from a separate folder holding
     // only the seed, which is what a peer that has not heard the news looks
     // like.
+    //
+    // AND it must differ from this node's own earlier state by CONTENT, not
+    // just by being built somewhere else. This folder used to be an exact copy
+    // minus one file, and that was enough only because a tree ref included
+    // mtime: the copies carried new timestamps, so the ref differed and the
+    // agent treated the peer as news. With mtime out of the content identity —
+    // the fix for `the weakness register` §1 — the copy re-derives a ref this
+    // node has ALREADY advertised, so the agent correctly calls it its own
+    // echo, no apply runs, and the deferred rescan is never flushed.
+    //
+    // The test then failed for a reason that had nothing to do with what it
+    // tests. So the peer is made to hold a state this node has never
+    // advertised: the seed MINUS one of its files, as well as minus the one
+    // found by the rescan.
+    //
+    // Short one file rather than holding an extra one, deliberately. A file
+    // only the peer has needs its blob, and the peer here has its own `BsMem`
+    // — so the apply would stall on an unfetchable blob and record nothing,
+    // failing the test a third way. Being short of a file needs no bytes at
+    // all: with `cleanTarget: false` nothing is pruned, the folder is left as
+    // it is, and the apply completes — which is all this test needs, because
+    // what it watches for is the deferred rescan going out afterwards.
     const peerDir = `${dir}-peer`;
     await rm(peerDir, { recursive: true, force: true });
     await mkdir(join(peerDir, 'nested'), { recursive: true });
-    for (const name of await readdir(join(dir, 'nested'))) {
-      if (name === 'during-an-apply.txt') continue;
+    const seedNames = (await readdir(join(dir, 'nested')))
+      .filter((name) => name !== 'during-an-apply.txt')
+      .sort();
+    for (const name of seedNames.slice(1)) {
       await writeFile(
         join(peerDir, 'nested', name),
         await readFile(join(dir, 'nested', name), 'utf-8'),
       );
     }
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, new BsMem()).extract(),
+      await new FsAgent(peerDir, new BsMem(), ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 3_000));
@@ -161,6 +187,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
     };
 
     const agent = new FsAgent(dir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const stop = await agent.syncToDb(db, connector, 'fsTree');

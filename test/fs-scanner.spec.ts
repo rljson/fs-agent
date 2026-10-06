@@ -145,8 +145,20 @@ describe('FsScanner', () => {
       expect(fileTree).toBeDefined();
       const meta = fileTree?.meta as any;
       expect(meta?.size).toBe(12); // "test content" length
-      expect(meta?.mtime).toBeTypeOf('number');
       expect(fileTree?.isParent).toBe(false);
+      // NO mtime, and that is the point: it is excluded from the content
+      // identity so two machines holding the same bytes derive the same ref.
+      // With it in, they did not — at millisecond granularity — and a node
+      // whose ref disagreed with its peers' had every deletion it sent
+      // refused (`the weakness register` §1). The absolute `path` has been
+      // excluded the same way, and for the same reason, all along.
+      expect(meta?.mtime).toBeUndefined();
+      expect(meta?.path).toBeUndefined();
+      // Observed and kept, just not hashed: the restore's skip-a-write
+      // optimisation checks a file's mtime against what the scan saw.
+      const known = scanner.knownFile('metadata.txt');
+      expect(known?.mtime).toBeTypeOf('number');
+      expect(known?.size).toBe(12);
     });
   });
 
@@ -366,7 +378,7 @@ describe('FsScanner', () => {
     // makes during a restore came back as a change event, each event triggered
     // a scan, and the debounce that batches a push was reset before it fired.
     //
-    // Measured on the customer's folder: after a 3 642-file restore the watcher
+    // Measured on a large production folder: after a 3 642-file restore the watcher
     // reported the same newly added file NINE times and no ref was ever emitted
     // for it. The file did not fail to arrive — it was never sent.
     it('ignores a matching segment anywhere in a watcher path', () => {
@@ -679,8 +691,8 @@ describe('FsScanner', () => {
       // fires, while no single pause ever lasts long enough to look stuck —
       // every rescan is dropped, and the stuck threshold is never reached.
       // The node stays silent about its own write for as long as the traffic
-      // keeps up, which is what turned a 3s recipe into a 121s timeout that
-      // converged once the lab went quiet.
+      // keeps up, which is what turned a 3s scenario into a 121s timeout that
+      // converged once a real fleet went quiet.
       //
       // Remembering the drop ends that: the next resume rescans, whatever the
       // pause was worth.
@@ -1047,6 +1059,46 @@ describe('FsScanner', () => {
       });
       await scanner2.scan();
       expect(setBlob2).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ...........................................................................
+  describe('stopWatch', () => {
+    it('clears a settle timer that was still pending', async () => {
+      // A SETTLE TIMER OUTLIVING ITS SCANNER WOULD FIRE INTO A STOPPED ONE.
+      //
+      // The timer is armed when a scan finds a file still growing, and it is
+      // deliberately NOT re-armed while one is pending — re-arming on every
+      // scan starves the files it exists for. So whether one is pending when
+      // the watcher stops depends on the timing of a write that happens to
+      // straddle a scan, which is why these two lines were covered on macOS
+      // and uncovered on Linux CI: `fs-scanner.ts` 1369-1370, reported as
+      // `Coverage for lines (99.9%) does not meet global threshold (100%)`.
+      //
+      // Arranging a mid-settle write on demand is not reliable on either
+      // platform. The behaviour under test is pure cleanup, so the timer is
+      // armed directly and the assertion is that stopping clears it: the
+      // callback must never run, and the field must be released so a later
+      // scan can arm a fresh one.
+      const scanner = new FsScanner(testDir, { bs: new BsMem() });
+      let fired = false;
+      const pending = setTimeout(() => {
+        fired = true;
+      }, 50);
+      (scanner as unknown as { _settleTimer: NodeJS.Timeout | null })._settleTimer =
+        pending;
+
+      scanner.stopWatch();
+
+      expect(
+        (scanner as unknown as { _settleTimer: unknown })._settleTimer,
+        'the timer was not released, so a later scan cannot arm one',
+      ).toBeNull();
+      await new Promise((r) => setTimeout(r, 120));
+      expect(
+        fired,
+        'the settle timer fired into a scanner that had been stopped',
+      ).toBe(false);
     });
   });
 });

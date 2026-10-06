@@ -7,6 +7,7 @@
 import { Bs, BsMem } from '@rljson/bs';
 
 import { storeFileAsBlob } from './blob-io.ts';
+import { compileIgnore, type IgnoreMatcher } from './fs-ignore.ts';
 import { hip } from '@rljson/hash';
 import { Json } from '@rljson/json';
 import { Tree, TreeRef } from '@rljson/rljson';
@@ -121,6 +122,23 @@ export type FsChangeCallback = (change: FsChange) => void | Promise<void>;
 /**
  * Options for scanning
  */
+/**
+ * Default for {@link FsScanOptions.settleMs}.
+ *
+ * Matched to the agent's debounce: below it a scan can still catch a copy
+ * mid-flight, and above it every new file pays latency for a hazard that is
+ * already covered.
+ */
+export const DEFAULT_SETTLE_MS = 100;
+
+/**
+ * Default for {@link FsScanOptions.settleMinBytes}.
+ *
+ * One megabyte: above the size anything is written in a single operation, and
+ * at the order where a copy takes long enough for a scan to land inside it.
+ */
+export const DEFAULT_SETTLE_MIN_BYTES = 1024 * 1024;
+
 export interface FsScanOptions {
   /** Patterns to ignore (glob patterns) */
   ignore?: string[];
@@ -141,6 +159,42 @@ export interface FsScanOptions {
    * after a restart. Omit to disable (default: full read+hash every scan).
    */
   scanCachePath?: string;
+  /**
+   * How long to wait before coming back for a file that was still being
+   * written.
+   *
+   * A copy takes seconds, and for those seconds the file on disk is a PREFIX
+   * of the real one. Reading it there produces a blob of the prefix, and a
+   * blob is what gets announced — so the fleet is told a truncated file is the
+   * complete state, and on every peer it then IS the complete state.
+   *
+   * Measured before this existed: a 2 MB file written in 8 slices was hashed
+   * at 262 144 bytes, matching the field report exactly — *"eine große Datei
+   * wird 0,3 Sekunden nach dem ersten Byte gelesen und als vollständiger Stand
+   * an alle verteilt"*.
+   *
+   * The cost is latency: a new file waits this long before it can propagate.
+   * Kept at the same order as the agent's debounce so it adds nothing a user
+   * would notice, and a deferral schedules its own follow-up scan rather than
+   * waiting for the five-second safety rescan.
+   */
+  settleMs?: number;
+  /**
+   * Below this size a file is never held back for settling.
+   *
+   * The two halves of the rule cost different things. Asking "did it change
+   * since this scan began" is free and catches a write that lands while the
+   * scan runs. Asking "has it been quiet for a moment" catches a writer whose
+   * gaps are wider than one scan — and costs every file that much latency.
+   *
+   * So the second half is spent only where the hazard is, which the register
+   * names: *"eine große Datei wird 0,3 Sekunden nach dem ersten Byte gelesen
+   * und als vollständiger Stand an alle verteilt"*. A document somebody saves
+   * is written in one go and propagates as fast as it ever did; a
+   * multi-megabyte copy waits a moment longer, and the alternative for it is
+   * being published truncated.
+   */
+  settleMinBytes?: number;
 }
 
 // .............................................................................
@@ -156,6 +210,15 @@ export class FsScanner {
   private _watcher: FSWatcher | null = null;
   private _changeCallbacks: FsChangeCallback[] = [];
   private _options: FsScanOptions;
+  /**
+   * The ignore list, compiled once.
+   *
+   * Compiled rather than re-read per entry because a scan of a production
+   * catalogue asks this question once per file, and a glob is a regular
+   * expression that should be built once. `fs-ignore.ts` carries the
+   * compatibility rule that keeps every prefix pattern working.
+   */
+  private readonly _ignoreMatcher: IgnoreMatcher;
   private _bs: Bs;
   private _paused: boolean = false;
   private _missedChangesDuringPause: boolean = false;
@@ -172,6 +235,35 @@ export class FsScanner {
 
   /** Path→content cache backing {@link FsScanOptions.scanCachePath} (unused when unset). */
   private _scanCachePath?: string;
+
+  /**
+   * Paths this scan refused to read because they were still being written.
+   *
+   * Counted so {@link scan} knows to come back, and reported so a folder that
+   * never settles is diagnosable rather than mysteriously stale.
+   */
+  private _unsettledDuringScan: string[] = [];
+
+  /**
+   * When the scan now running began.
+   *
+   * A file whose timestamp is newer than this is still being written: the
+   * bytes moved while this scan was in progress. See the gate in
+   * {@link _scanDirectory}.
+   */
+  private _scanStartedAt = 0;
+
+  /**
+   * Large files whose size this scanner has seen but not yet seen settle.
+   *
+   * path → the size observed last time. A file leaves the map the scan after
+   * its size stops changing, which is when it is finally read. Bounded by the
+   * number of large files being written at once, which is a handful.
+   */
+  private readonly _growing = new Map<string, number>();
+
+  /** Pending follow-up scan for {@link _unsettledDuringScan}. */
+  private _settleTimer: ReturnType<typeof setTimeout> | null = null;
   /** Last-scan cache (loaded from disk); consulted to skip re-read/re-hash. */
   private _blobCache = new Map<
     string,
@@ -202,7 +294,10 @@ export class FsScanner {
       followSymlinks: options.followSymlinks ?? false,
       bs: options.bs,
       scanCachePath: options.scanCachePath,
+      settleMs: options.settleMs ?? DEFAULT_SETTLE_MS,
+      settleMinBytes: options.settleMinBytes ?? DEFAULT_SETTLE_MIN_BYTES,
     };
+    this._ignoreMatcher = compileIgnore(this._options.ignore);
     this._bs = options.bs || new BsMem();
     this._scanCachePath = options.scanCachePath;
   }
@@ -255,6 +350,14 @@ export class FsScanner {
 
     const trees = new Map<TreeRef, Tree>();
     this._vanishedDuringScan = 0;
+    // Per-scan state, reset for EVERY scan — these first landed inside the
+    // cache block above, which only runs when a cache FILE is configured.
+    // `_scanStartedAt` left at 0 makes `mtime > scanStartedAt` true for every
+    // file in existence, so the whole folder reads as "still being written"
+    // and nothing is ever published. Twelve tests at once, which is at least a
+    // loud way to fail.
+    this._unsettledDuringScan = [];
+    this._scanStartedAt = Date.now();
     let rootTree;
     try {
       rootTree = await this._scanDirectory(this._rootPath, '.', 0, trees);
@@ -293,7 +396,7 @@ export class FsScanner {
       // reads as a file DELETED, on every other machine.
       //
       // Measured, not theorised: making the walk survive without this guard
-      // turned a four-node concurrency recipe from green into two failures in
+      // turned a four-node concurrency scenario from green into two failures in
       // three runs, with the writer keeping its file and every peer losing it.
       //
       // So keep the last picture that WAS complete. Nothing is lost — the
@@ -320,9 +423,46 @@ export class FsScanner {
       trees,
     };
 
-    // Swap in the freshly-built cache and persist it (best-effort).
+    // A file this scan would not read has to be come back for, or it waits on
+    // the five-second safety rescan — which turns a 300 ms settle window into
+    // seconds of latency for every new file, and §8's long tail is already a
+    // complaint. One timer per scan, replacing any still pending.
+    if (this._unsettledDuringScan.length > 0) {
+      const waiting = [...this._unsettledDuringScan];
+      // NOT rescheduled if one is already pending.
+      //
+      // Clearing and re-arming it on every scan looks like the obvious thing
+      // and starves the files it exists for: a folder written to steadily —
+      // one file every 300 ms, which is an ordinary burst — defers something
+      // on every scan, pushes the timer out every time, and the follow-up
+      // never fires at all. Measured as a peer that never received the FIRST
+      // file of a burst while the writer kept going.
+      if (this._settleTimer === null) {
+        this._settleTimer = setTimeout(() => {
+          this._settleTimer = null;
+          /* v8 ignore next -- @preserve a stopped scanner has nobody to tell */
+          if (this._stopRequested) return;
+          // A SCAN, not just a notification. The agent's push reads
+          // `scanner.tree` rather than scanning itself — scanning is the
+          // watcher handler's job — so telling it about a change without
+          // re-reading the folder hands it the very tree that left the file out.
+          // Measured: the deferral worked and the finished file was then never
+          // hashed at all.
+          void this._rescanAfterSettle(waiting[0]);
+        }, (this._options.settleMs as number) + 50);
+        this._settleTimer.unref?.();
+      }
+    }
+
+    // Swap in the freshly-built cache; persist it only if asked.
+    //
+    // The SWAP is unconditional and the PERSIST is not, because they serve
+    // different callers: `knownFile` answers "what did I last see on disk",
+    // which every agent needs, while persistence only saves re-reading across
+    // a restart. Gating the swap on the persistence option meant the first
+    // was silently unavailable unless the second had been configured.
+    this._blobCache = this._nextBlobCache;
     if (this._scanCachePath) {
-      this._blobCache = this._nextBlobCache;
       await this._persistCache();
     }
 
@@ -340,13 +480,17 @@ export class FsScanner {
     const childRefs: TreeRef[] = [];
 
     for (const entry of entries) {
-      if (this._shouldIgnore(entry.name)) {
-        continue;
-      }
-
       const childPath = join(absolutePath, entry.name);
       const childRelPath =
         relativePath === '.' ? entry.name : `${relativePath}/${entry.name}`;
+
+      // THE RELATIVE PATH, not the bare name. A pattern with a `/` in it —
+      // `logs/*.txt`, `build/`, `**/tmp` — can never match a basename, so
+      // testing `entry.name` here is why a path pattern had no effect even
+      // after the matcher understood one.
+      if (this._shouldIgnorePath(childRelPath, entry.isDirectory())) {
+        continue;
+      }
 
       if (entry.isSymbolicLink() && !this._options.followSymlinks) {
         continue;
@@ -389,6 +533,157 @@ export class FsScanner {
         } else if (entry.isFile()) {
           /* v8 ignore else -- @preserve */
           const mtimeMs = childStats.mtime.getTime();
+
+          // Is this file still being written?
+          //
+          // A copy takes seconds, and during them the file is a PREFIX of
+          // itself. Hashing that produces a blob of the prefix, which is what
+          // gets announced — so every peer is told a truncated file is the
+          // finished one. Measured: a 2 MB file written in slices was hashed
+          // at 262 144 bytes.
+          //
+          // What happens instead is deliberately NOT "omit it": omitting a
+          // path peers already hold reads as a DELETION, and a user saving
+          // over a document would have it deleted everywhere. So the previous
+          // scan's node is reused — the change simply has not happened yet as
+          // far as the network is concerned — and only a file nobody has ever
+          // seen is left out.
+          //
+          // A file that never settles (something appended to continuously)
+          // therefore stops updating while everything else in the folder keeps
+          // syncing. That is the right way round, and it is why this does not
+          // mark the whole scan partial the way a vanished entry does.
+          // CHANGED SINCE THIS SCAN BEGAN — which is the question, and it
+          // took three attempts to ask it properly.
+          //
+          // Asking "is the file younger than N milliseconds" seemed
+          // equivalent and is not. It delays every newly written file by N
+          // whether or not anything is still writing it, and whether it
+          // delays one depends on a race: the first scan either runs before
+          // the watcher is attached, and reads the file, or after it, and
+          // defers it. Same folder, same file, two outcomes. Twenty tests
+          // moved around under it before that was clear.
+          //
+          // A file still being copied writes continuously, so its timestamp
+          // moves past the moment this scan started. A file that was written
+          // and closed does not. That distinction needs no window, has no
+          // latency, and cannot race — and it is the first half of the rule
+          // the register asks for, the second being the re-check after the
+          // read below.
+          //
+          // Still not while PAUSED: a pause means this agent is writing the
+          // folder itself, every file a restore just wrote looks fresh, and
+          // deferring those made the post-restore scan reuse PRE-restore
+          // nodes — re-deriving a ref for a state the folder had left, which
+          // is exactly what takes a node out of the ancestry conversation and
+          // gets its deletions refused everywhere. A restore needs no
+          // protection here anyway: it writes to a temp file and renames, so
+          // its files are never visible partial.
+          // Is a large file still GROWING, scan over scan?
+          //
+          // The free half of the rule — "did it change while this scan ran" —
+          // misses a writer whose gaps are wider than one read. Asking
+          // instead whether the SIZE has stopped moving needs no timer and no
+          // guess about how fast a copy writes: a file is read once its size
+          // has been seen twice unchanged.
+          //
+          // Only for large files, because that is where the hazard is and
+          // where the cost is affordable. A document somebody saves is written
+          // in one operation and goes out as fast as it ever did; a
+          // multi-megabyte copy waits one extra scan, and the alternative for
+          // it is being published truncated and *"dort gilt sie als gültig"*.
+          // A timestamp in the FUTURE is not evidence of anything.
+          //
+          // Both halves of the settle rule compare the file's mtime to a
+          // moment of this machine's own clock, and both read a future
+          // timestamp as "touched just now": `mtime > scanStartedAt` is
+          // permanently true and `now - mtime` is negative, so the file is
+          // deferred on every scan and NEVER published. Measured: a file dated
+          // one day ahead was invisible to the tree for good.
+          //
+          // That is not exotic. Clock skew between these machines is a known
+          // problem in its own right (`the weakness register` F7/S3/M6 —
+          // the host application lets a machine take its time from the BIOS
+          // clock alone), an archive can
+          // carry any timestamp it likes, and a file copied from a machine
+          // running fast arrives dated ahead. None of those is a file being
+          // written, so none of them may be held back.
+          const now = Date.now();
+          const inTheFuture = mtimeMs > now;
+          const seen = this._growing.get(childRelPath);
+          const growing = seen !== undefined && seen !== childStats.size;
+
+          // A file this scanner has never completed a scan with, and for which
+          // it has not recorded a size either.
+          //
+          // This is the only condition that can catch the FIRST sight of a
+          // copy in progress, and the growth check above cannot: a file on its
+          // way to 24 MB is 512 KB at some point, so no size threshold
+          // excludes it and no second observation exists yet. It is also the
+          // only half that costs anything — a newly seen file is published one
+          // scan later than it otherwise would be.
+          //
+          // Worth it: without it a large copy is announced truncated and
+          // *"dort gilt sie als gültig"* on every peer — `the weakness register`
+          // D3, rated kritisch. A file being MODIFIED pays nothing, because
+          // the last scan knew it; only the first sight of a new one waits.
+          //
+          // Two signals, and the file waits if EITHER fires. Each one alone
+          // has a hole the other covers.
+          //
+          // `touchedJustNow` — a timestamp inside `settleMs` — is the strong
+          // one while a copy is actually writing: its mtime keeps moving, so
+          // the file is deferred scan after scan for as long as the writing
+          // lasts. Its hole is a writer that STALLS longer than the window. A
+          // loaded machine, a slow disk or a network share can stall one
+          // `fsync` past 100 ms, and the file is then seen "cold" — a
+          // timestamp that looks finished, a size that has not moved since the
+          // last scan — and published truncated. Measured at roughly one run
+          // in ten of `fs-clock-skew.spec.ts`.
+          //
+          // `seen === undefined` covers that hole with no clock term at all:
+          // the very first sight of a file this scanner has never read waits
+          // once, whatever its timestamp says. It terminates through
+          // `_growing` rather than through a window — the first sight records
+          // the size, so the next scan has `seen !== undefined` and reads the
+          // file if its size has stopped moving.
+          //
+          // Neither replaces the other. Dropping the window and keeping only
+          // the first sight was measured too, and it is WORSE: it leaves a
+          // copy in progress with only the size comparison to protect it, and
+          // one stalled `fsync` between two scans then reads the file. Three
+          // truncated hashes of a 24 MB copy in one run, where the union gives
+          // none.
+          const neverRead = !this._blobCache.has(childRelPath);
+          const touchedJustNow =
+            !inTheFuture &&
+            now - mtimeMs < (this._options.settleMs as number);
+          const firstSight = neverRead && (touchedJustNow || seen === undefined);
+
+          if (growing || firstSight) {
+            this._growing.set(childRelPath, childStats.size);
+          } else {
+            this._growing.delete(childRelPath);
+          }
+
+          // And only while WATCHING. A deferral is a promise to come back, and
+          // only a watching scanner can keep it: a one-shot `extract()` or
+          // `storeInDb()` has no follow-up scan and no next event, so
+          // deferring there does not delay a file, it drops one. `extract()`
+          // is public API, and without this it returned a tree with the
+          // caller's fresh files missing — twice, because the guard was lost
+          // again when the predicate changed.
+          if (
+            this._watcher !== null &&
+            !this._paused &&
+            ((mtimeMs > this._scanStartedAt && !inTheFuture) ||
+              growing ||
+              firstSight)
+          ) {
+            this._unsettledDuringScan.push(childRelPath);
+            this._reuse(childRelPath, trees, childTrees, childRefs);
+            continue;
+          }
 
           // Scan cache: if this file's mtime AND size are unchanged since the last
           // scan, reuse its cached blobId instead of re-reading + re-hashing the
@@ -454,24 +749,79 @@ export class FsScanner {
             blobId = blobProps.blobId;
           }
 
-          if (this._scanCachePath) {
-            this._nextBlobCache.set(childRelPath, {
-              mtime: mtimeMs,
-              size: childStats.size,
-              blobId,
-            });
+          // And re-checked AFTER the read, because the settle window above
+          // only proves the file was quiet when the scan REACHED it. A write
+          // that lands while the bytes are being read leaves this scan holding
+          // a prefix with nothing to show it — so the file is stat'd again,
+          // and a changed size or timestamp means what was just hashed is not
+          // what is on disk. Second half of the same rule, and the cheaper
+          // half: one extra stat, only for files actually read.
+          const after = await stat(childPath).catch(
+            /* v8 ignore next -- @preserve a vanished file already threw above */
+            () => undefined,
+          );
+          /* v8 ignore else -- @preserve */
+          if (
+            !this._paused &&
+            (after === undefined ||
+              after.size !== childStats.size ||
+              after.mtime.getTime() !== mtimeMs)
+          ) {
+            this._reuse(childRelPath, trees, childTrees, childRefs);
+            continue;
           }
+
+          // Recorded unconditionally, not only when a scan cache is being
+          // PERSISTED. Two consumers want it for different reasons: the
+          // persisted cache skips re-reading unchanged files across restarts,
+          // and `FsAgent` needs to know what it last saw on disk to decide
+          // whether a restore can skip a write. The second is what keeps an
+          // 80 GB catalogue from being rewritten on every sync, and tying it
+          // to the first meant it silently did not apply unless the caller
+          // had asked for persistence.
+          this._nextBlobCache.set(childRelPath, {
+            mtime: mtimeMs,
+            size: childStats.size,
+            blobId,
+          });
 
           const fileMeta: FsNodeMeta = {
             name: entry.name,
             type: 'file',
             relativePath: childRelPath,
             size: childStats.size,
-            // mtime is kept for files (restore preserves it, so it round-trips to
-            // the same ref on every client) but NOT for directories (a folder's
-            // mtime is per-machine and does not round-trip). The absolute `path`
-            // is excluded everywhere — it is folder-specific.
-            mtime: mtimeMs,
+            // NO mtime, and no absolute `path` — see {@link FsNodeMeta}, which
+            // has documented both as excluded from the content identity all
+            // along. `path` was; mtime was not, and the gap cost §1.
+            //
+            // A tree ref is meant to be a SHARED IDENTITY: the same bytes give
+            // the same ref on every machine, which is what lets a receiver
+            // check a sender's claimed ancestry. mtime breaks that for any
+            // file created independently rather than restored — the same
+            // document saved on two machines, a seeded fixture, a folder
+            // copied to two laptops — and it breaks it at MILLISECOND
+            // granularity, which is far finer than anything a user does.
+            // Measured on four nodes: one `keeper.txt`, written by a loop, held
+            // `…104.2852`, `…104.4375` and `…104.5483` on disk, and
+            // `stats.mtime.getTime()` truncates — so which side of a
+            // millisecond boundary a write landed on decided the folder's ref.
+            //
+            // A node whose ref disagrees with its peers' for identical content
+            // is out of the ancestry conversation: it announces parents nobody
+            // can be in, so every deletion it sends is refused by everybody.
+            // That is `the weakness register` §1, the register's
+            // most-reproduced entry, and a directory removal is what makes it
+            // visible because it returns a folder to a state whose ref must
+            // still agree. Measured: 10 of 10 on the four-node directory
+            // deletion with mtime out, 8 of 10 with it in.
+            //
+            // The cost is real and accepted: a restored file carries the time
+            // it arrived, not the time the author saved it. Timestamps still
+            // round-trip for a tree that carries them (the restore honours
+            // `meta.mtime` when a peer sends one), and this agent keeps every
+            // mtime it observes in the scan cache, where the skip-a-write
+            // optimisation needs it. What is given up is propagating the
+            // author's clock, and no part of sync correctness depends on it.
             blobId, // Link to content in Bs
           };
 
@@ -514,11 +864,30 @@ export class FsScanner {
       relativePath,
     };
 
+    // SORTED, and that is a correctness property rather than tidiness.
+    //
+    // `readdir` above is not ordered, and the order it happens to return is a
+    // property of the filesystem, not of the folder. The tree ref hashes this
+    // array; `_getFileContentMap` does not. So two machines holding
+    // byte-identical content could derive DIFFERENT refs for it — and the
+    // divergence signal, which every repair decision is built on, would say
+    // they disagree when they do not.
+    //
+    // measured on a real fleet: after a forced 40 s partition both machines held 38
+    // identical files with identical hashes, and one reported `diverged: true`
+    // for over eight minutes across six merge repairs, logging "equivalent
+    // content, skipping restore" every time. The apply path correctly saw
+    // nothing to transfer; the anti-entropy correctly saw two refs; neither was
+    // wrong. See `README.architecture.md`, "One Folder, One Ref", and
+    // `test/fs-ref-vs-content.spec.ts`.
+    //
+    // Sorting makes the ref a function of CONTENT alone, which is what a
+    // content hash was always supposed to be.
     const dirTree: Tree = {
       id: dirName,
       isParent: childRefs.length > 0,
       meta: dirMeta,
-      children: childRefs.length > 0 ? childRefs : null,
+      children: childRefs.length > 0 ? [...childRefs].sort() : null,
     };
 
     return dirTree;
@@ -575,12 +944,12 @@ export class FsScanner {
    *
    * `fs.watch` in recursive mode reports a path RELATIVE TO THE ROOT
    * (`sub/dir/.fsagent-tmp-abc`), while the ignore patterns are basenames.
-   * {@link _shouldIgnore} tests `startsWith`, so a nested match never fired:
+   * The matcher tested a basename only, so a nested match never fired:
    * every atomic write the agent itself makes during a restore came back as a
    * change event, each event triggered a scan, and the debounce that batches a
    * push was reset before it could fire.
    *
-   * Measured on the customer's folder: after a 3 642-file restore the watcher
+   * Measured on a large production folder: after a 3 642-file restore the watcher
    * reported the SAME newly added file nine times and the agent never emitted a
    * ref for it — `[fs] added: …/probe-….txt` nine times, no `sync:out`. The
    * file did not fail to arrive; it was never sent.
@@ -588,26 +957,16 @@ export class FsScanner {
    * Every segment is tested, because the pattern may match a directory as
    * easily as a file.
    * @param relativePath - Path as the watcher reports it.
-   * @returns True when any segment matches an ignore pattern.
+   * @param isDirectory - Whether the path is a directory, when the caller
+   *   knows. A directory-only pattern (`build/`) needs it; the watcher cannot
+   *   say, and not knowing never widens what is ignored.
+   * @returns True when the ignore list covers this path.
    */
-  private _shouldIgnorePath(relativePath: string): boolean {
-    for (const segment of relativePath.split(/[\\/]/)) {
-      if (segment && this._shouldIgnore(segment)) return true;
-    }
-    return false;
-  }
-
-  private _shouldIgnore(name: string): boolean {
-    /* v8 ignore next -- @preserve */
-    if (!this._options.ignore) {
-      return false;
-    }
-    for (const pattern of this._options.ignore) {
-      if (name === pattern || name.startsWith(pattern)) {
-        return true;
-      }
-    }
-    return false;
+  private _shouldIgnorePath(
+    relativePath: string,
+    isDirectory?: boolean,
+  ): boolean {
+    return this._ignoreMatcher.ignores(relativePath, isDirectory);
   }
 
   async watch(): Promise<void> {
@@ -680,6 +1039,71 @@ export class FsScanner {
    * notification so syncToDb reconciles the drift. Paused/stopped scanners and
    * scan failures are no-ops.
    */
+  /**
+   * Re-reads the folder once a file this scan would not read has settled.
+   *
+   * Through the coalescer, like the safety rescan, so a settle landing inside
+   * a burst does not add a whole extra pass. Notifies unconditionally: the
+   * caller already knows something was deferred, and the point is to get the
+   * file out now rather than on the five-second rescan.
+   * @param path - The path that was deferred, for the change event.
+   */
+  /**
+   * Carries a file's PREVIOUS node into the scan being built, because the file
+   * on disk right now is still being written.
+   *
+   * A path simply left out of a tree reads as a DELETION to every peer that
+   * holds it, so a user saving over a document would have it deleted
+   * everywhere. Reusing the last node says the truthful thing instead: as far
+   * as the network is concerned this change has not happened yet.
+   *
+   * A file nobody has ever seen has no previous node and IS left out, which is
+   * correct — it cannot be a deletion of something no peer holds.
+   *
+   * The node must go into `trees` as well as into the parent's children. It is
+   * the kind of thing that looks redundant and is not: leaving it out gave the
+   * root a child hash with no node behind it, and the whole folder came out
+   * empty.
+   * @param relativePath - The deferred path.
+   * @param trees - The node map this scan is building.
+   * @param childTrees - The parent's child nodes.
+   * @param childRefs - The parent's child hashes.
+   */
+  private _reuse(
+    relativePath: string,
+    trees: Map<string, Tree>,
+    childTrees: Tree[],
+    childRefs: string[],
+  ): void {
+    this._unsettledDuringScan.push(relativePath);
+    const previous = this.getTreeByPath(relativePath);
+    if (!previous) return;
+    const hash = previous._hash as string;
+    trees.set(hash, previous);
+    childTrees.push(previous);
+    childRefs.push(hash);
+    const known = this._blobCache.get(relativePath);
+    /* v8 ignore else -- @preserve a node in the last tree was cached with it */
+    if (known) this._nextBlobCache.set(relativePath, known);
+  }
+
+  private async _rescanAfterSettle(path: string): Promise<void> {
+    /* v8 ignore next -- @preserve a scanner stopped between the timer and here */
+    if (this._stopRequested) return;
+    try {
+      await this._scanAfterNow();
+      /* v8 ignore next -- @preserve defensive: stop racing the scan */
+      if (this._stopRequested) return;
+      await this._notifyChange({ type: 'modified', path });
+      /* v8 ignore start -- @preserve the folder went away under a settled file */
+    } catch (err) {
+      console.warn(
+        `[fs-scanner] settle rescan failed: ${FsScanner._errMessage(err)}`,
+      );
+    }
+    /* v8 ignore stop -- @preserve */
+  }
+
   private async _runSafetyRescan(): Promise<void> {
     // Gated on the pause looking STUCK, not on the pause itself. A stuck pause
     // is what this exists to recover from — but scanning during a legitimate
@@ -849,12 +1273,12 @@ export class FsScanner {
    * callback, so those scans all run AT ONCE. Copying 1 200 tiny files into a
    * watched folder took 1 200 concurrent full scans: the CPU sat 82% idle
    * waiting on the filesystem, RSS climbed from 263 MB to 785 MB, and after two
-   * minutes the peer had received nothing. On the customer's 3 702-file folder
+   * minutes the peer had received nothing. On a 3 702-file folder
    * the same burst wedged the client outright.
    *
    * Started-after is the part that cannot be traded away. Joining a scan that
    * began BEFORE the event would let a push carry a tree that predates the file
-   * that triggered it — which is precisely the partial trees the lab saw
+   * that triggered it — which is precisely the partial trees a real fleet saw
    * advertised: 64 nodes, then 103, then 204, each a stale snapshot of a folder
    * that already held twelve hundred files. So a caller either starts a scan
    * now, or waits for the one that begins when the current pass ends. A burst
@@ -942,6 +1366,23 @@ export class FsScanner {
     }
   }
 
+  /**
+   * What the last completed scan saw on disk for one path.
+   *
+   * The agent asks this to decide whether a restore may skip writing a file:
+   * a matching blobId means the bytes are already right, and the recorded
+   * size and mtime are what a `stat` is checked against. Reading it from here
+   * rather than from the tree is deliberate — mtime is no longer part of a
+   * tree node, precisely so refs do not depend on it.
+   * @param relativePath - Path relative to the scan root.
+   * @returns What the scan recorded, or `undefined` if it saw no such file.
+   */
+  knownFile(
+    relativePath: string,
+  ): { mtime: number; size: number; blobId: string } | undefined {
+    return this._blobCache.get(relativePath);
+  }
+
   onChange(callback: FsChangeCallback): void {
     this._changeCallbacks.push(callback);
   }
@@ -954,6 +1395,10 @@ export class FsScanner {
 
   stopWatch(): void {
     this._stopRequested = true;
+    if (this._settleTimer) {
+      clearTimeout(this._settleTimer);
+      this._settleTimer = null;
+    }
     if (this._autoResumeTimer) {
       clearTimeout(this._autoResumeTimer);
       this._autoResumeTimer = null;

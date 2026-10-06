@@ -14,8 +14,10 @@ import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
-import { FsAgent } from '../src/fs-agent.ts';
+import { CHAIN_HEAD_PREFIX, FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
+import { FsEditChain } from '../src/fs-edit-chain.ts';
 
 // Traced on four machines during a 1 200-file seed. A node fetched ref
 // _RMiGJ-1 at 13:19:43 and emitted that same ref AS ITS OWN six seconds later.
@@ -66,6 +68,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     // blobs are reachable, which on a real network they are.
     const bs = new BsMem();
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     return { db, connector, agent, sent, socket, bs };
@@ -86,7 +89,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     // that takes the equivalent-content path.
     await writeFile(join(peerDir, 'shared.txt'), 'shared');
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 1_500));
@@ -121,7 +124,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     await writeFile(join(peerDir, 'shared.txt'), 'shared');
     await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
     socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
     await new Promise((r) => setTimeout(r, 2_000));
@@ -135,10 +138,10 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     agent.scanner.stopWatch();
   });
 
-  // The third outcome, and the one the lab measured. A node in the middle of
-  // catching up holds a SUBSET of the sender's tree, and announcing that is how
-  // a burst turns into a rollback: trees arrived at the writer carrying 1008
-  // files, then 892, then 907, every one stamped newestFromSender=true —
+  // The third outcome, and the one a real fleet measured. A node in the middle
+  // of catching up holds a SUBSET of the sender's tree, and announcing that is
+  // how a burst turns into a rollback: trees arrived at the writer carrying
+  // 1008 files, then 892, then 907, every one stamped newestFromSender=true —
   // correctly, because they came from different peers, each monotonic for
   // itself. Nothing downstream could tell "still catching up" from "deleted
   // 116 files".
@@ -159,7 +162,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
       await writeFile(join(peerDir, `theirs-${i}.txt`), `t${i}`);
     }
     const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs).extract(),
+      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     // Make the restore fall short, exactly as a timeout or a slow link does:
@@ -190,7 +193,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   // by the agent with the right ones. Receivers kept the first and dropped the
   // second as already-received, so every push arrived one parent behind.
   //
-  // Measured on the lab, sender against receivers:
+  // measured on a real fleet, sender against receivers:
   //   sent 6guj63Ox parent yNAJN-wC | seen parent CtAgdd1w
   //   sent UBl35ZQQ parent 6guj63Ox | seen parent yNAJN-wC
   //
@@ -220,52 +223,71 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     expect(sent.length).toBe(new Set(sent).size);
     expect(sent.length).toBe(2);
 
-    // And the second push declares the ref the first one created.
-    expect(predecessors[1]?.[0]).toBe(sent[0]);
+    // And the second push declares the STATE the first one created.
+    //
+    // Two namespaces, deliberately. What goes on the wire is the chain HEAD
+    // (`~H~…`), because a receiver holding a tree ref cannot find the chain row
+    // for it by hash — only by query. What goes in `p` stays a TREE ref,
+    // because the receiver's prune rule compares it against
+    // `[_currentRef, _lastAppliedRef]`, and translating it there would break
+    // the one rule that separates a deletion from a straggler.
+    //
+    // So the assertion resolves the announcement rather than string-comparing
+    // it, which also exercises the head → tree ref mapping end to end.
+    const announced = sent[0];
+    expect(announced.startsWith(CHAIN_HEAD_PREFIX)).toBe(true);
+    const chain = new FsEditChain(db, 'fsTree');
+    await chain.init();
+    const entry = await chain.entry(
+      announced.slice(CHAIN_HEAD_PREFIX.length),
+    );
+    expect(predecessors[1]?.[0]).toBe(entry?.treeRef);
 
     stopTo();
     agent.scanner.stopWatch();
   });
 
   // The opposite failure to everything else in this file, and the last one the
-  // lab found: not a stale tree deleting current work, but a CURRENT tree
-  // deleting NEWER work.
+  // field report found: not a stale tree deleting current work, but a CURRENT
+  // tree deleting NEWER work.
   //
   // Measured on four machines with 1200 files converged — a file was created
   // and vanished from every node including the one that created it, one run in
   // four. After convergence each peer's state descends from the writer's
-  // current ref, so a peer pushing a fraction of a second later is a sender the
-  // writer must honour, and its tree cannot contain a file that did not exist
-  // when it scanned.
+  // THE "COULD PEERS KNOW ABOUT THIS FILE?" GUARD IS GONE, and its test with
+  // it. What it protected is now protected by there being nothing to protect
+  // against.
   //
-  // Driven through `restore` directly. Staged as a live race it passed on one
-  // machine and failed on another, which tests the scheduler rather than the
-  // rule.
-  it('prunes what it announced and keeps what it has not', async () => {
+  // It kept a prune from deleting a file written after this node's last
+  // announcement — invisible to every sender, so a tree lacking it was not
+  // deleting it. Measured on four machines: with 1 200 files converged, a file
+  // was created and vanished from EVERY node including the one that created
+  // it, one run in four.
+  //
+  // That prune ran on the peer-apply path, and the peer-apply path no longer
+  // prunes: an absence is not a deletion, and a real one arrives stated in the
+  // chain. The only caller left is a deliberate `restore({ cleanTarget: true
+  // })` — somebody saying "make this folder be exactly this tree" — and
+  // second-guessing that with a guard about what peers know would be answering
+  // a question nobody asked. The test below covers what that caller gets.
+  it('prunes exactly what the tree lacks, for a caller who asked for that', async () => {
     const bs = new BsMem();
     await writeFile(join(dir, 'announced.txt'), 'peers know about this');
+    await writeFile(join(dir, 'just-written.txt'), 'written a moment ago');
     await writeFile(join(peerDir, 'only-theirs.txt'), 'theirs');
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
 
-    // What this node has told the network about: announced.txt only.
-    (
-      agent as unknown as { _announcedFiles: Set<string> }
-    )._announcedFiles.add(join(dir, 'announced.txt'));
-
-    // Written after that announcement, so no sender can know it exists.
-    await writeFile(join(dir, 'just-written.txt'), 'not announced yet');
-
-    // A peer's tree that has neither of them.
-    const incoming = await new FsAgent(peerDir, bs).extract();
+    const incoming = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
     await agent.restore(incoming, undefined, { cleanTarget: true });
 
-    // The announced one is a real deletion; the unannounced one predates
-    // nothing and is kept.
+    // Both go. Neither is in the tree, and the caller asked for the tree.
     expect(existsSync(join(dir, 'announced.txt'))).toBe(false);
-    expect(existsSync(join(dir, 'just-written.txt'))).toBe(true);
+    expect(existsSync(join(dir, 'just-written.txt'))).toBe(false);
+    expect(existsSync(join(dir, 'only-theirs.txt'))).toBe(true);
 
     agent.scanner.stopWatch();
   });
@@ -278,10 +300,11 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     await writeFile(join(peerDir, 'only-theirs.txt'), 'theirs');
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
 
-    const incoming = await new FsAgent(peerDir, bs).extract();
+    const incoming = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
     await agent.restore(incoming, undefined, { cleanTarget: true });
 
     expect(existsSync(join(dir, 'gone.txt'))).toBe(false);

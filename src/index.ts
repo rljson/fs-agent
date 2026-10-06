@@ -6,11 +6,24 @@
 
 export {
   FsAgent,
+  REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
   type FsAgentOptions,
+  type RefusedDeletion,
   type RestoreOptions,
   type TimeoutConfig,
 } from './fs-agent.ts';
+export {
+  ATOMIC_TMP_PREFIX,
+  atomicTmpPath,
+  atomicWriteFile,
+  atomicWriteStream,
+} from './fs-atomic-write.ts';
+export {
+  compileIgnore,
+  globToRegExp,
+  type IgnoreMatcher,
+} from './fs-ignore.ts';
 export {
   antiEntropyDecision,
   DEFAULT_ANTI_ENTROPY,
@@ -22,7 +35,48 @@ export {
   type AntiEntropyStatus,
   type AntiEntropyView,
   type HubAnnouncement,
+  type Reachability,
 } from './fs-anti-entropy.ts';
+export {
+  BE,
+  BG,
+  BQ,
+  BR,
+  BUCKET_SYNC_PREFIXES,
+  decodeEntries,
+  decodeRoots,
+  decodeWanted,
+  encodeEntries,
+  encodeRoots,
+  encodeWanted,
+  FsBucketSync,
+  isBucketSync,
+  type BucketSyncHost,
+} from './fs-bucket-sync.ts';
+export {
+  BUCKET_COUNT,
+  bucketOf,
+  bucketRoots,
+  differingBuckets,
+  entriesInBuckets,
+  reconcile,
+  TOMBSTONE_BLOB,
+  type BucketRoots,
+  type ManifestEntry,
+  type ReconcilePlan,
+} from './fs-manifest.ts';
+export {
+  createFsChainTables,
+  FS_EDIT_ACTION,
+  FsEditChain,
+  compareTimeId,
+  planRemovals,
+  type FsAppendOptions,
+  type FsChainEntry,
+  type FsEditData,
+  type RemovalPlan,
+  type RemovalQuestion,
+} from './fs-edit-chain.ts';
 export {
   FsBlobAdapter,
   type BlobToFileOptions,

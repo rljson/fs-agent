@@ -30,6 +30,15 @@ export default defineConfig({
         '@rljson/db',
         '@rljson/io',
         '@rljson/server',
+        // Every node builtin this package imports has to be listed. Anything
+        // missing is replaced by vite's browser shim, which exports nothing —
+        // `crypto` was absent and the build failed with
+        // `"createHash" is not exported by "__vite-browser-external"`.
+        //
+        // It went unnoticed because `prebuild` runs the tests first: while any
+        // test failed the vite step never ran, so a red suite masked a package
+        // that could not be built at all.
+        'crypto',
         'fs',
         'fs/promises',
         'path',

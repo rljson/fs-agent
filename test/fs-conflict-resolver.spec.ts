@@ -14,13 +14,17 @@ import {
   conflictCopyName,
   ConflictResolverDeps,
   ContentMap,
+  DB_OPERATION_ORIGIN,
   decideWinner,
   DIR_MARKER,
   findCommonAncestor,
   formatConflictTimestamp,
   FsConflictResolver,
+  recoveredName,
   fsTreeToContentMap,
   threeWayMerge,
+  tipTimestamp,
+  usableClientId,
 } from '../src/fs-conflict-resolver.ts';
 import type { FsTree } from '../src/fs-scanner.ts';
 
@@ -86,6 +90,41 @@ describe('fsTreeToContentMap', () => {
 });
 
 // ...........................................................................
+describe('recoveredName', () => {
+  // Set aside, not announced. The naming is the user-facing half of the
+  // decision `planJoin` makes: content the fleet deliberately deleted is kept
+  // where its owner can see it and nothing is said about it.
+  it('names a set-aside file, before the extension', () => {
+    const taken = new Set<string>();
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered).txt');
+    expect(recoveredName('deep/dir/notes.md', taken)).toBe(
+      'deep/dir/notes (recovered).md',
+    );
+  });
+
+  it('treats a dotfile and an extensionless name as extensionless', () => {
+    const taken = new Set<string>();
+    expect(recoveredName('.gitignore', taken)).toBe('.gitignore (recovered)');
+    expect(recoveredName('Makefile', taken)).toBe('Makefile (recovered)');
+  });
+
+  it('never collides with a name already set aside', () => {
+    // A folder restored twice, or two deleted paths whose set-aside names
+    // would meet. Losing one to the other is losing a file.
+    const taken = new Set<string>();
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered).txt');
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered) (1).txt');
+    expect(recoveredName('doc.txt', taken)).toBe('doc (recovered) (2).txt');
+  });
+
+  it('carries no timestamp and no identity', () => {
+    // Unlike a conflict copy there is nothing to tell apart: the path is gone
+    // from the history, and one name per path is what a user can act on.
+    const taken = new Set<string>();
+    expect(recoveredName('doc.txt', taken)).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+});
+
 describe('compareTips / decideWinner', () => {
   const tip = (
     ref: string,
@@ -93,6 +132,55 @@ describe('compareTips / decideWinner', () => {
     timestamp: number,
     timeId = 't',
   ) => ({ timeId, ref, clientId, timestamp });
+
+  // ...........................................................................
+  // THE WRONG ANSWER, PINNED DELIBERATELY — the rollback's last mile.
+  //
+  // `compareTips` orders a BRANCH, and the caller then uses that one verdict
+  // for every path the two branches disagree about. So a tip wins paths it
+  // never touched.
+  //
+  // The scenario, which is the one `fs-mesh-invariants.spec.ts` reproduces at
+  // the mesh level and this reproduces in a millisecond:
+  //
+  //   WRITER  v8 of doc.txt, authored at 8000 — the newest EDIT of that path
+  //   C       catching up, holds v5 of doc.txt, and authors an entry at 9000
+  //           for the only thing it really made: a conflict copy
+  //
+  // C's TIP is newer, so C wins — and `doc.txt` is resolved to the v5 bytes C
+  // happens to be holding. The writer's own folder goes backwards. Measured on
+  // the mesh at v8 → v5.
+  //
+  // **Not a timestamp problem.** mtime is out of the content identity and a
+  // received file gets no date applied, so the only times in the system come
+  // from edits. C's 9000 is the honest moment C authored *its* edit. The error
+  // is applying one branch's verdict to a path that branch never edited.
+  //
+  // THE SHAPE OF THE FIX: ask the chain per PATH. The deciding edit for
+  // `doc.txt` is the newest entry on each branch whose `changed` contains
+  // `doc.txt` — 8000 on the writer's side, and on C's side whatever C
+  // inherited, which is the writer's 8000 or older. The writer wins, with no
+  // clock and no content comparison. `FsEditChain` already carries everything
+  // needed (`changed` per entry, `previous` to walk); what does not exist is a
+  // per-path question to ask it.
+  //
+  // Pinned rather than fixed because it changes what "who wins" means, and
+  // that is a mechanism. Until then this assertion documents the behaviour the
+  // code actually has, so nobody has to rediscover either half.
+  it('orders a BRANCH, not a path — so a tip wins paths it never edited', () => {
+    const writerV8 = { ...tip('w', 'WRITER', 0), chainTimeId: '8000:aaa' };
+    const catchingUp = { ...tip('c', 'C', 0), chainTimeId: '9000:bbb' };
+
+    // What it does: the later TIP outranks the newer EDIT of the path.
+    expect(compareTips(catchingUp, writerV8)).toBeGreaterThan(0);
+    expect(decideWinner(catchingUp, writerV8).winner).toBe(catchingUp);
+
+    // What a per-path question would answer, stated so the fix has a target:
+    // the newest entry claiming `doc.txt` is the writer's, at 8000.
+    const newestEditOf = (path: string) =>
+      path === 'doc.txt' ? writerV8 : catchingUp;
+    expect(newestEditOf('doc.txt')).toBe(writerV8);
+  });
 
   it('orders by timestamp, then clientId, then content ref (not per-db timeId)', () => {
     expect(compareTips(tip('a', 'c', 2), tip('b', 'c', 1))).toBeGreaterThan(0);
@@ -104,6 +192,134 @@ describe('compareTips / decideWinner', () => {
     expect(
       compareTips(tip('a', 'a', 1, 'X'), tip('a', 'a', 1, 'Y')),
     ).toBe(0);
+  });
+
+  // .........................................................................
+  // The chain stamp is the PRIMARY key, and it had to become one.
+  //
+  // Measured end to end before this existed: two nodes editing one file
+  // produced `shared (conflicted copy db.insertTrees 1970-01-01 000000).txt`.
+  // `db.insertTrees` is the DB's label for its own operation, and the epoch is
+  // `clientTimestamp` never being set — `Db.insertTrees` accepts neither, so
+  // no caller can supply them. With `timestamp` 0 and `clientId` identical on
+  // every node, both top comparisons collapsed and the winner was whichever
+  // CONTENT HASH sorted higher. Deterministic, so the fleet converged; nothing
+  // to do with who edited last, which is what the design says decides.
+  // .........................................................................
+  it('orders by the chain timeId before anything else', () => {
+    // Exactly the dead state: equal timestamps, equal ids. Only the chain
+    // stamp separates them, and the ref is set so that the OLD rule would
+    // have picked the other one.
+    const older = {
+      chainTimeId: '1000:aaa',
+      timeId: 'x',
+      ref: 'zzz',
+      clientId: 'db.insertTrees',
+      timestamp: 0,
+    };
+    const newer = {
+      chainTimeId: '2000:aaa',
+      timeId: 'y',
+      ref: 'aaa',
+      clientId: 'db.insertTrees',
+      timestamp: 0,
+    };
+    expect(compareTips(newer, older)).toBeGreaterThan(0);
+    expect(compareTips(older, newer)).toBeLessThan(0);
+    expect(decideWinner(older, newer).winner).toBe(newer);
+    // And the old rule really would have disagreed, so this test discriminates.
+    expect(older.ref > newer.ref).toBe(true);
+  });
+
+  it('separates two edits made in the same millisecond', () => {
+    // `<millis>:<nanoid>`: the tail is what makes the order total, so two
+    // people saving inside one millisecond still get one answer — and the
+    // same answer on every node.
+    const a = {
+      chainTimeId: '1000:aaa',
+      timeId: 'x',
+      ref: 'r1',
+      clientId: '',
+      timestamp: 0,
+    };
+    const b = {
+      chainTimeId: '1000:bbb',
+      timeId: 'y',
+      ref: 'r2',
+      clientId: '',
+      timestamp: 0,
+    };
+    expect(compareTips(b, a)).toBeGreaterThan(0);
+    expect(compareTips(a, b)).toBeLessThan(0);
+  });
+
+  it('falls back to the old keys when a tip has no chain entry', () => {
+    // A peer on an older build has no chain entry, and must be ordered
+    // exactly as before rather than treated as oldest or newest.
+    const withChain = {
+      chainTimeId: '5000:aaa',
+      timeId: 'x',
+      ref: 'r1',
+      clientId: 'c1',
+      timestamp: 10,
+    };
+    const without = {
+      timeId: 'y',
+      ref: 'r2',
+      clientId: 'c1',
+      timestamp: 20,
+    };
+    // Not comparable on the chain → the greater timestamp wins, as it used to.
+    expect(compareTips(without, withChain)).toBeGreaterThan(0);
+  });
+
+  // .........................................................................
+  it('refuses to print the DB operation name as a machine', () => {
+    // A name in a filename a user has to read must be true or absent.
+    expect(usableClientId(DB_OPERATION_ORIGIN)).toBe('');
+    expect(usableClientId(undefined)).toBe('');
+    expect(usableClientId('')).toBe('');
+    expect(usableClientId('node-D')).toBe('node-D');
+  });
+
+  it('dates a copy from the chain stamp, not from an unset timestamp', () => {
+    // The millisecond half of `<millis>:<nanoid>` is the authoring node's
+    // clock, and the only real time available — without it a copy was dated
+    // 1970.
+    expect(
+      tipTimestamp({
+        chainTimeId: '1790000000000:abc',
+        timeId: 'x',
+        ref: 'r',
+        clientId: '',
+        timestamp: 0,
+      }),
+    ).toBe(1790000000000);
+    // No chain entry → whatever InsertHistory had, unchanged.
+    expect(
+      tipTimestamp({ timeId: 'x', ref: 'r', clientId: '', timestamp: 42 }),
+    ).toBe(42);
+    // A malformed stamp must not be read as a date.
+    expect(
+      tipTimestamp({
+        chainTimeId: 'nonsense',
+        timeId: 'x',
+        ref: 'r',
+        clientId: '',
+        timestamp: 7,
+      }),
+    ).toBe(7);
+  });
+
+  // .........................................................................
+  it('names a copy without a gap where the machine would go', () => {
+    const taken = new Set<string>();
+    expect(conflictCopyName('doc.txt', '', 1790000000000, taken)).toBe(
+      'doc (conflicted copy 2026-09-21 141320).txt',
+    );
+    expect(conflictCopyName('doc.txt', 'node-D', 1790000000000, taken)).toBe(
+      'doc (conflicted copy node-D 2026-09-21 141320).txt',
+    );
   });
 
   it('decideWinner picks the higher-ranked tip on either side', () => {
@@ -189,8 +405,8 @@ describe('formatConflictTimestamp', () => {
 describe('conflictCopyName', () => {
   it('inserts the marker before the extension', () => {
     const ts = Date.UTC(2026, 5, 18, 9, 15, 0);
-    expect(conflictCopyName('document.txt', 'NB-2510', ts, new Set())).toBe(
-      'document (conflicted copy NB-2510 2026-06-18 091500).txt',
+    expect(conflictCopyName('document.txt', 'node-B', ts, new Set())).toBe(
+      'document (conflicted copy node-B 2026-06-18 091500).txt',
     );
   });
 
@@ -271,6 +487,10 @@ describe('threeWayMerge', () => {
       {
         path: 'conflict (conflicted copy LOSER 2026-06-18 000000)',
         blobId: 'cB',
+        // Carried explicitly rather than un-parsed back out of the name,
+        // which breaks the moment a real document is itself called
+        // `report (conflicted copy …).txt`.
+        originalPath: 'conflict',
       },
     ]);
   });
@@ -341,6 +561,10 @@ describe('FsConflictResolver', () => {
     trees: Record<string, Record<string, string>>;
     rows: InsertHistoryRow<string>[];
     withOnStored?: boolean;
+    /** `treeRef → path → timeId of the last edit naming it`, if any. */
+    lastEditOfPath?: Record<string, Record<string, string>>;
+    /** Makes the per-path lookup REJECT, as an unreadable chain does. */
+    lastEditThrows?: boolean;
   }): Harness {
     const disk: Disk = new Map();
     const stored: Harness['stored'] = [];
@@ -360,6 +584,13 @@ describe('FsConflictResolver', () => {
       treeKey: TREE,
       getInsertHistory: async () => opts.rows,
       getRefOfTimeId: async (_t, timeId) => opts.refOf[timeId] ?? null,
+      lastEditOfPath:
+        opts.lastEditOfPath || opts.lastEditThrows
+          ? async (treeRef, path) => {
+              if (opts.lastEditThrows) throw new Error('chain unreadable');
+              return opts.lastEditOfPath?.[treeRef]?.[path];
+            }
+          : undefined,
       fetchTree: async (ref) => mkTree(opts.trees[ref]),
       getBlobContent: async (blobId) => Buffer.from(blobId),
       restoreTree: async (tree) => {
@@ -445,6 +676,125 @@ describe('FsConflictResolver', () => {
     expect(h.log).toHaveBeenCalledWith('warn', expect.stringContaining('missing tree ref'));
   });
 
+  // ...........................................................................
+  // WHO LAST CHANGED THIS FILE — the per-path verdict, overriding the branch.
+  //
+  // `compareTips` orders a BRANCH, and using that one verdict for every path
+  // the branches disagree about lets a tip win files it never opened. Measured
+  // as a writer's own folder going from v8 back to v5 after a returning node
+  // wrote one unrelated file.
+  //
+  // Here the LOWER-ordered branch is the one that actually edited `doc.txt`,
+  // so it keeps it — against the branch order, which is the whole point.
+  // ...........................................................................
+  it('keeps a path on the side whose history actually changed it', async () => {
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [
+        row('O', []),
+        // B loses the BRANCH order (no identity, epoch timestamp)…
+        row('B', ['O']),
+        row('C', ['O'], 'NB-CCCC', 1000),
+      ],
+      // …but B's history is the only one that names `doc.txt`. C never
+      // touched it, so it does not get to decide it.
+      lastEditOfPath: { refB: { 'doc.txt': '5000:bbb' } },
+      withOnStored: true,
+    });
+
+    await new FsConflictResolver(h.deps).resolve(conflict(['C', 'B']));
+
+    expect(
+      h.disk.get('doc.txt'),
+      'the branch order overruled the only side that edited the file',
+    ).toBe('vB');
+    // And the side that did NOT edit it is the one kept as a copy.
+    const copy = [...h.disk.keys()].find((p) => p.includes('conflicted copy'));
+    expect(copy).toBeTruthy();
+    expect(h.disk.get(copy as string)).toBe('vC');
+  });
+
+  it('falls back to the branch order when the chain cannot be read', async () => {
+    // A chain read that THROWS must not break the merge. "Cannot say" is never
+    // read as a verdict: the branch order decides, which is exactly the
+    // behaviour the per-path question replaced, so an unreadable history is no
+    // worse than not having one.
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [row('O', []), row('B', ['O']), row('C', ['O'], 'NB-CCCC', 1000)],
+      lastEditThrows: true,
+      withOnStored: true,
+    });
+
+    const ref = await new FsConflictResolver(h.deps).resolve(
+      conflict(['C', 'B']),
+    );
+
+    expect(ref, 'an unreadable chain aborted the merge').toBeTruthy();
+    // C outranks B on the branch order, so C keeps the path.
+    expect(h.disk.get('doc.txt')).toBe('vC');
+  });
+
+  it('gives a path to the side that edited it when the other never did', async () => {
+    // The mirror of the test above: here the side that touched `doc.txt` is
+    // also the higher-ordered branch, so the verdict agrees — but it has to be
+    // reached by the per-path question rather than by the branch order, which
+    // is why both directions are asserted.
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [row('O', []), row('B', ['O']), row('C', ['O'], 'NB-CCCC', 1000)],
+      // Only C's history names it. B holds bytes it never claimed.
+      lastEditOfPath: { refC: { 'doc.txt': '5000:ccc' } },
+      withOnStored: true,
+    });
+
+    await new FsConflictResolver(h.deps).resolve(conflict(['C', 'B']));
+
+    expect(h.disk.get('doc.txt')).toBe('vC');
+  });
+
+  it('gives a path to whichever side edited it LAST when both did', async () => {
+    // Both histories name `doc.txt`, so the later edit of THAT path decides
+    // it — not the later branch. Here the branch order and the per-path answer
+    // agree; the test exists because they can disagree, and the comparison has
+    // to be made rather than assumed either way.
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [row('O', []), row('B', ['O']), row('C', ['O'], 'NB-CCCC', 1000)],
+      lastEditOfPath: {
+        refB: { 'doc.txt': '1000:bbb' },
+        refC: { 'doc.txt': '9000:ccc' },
+      },
+      withOnStored: true,
+    });
+
+    await new FsConflictResolver(h.deps).resolve(conflict(['C', 'B']));
+
+    expect(h.disk.get('doc.txt')).toBe('vC');
+    const copy = [...h.disk.keys()].find((p) => p.includes('conflicted copy'));
+    expect(h.disk.get(copy as string)).toBe('vB');
+  });
+
   it('merges a fork: winner keeps the path, loser is renamed, fork collapses', async () => {
     // Ancestor O, loser B (older), winner C (newer). doc.txt conflicts.
     const h = harness({
@@ -483,7 +833,22 @@ describe('FsConflictResolver', () => {
     expect(h.disk.get('doc.txt')).toBe('vC');
     expect(h.disk.get('onlyB.txt')).toBe('b0'); // written via merge delta
     expect(h.disk.get('onlyC.txt')).toBe('c0'); // from winner restore
-    const copyName = 'doc (conflicted copy  1970-01-01 000000).txt';
+    // No client id, so the LOSING CONTENT names the copy instead.
+    //
+    // Two things used to be wrong here. The double space this literal once
+    // contained was the defect showing through the test — the id was
+    // `db.insertTrees` in production, the DB's name for its own operation, and
+    // empty in this fake, and neither case was ever looked at (see
+    // `usableClientId`). And then the name that replaced it carried only a
+    // SECOND-GRANULARITY timestamp, so two nodes losing different content in
+    // the same second derived the same copy name, the copies conflicted with
+    // each other, and a copy of a copy appeared. Measured on the seeded fuzz
+    // run as up to 14 nested copies; 0 in four runs after this.
+    //
+    // The losing revision's content ref is identical on every peer and differs
+    // whenever the content does, which is the property that was missing. It is
+    // used ONLY where there is no identity, so a readable name stays readable.
+    const copyName = 'doc (conflicted copy 1970-01-01 000000 vB).txt';
     expect(h.disk.get(copyName)).toBe('vB');
 
     // Merge revision references BOTH tips (loser first by identity order).

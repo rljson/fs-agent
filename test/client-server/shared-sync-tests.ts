@@ -290,8 +290,8 @@ export function defineProductionSyncTests(
       it('should propagate a deletion of a file created DURING the session', async () => {
         // The case above seeds both folders before sync starts, so the file is
         // part of the initial tree. A file that is created, modified and then
-        // deleted while syncing is a different path — and the one the lab's
-        // `modify-delete` recipe exercises. There, A's watcher reported
+        // deleted while syncing is a different path — and the one a real fleet's
+        // `modify-delete` scenario exercises. There, A's watcher reported
         // `deleted:` and A emitted no ref at all, so B was never told.
         await writeFile(join(folderA, 'seed.txt'), 'seed');
         await writeFile(join(folderB, 'seed.txt'), 'seed');

@@ -14,6 +14,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // A push that names ITSELF as its own parent.
@@ -32,7 +33,7 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 // A push that names itself can never do that, so every deletion it carries is
 // refused by everyone it reaches. When the state being announced is the result
 // of a deletion, the deletion simply does not arrive — which is what the
-// folder-delta recipe reports as "was deleted but is still on NB-21624".
+// folder-delta scenario reports as "was deleted but is still on node-A".
 //
 // **The obvious mechanism is NOT the one.** The push takes its parent from
 // `_currentRef`, captured before the store, so an agent that has just applied
@@ -43,7 +44,7 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 //
 // So this is an INVARIANT test, not a reproduction. It holds the one property
 // that must be true of every push, on the one path where it can be driven
-// end-to-end, and it rules out the first hypothesis. The lab's five
+// end-to-end, and it rules out the first hypothesis. The field report's five
 // self-parented pushes in thirty-eight came from somewhere else, and finding
 // it needs the sender's own state logged at the moment it decides — which is
 // the next step, not a guess dressed as a fix.
@@ -76,7 +77,7 @@ describe('FsAgent — a push that parents itself', () => {
     // then re-scans the folder it has just been given, derives the very ref
     // `_currentRef` already names, and pushes it — with itself as parent.
     //
-    // That is the shape the lab produced 5 times in 38 pushes, and every peer
+    // That is the shape a real fleet produced 5 times in 38 pushes, and every peer
     // not already in that state refused its deletions.
     const db = await makeDb();
     const bs = new BsMem();
@@ -88,7 +89,7 @@ describe('FsAgent — a push that parents itself', () => {
     await mkdir(sourceDir, { recursive: true });
     await writeFile(join(sourceDir, 'from-peer.txt'), 'peer');
     const peerRef = await adapter.storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
+      await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     // ...and a file of OUR OWN that the peer's tree does not know about. This
@@ -96,6 +97,7 @@ describe('FsAgent — a push that parents itself', () => {
     await writeFile(join(dir, 'ours.txt'), 'ours');
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const socket = new SocketMock();
@@ -140,10 +142,11 @@ describe('FsAgent — a push that parents itself', () => {
     await mkdir(sourceDir, { recursive: true });
     await writeFile(join(sourceDir, 'from-peer.txt'), 'peer');
     const peerRef = await adapter.storeFsTree(
-      await new FsAgent(sourceDir, bs).extract(),
+      await new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract(),
     );
 
     const agent = new FsAgent(dir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
     });
     const socket = new SocketMock();
@@ -177,7 +180,7 @@ describe('FsAgent — a push that parents itself', () => {
       `self-parented pushes: ${JSON.stringify(selfParented)}`,
     ).toEqual([]);
 
-    // ...and the log the lab reads must not show one either.
+    // ...and the log a real fleet reads must not show one either.
     const pushes = logSpy.mock.calls
       .map((c) => String(c[0]))
       .filter((line) => line.includes('pushing ref='));

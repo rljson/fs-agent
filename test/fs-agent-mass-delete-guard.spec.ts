@@ -5,7 +5,8 @@
 // found in the LICENSE file in the root of this package.
 
 import { existsSync } from 'fs';
-import { mkdir, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,8 +19,11 @@ import {
   FsAgent,
   MASS_DELETE_MIN_FILES,
   MassDeleteRefusedError,
+  REFUSAL_ANSWER_COOLDOWN_MS,
+  REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // The dangerous direction of sync is a POPULATED node receiving a tree that
@@ -27,10 +31,23 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 // mounted, a bootstrap that raced its own first scan — advertises an empty
 // tree, and every other node faithfully deletes everything it has.
 describe('FsAgent — the mass-delete guard', () => {
-  const sourceDir = join(process.cwd(), 'test-temp-guard-source');
-  const targetDir = join(process.cwd(), 'test-temp-guard-target');
+  // A FOLDER PER TEST, not one folder reused.
+  //
+  // Several tests here start a live agent against the shared folder, and a
+  // `stop()` does not cancel work already in flight: an apply scheduled a
+  // moment earlier still runs, scans, and writes. With one folder for the
+  // whole file that lands in the NEXT test's folder — measured as 121 files
+  // where 120 were written (a stray `.fsagent-state.json`) and as 117 of 120
+  // restored, because a leftover agent pruned what the test had just put
+  // there. Both read as defects in the code under test and were neither.
+  let nth = 0;
+  let sourceDir = '';
+  let targetDir = '';
 
   beforeEach(async () => {
+    nth++;
+    sourceDir = join(process.cwd(), `test-temp-guard-source-${nth}`);
+    targetDir = join(process.cwd(), `test-temp-guard-target-${nth}`);
     for (const d of [sourceDir, targetDir]) {
       await rm(d, { recursive: true, force: true });
       await mkdir(d, { recursive: true });
@@ -51,7 +68,7 @@ describe('FsAgent — the mass-delete guard', () => {
   };
 
   /** The tree of `sourceDir` as it currently stands. */
-  const sourceTree = (bs: BsMem) => new FsAgent(sourceDir, bs).extract();
+  const sourceTree = (bs: BsMem) => new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract();
 
   /** Files currently in the target. */
   const targetFiles = async () =>
@@ -66,7 +83,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(
-      new FsAgent(targetDir, bs).restore(tree, targetDir, {
+      new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
         cleanTarget: true,
       }),
     ).rejects.toBeInstanceOf(MassDeleteRefusedError);
@@ -87,7 +104,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const tree = await sourceTree(bs);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await new FsAgent(targetDir, bs)
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
       .restore(tree, targetDir, { cleanTarget: true })
       .catch(() => undefined);
 
@@ -101,7 +118,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const tree = await sourceTree(bs);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    const err = (await new FsAgent(targetDir, bs)
+    const err = (await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
       .restore(tree, targetDir, { cleanTarget: true })
       .catch((e: unknown) => e)) as MassDeleteRefusedError;
 
@@ -121,7 +138,7 @@ describe('FsAgent — the mass-delete guard', () => {
     for (const i of [0, 1, 2]) await rm(join(sourceDir, `f${i}.txt`));
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 
@@ -137,7 +154,7 @@ describe('FsAgent — the mass-delete guard', () => {
     for (let i = 0; i < 120; i++) await rm(join(sourceDir, `f${i}.txt`));
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 
@@ -154,7 +171,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(
-      new FsAgent(targetDir, bs).restore(tree, targetDir, {
+      new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
         cleanTarget: true,
       }),
     ).rejects.toBeInstanceOf(MassDeleteRefusedError);
@@ -169,14 +186,14 @@ describe('FsAgent — the mass-delete guard', () => {
     await fill(targetDir, 5);
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 
     expect(await targetFiles()).toHaveLength(0);
   });
 
-  // The correction the lab forced, and the reason this is not symmetric with
+  // The correction a real fleet forced, and the reason this is not symmetric with
   // the locked-file case. The peer that sent the sparse tree is the one
   // MISSING data; this node holds the fuller copy. If it goes quiet after
   // refusing, the sparse peer has nothing to catch up from — and with every
@@ -208,6 +225,7 @@ describe('FsAgent — the mass-delete guard', () => {
       return realSend(ref);
     };
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -283,6 +301,7 @@ describe('FsAgent — the mass-delete guard', () => {
     };
 
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -334,7 +353,7 @@ describe('FsAgent — the mass-delete guard', () => {
   // 3642 files with no refusal logged at all, while a FRESH client — whose
   // empty ref this node had never seen — was refused, answered, and converged
   // in eleven seconds.
-  it('refuses the same tree again when it comes back', async () => {
+  it('answers the same tree again when it comes back', async () => {
     const io = new IoMem();
     await io.init();
     const db = new Db(io);
@@ -350,6 +369,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -365,19 +385,24 @@ describe('FsAgent — the mass-delete guard', () => {
       cleanTarget: true,
     });
 
-    const refusals = (): number =>
-      errSpy.mock.calls.filter((c) =>
-        String(c[0]).includes('MASS DELETE REFUSED'),
+    // ANSWERS, not refusals. There is nothing left to refuse — an absence
+    // never prunes — so what has to survive the dedup is the ANSWER: this
+    // node telling the emptied peer what it holds. The cooldown is the reason
+    // the two waits are longer than it.
+    const answers = (): number =>
+      warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('re-announcing'),
       ).length;
 
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
     await new Promise((r) => setTimeout(r, 400));
-    expect(refusals()).toBe(1);
+    expect(answers()).toBe(1);
 
     // The very same ref, exactly as an emptied peer re-derives it.
+    await new Promise((r) => setTimeout(r, REFUSAL_ANSWER_COOLDOWN_MS));
     socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
     await new Promise((r) => setTimeout(r, 400));
-    expect(refusals()).toBe(2);
+    expect(answers()).toBe(2);
 
     expect(
       (await targetFiles()).filter((f) => f.startsWith('f')),
@@ -393,7 +418,7 @@ describe('FsAgent — the mass-delete guard', () => {
   // A connector outlives the agent using it: Node.restartAgent() rebuilds the
   // agent from the EXISTING transport. A fresh agent must not inherit what the
   // previous one was told, because those conclusions were about a folder state
-  // it does not have — and on the lab that left snapshot-bootstrap red on every
+  // it does not have — and on a real fleet that left snapshot-bootstrap red on every
   // run the suite has ever produced.
   it('starts deaf to what a previous agent was told', async () => {
     const io = new IoMem();
@@ -414,6 +439,7 @@ describe('FsAgent — the mass-delete guard', () => {
 
     // The first agent consumes the ref…
     const first = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
     const stopFirst = await first.syncFromDb(db, connector, treeKey, {
@@ -430,6 +456,7 @@ describe('FsAgent — the mass-delete guard', () => {
       await rm(join(targetDir, f), { recursive: true, force: true });
     }
     const second = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
     });
     const stopSecond = await second.syncFromDb(db, connector, treeKey, {
@@ -466,6 +493,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -517,6 +545,7 @@ describe('FsAgent — the mass-delete guard', () => {
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
     const agent = new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
         processRefRetries: 0,
@@ -553,7 +582,7 @@ describe('FsAgent — the mass-delete guard', () => {
     await fill(targetDir, POPULATED);
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir);
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir);
 
     expect(await targetFiles()).toHaveLength(POPULATED);
   });
@@ -565,10 +594,76 @@ describe('FsAgent — the mass-delete guard', () => {
     await fill(sourceDir, POPULATED);
     const tree = await sourceTree(bs);
 
-    await new FsAgent(targetDir, bs).restore(tree, targetDir, {
+    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
       cleanTarget: true,
     });
 
     expect(await targetFiles()).toHaveLength(POPULATED);
+  });
+  // ...........................................................................
+  it('reports each refusal where a client can read it', async () => {
+    // THE REFUSAL IS A DEFERRED DECISION, AND SOMEBODY HAS TO BE ASKED.
+    //
+    // The guard is right to refuse — a wiped peer telling the fleet to wipe is
+    // what it exists for — and it is wrong for a user who deleted 10 000 files
+    // on purpose. Nothing in this package can tell those apart, so the
+    // deletion simply never happens, on every node, and no message will fix
+    // that.
+    //
+    // Until a client asks the user, the least it can do is SAY SO. The log and
+    // the sync-error file already carry it; neither is readable by a UI on
+    // another machine, and "why did my deletion not arrive" is exactly the
+    // question that UI has to answer. See `README.public.md`, "Known constraints".
+    const dir = await mkdtemp(join(tmpdir(), 'fs-agent-refusals-'));
+    const agent = new FsAgent(dir);
+    try {
+      expect(agent.refusedDeletions, 'a fresh agent has refused nothing').toEqual(
+        [],
+      );
+
+      (
+        agent as unknown as {
+          _refuseDeletion: (
+            route: string,
+            wouldRemove: number,
+            held: number,
+            paths: readonly string[],
+          ) => void;
+        }
+      )._refuseDeletion('bucketSync', 150, 160, ['a.txt', 'b.txt']);
+
+      const [refusal] = agent.refusedDeletions;
+      expect(refusal.route).toBe('bucketSync');
+      expect(refusal.wouldRemove).toBe(150);
+      expect(refusal.held).toBe(160);
+      expect(
+        refusal.paths,
+        'a client has no paths to put in front of the user',
+      ).toEqual(['a.txt', 'b.txt']);
+      expect(refusal.atMs).toBeGreaterThan(0);
+
+      // Bounded: a hub that keeps re-announcing the same wipe must not grow
+      // this without limit.
+      for (let i = 0; i < REFUSED_DELETION_LOG_MAX + 5; i++) {
+        (
+          agent as unknown as {
+            _refuseDeletion: (
+              r: string,
+              w: number,
+              h: number,
+              p: readonly string[],
+            ) => void;
+          }
+        )._refuseDeletion('removals', i, 100, []);
+      }
+      expect(agent.refusedDeletions.length).toBe(REFUSED_DELETION_LOG_MAX);
+      // Newest kept, oldest dropped.
+      expect(
+        agent.refusedDeletions[REFUSED_DELETION_LOG_MAX - 1].wouldRemove,
+      ).toBe(REFUSED_DELETION_LOG_MAX + 4);
+    } finally {
+      agent.dispose();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
