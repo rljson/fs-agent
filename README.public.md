@@ -378,7 +378,7 @@ rewriting a whole catalogue.
   keep it deleted;
 - keep both sides of a conflict, and say there was one;
 - survive a locked file, an impossible path, a full disk, a vanishing entry, a
-  wrong clock and a peer on the previous wire format — each failing only
+  wrong clock and a peer whose history cannot be read — each failing only
   itself;
 - cost one blob to catch up on twenty missed saves of one file, not twenty.
 
@@ -471,9 +471,10 @@ runner.
 **An upgrade changes every tree ref in the fleet.** Content identity now
 excludes mtime and fixes a canonical child order, so the same bytes hash
 differently than in older releases. Nothing is destroyed, but the fleet reads
-divergent until every machine has re-scanned. **Upgrade machines together** —
-there is no longer a switch for speaking the previous wire format, because
-nothing is deployed that needs one.
+divergent until every machine has re-scanned. **Upgrade machines together**:
+there is no switch for speaking an older wire format, deliberately — a build
+that cannot read a chain head cannot read the bucket protocol either, so one
+flag would select two different consistency models.
 
 **A deliberate mass deletion does not arrive.** Deleting most of a folder is
 refused on every machine, and nothing asks the user — see "what it does not do"
