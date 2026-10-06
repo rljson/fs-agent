@@ -6,8 +6,10 @@
 
 export {
   FsAgent,
+  REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
   type FsAgentOptions,
+  type RefusedDeletion,
   type RestoreOptions,
   type TimeoutConfig,
 } from './fs-agent.ts';

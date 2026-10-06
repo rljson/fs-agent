@@ -168,6 +168,16 @@ export interface FsMeshNode {
    * rather than hooked into the agent, so it sees what a user would see.
    */
   readonly timeline: FsTimeline;
+  /**
+   * Every ref this node has put on the wire, in order, exactly as announced.
+   *
+   * Recorded at the connector, which is the last place a ref is still what the
+   * peer will receive — so it sees the agent's explicit announcements AND the
+   * ones `Connector`'s own db observer makes, which is the distinction the
+   * invariant over it exists to police. See
+   * `every announcement carries a chain head`.
+   */
+  readonly announced: readonly string[];
   readonly isCut: boolean;
 
   /**
@@ -501,6 +511,25 @@ export const buildFsMesh = async (opts: {
     const db = new Db(client.io!);
     const connector = new Connector(db, route, clientSocket, MESH_SYNC);
 
+    // EVERY ref this node puts on the wire, wrapped here and nowhere else.
+    //
+    // `send` is the one choke point both producers pass through: the agent's
+    // own `_sendRef`, and `Connector`'s db observer, which broadcasts the raw
+    // tree ref of any local insert that did not set `skipNotification`. The
+    // second producer is invisible from inside `FsAgent`, so an invariant on
+    // the announcement format cannot be written anywhere above this line —
+    // which is exactly how two of them went unnoticed.
+    const announced: string[] = [];
+    {
+      const pass = connector.send.bind(connector);
+      (connector as unknown as { send: (r: string) => void }).send = (
+        ref: string,
+      ) => {
+        announced.push(ref);
+        pass(ref);
+      };
+    }
+
     // `client.bs`, NOT a bare `BsMem`.
     //
     // The client's blob store is the node's own store WITH a path to its
@@ -580,6 +609,7 @@ export const buildFsMesh = async (opts: {
       name,
       folder,
       timeline: { samples },
+      announced,
       get agent() {
         return liveAgent;
       },

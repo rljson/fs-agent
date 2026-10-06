@@ -5,7 +5,8 @@
 // found in the LICENSE file in the root of this package.
 
 import { existsSync } from 'fs';
-import { mkdir, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +20,7 @@ import {
   MASS_DELETE_MIN_FILES,
   MassDeleteRefusedError,
   REFUSAL_ANSWER_COOLDOWN_MS,
+  REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
@@ -597,5 +599,71 @@ describe('FsAgent — the mass-delete guard', () => {
     });
 
     expect(await targetFiles()).toHaveLength(POPULATED);
+  });
+  // ...........................................................................
+  it('reports each refusal where a client can read it', async () => {
+    // THE REFUSAL IS A DEFERRED DECISION, AND SOMEBODY HAS TO BE ASKED.
+    //
+    // The guard is right to refuse — a wiped peer telling the fleet to wipe is
+    // what it exists for — and it is wrong for a user who deleted 10 000 files
+    // on purpose. Nothing in this package can tell those apart, so the
+    // deletion simply never happens, on every node, and no message will fix
+    // that.
+    //
+    // Until a client asks the user, the least it can do is SAY SO. The log and
+    // the sync-error file already carry it; neither is readable by a UI on
+    // another machine, and "why did my deletion not arrive" is exactly the
+    // question that UI has to answer. See `doc/known-limits.md`.
+    const dir = await mkdtemp(join(tmpdir(), 'fs-agent-refusals-'));
+    const agent = new FsAgent(dir);
+    try {
+      expect(agent.refusedDeletions, 'a fresh agent has refused nothing').toEqual(
+        [],
+      );
+
+      (
+        agent as unknown as {
+          _refuseDeletion: (
+            route: string,
+            wouldRemove: number,
+            held: number,
+            paths: readonly string[],
+          ) => void;
+        }
+      )._refuseDeletion('bucketSync', 150, 160, ['a.txt', 'b.txt']);
+
+      const [refusal] = agent.refusedDeletions;
+      expect(refusal.route).toBe('bucketSync');
+      expect(refusal.wouldRemove).toBe(150);
+      expect(refusal.held).toBe(160);
+      expect(
+        refusal.paths,
+        'a client has no paths to put in front of the user',
+      ).toEqual(['a.txt', 'b.txt']);
+      expect(refusal.atMs).toBeGreaterThan(0);
+
+      // Bounded: a hub that keeps re-announcing the same wipe must not grow
+      // this without limit.
+      for (let i = 0; i < REFUSED_DELETION_LOG_MAX + 5; i++) {
+        (
+          agent as unknown as {
+            _refuseDeletion: (
+              r: string,
+              w: number,
+              h: number,
+              p: readonly string[],
+            ) => void;
+          }
+        )._refuseDeletion('removals', i, 100, []);
+      }
+      expect(agent.refusedDeletions.length).toBe(REFUSED_DELETION_LOG_MAX);
+      // Newest kept, oldest dropped.
+      expect(
+        agent.refusedDeletions[REFUSED_DELETION_LOG_MAX - 1].wouldRemove,
+      ).toBe(REFUSED_DELETION_LOG_MAX + 4);
+    } finally {
+      agent.dispose();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

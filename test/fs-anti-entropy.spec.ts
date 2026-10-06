@@ -552,12 +552,20 @@ describe('FsAntiEntropy', () => {
     // decided `pull` for a node that was AHEAD and merged its freshly
     // re-created file away.
     //
-    // So the trade: as it stands the fleet UNDER-REPORTS divergence, and
-    // correcting it makes the fleet LOSE FILES. Under-reporting is the safer
-    // of the two, so this stays red and says why. Remove the inversion when
-    // the repair can tell "I am ahead" from "I am behind" without needing a
-    // chain verdict — see `antiEntropyDecision` and `fork-is-not-a-lag`.
-    it.fails('forgets the agreement once THIS node has moved on', async () => {
+    // NO LONGER INVERTED. This was red for a long time and said why: keying
+    // the memo on the pair turned the divergence detector back on, and the
+    // repair behind it then chose `pull` for a node that was AHEAD and merged
+    // its freshly re-created file away.
+    //
+    // What made it safe was not the memo. `_classifyAnnouncedRef` was trusting
+    // a chain verdict about a head that no longer named its own folder, so
+    // `behind` was true of the head and false of the node. With that fixed —
+    // a verdict requires the head to name the state the folder is in — the
+    // repair stopped being wrong, and the memo could be corrected.
+    //
+    // The order mattered and it was the opposite of the obvious one: fix what
+    // the repair is told, then stop hiding what it is told about.
+    it('forgets the agreement once THIS node has moved on', async () => {
       // The agreement is about a PAIR — "the hub's ref describes the same
       // content as the state I am in" — and it is true only while neither side
       // moves. Keyed on the hub ref alone it survived this node changing

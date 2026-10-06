@@ -212,6 +212,14 @@ describe('entriesInBuckets', () => {
 describe('reconcile', () => {
   const E = (path: string, blob: string): ManifestEntry => [path, blob];
 
+/** An entry that also says WHEN its edit was minted. See `editedAt`. */
+const T = (path: string, blob: string, editedAt: string): ManifestEntry => [
+  path,
+  blob,
+  0,
+  editedAt,
+];
+
   it('fetches what the peer has and we lack', () => {
     const plan = reconcile([], [E('new.txt', 'blob-1')]);
     expect(plan.fetch).toEqual([['new.txt', 'blob-1']]);
@@ -315,6 +323,85 @@ describe('reconcile', () => {
     );
     expect(plan.drop).toEqual(['doomed.txt']);
     expect(plan.fetch).toEqual([]);
+  });
+
+  // ...........................................................................
+  // A TOMBSTONE IS AN EDIT, AND AN EDIT IS ORDERED.
+  //
+  // The two tests above are the rule with no times on either side, which is
+  // what an older peer sends and what the rules below must leave untouched.
+  // These four are the rule WITH times, and they are the whole of `I7b`:
+  // a deletion made before a re-creation must not win.
+  //
+  // Both directions are asserted, because one node runs each. If only the
+  // holder refuses the drop, the deleter re-asserts its tombstone and the two
+  // sit on opposite answers for ever — so the mirror has to fetch.
+  it('carries a claim with no time when the host cannot date the edit', () => {
+    // The shortest entry that still says something. A host with claims but no
+    // edit times — an agent whose chain failed to initialise, or one restarted
+    // before this field was persisted — must still advertise WHO edited, or
+    // the rule that predates `editedAt` loses its input too.
+    const entries = entriesInBuckets(
+      new Map([['mine.txt', 'blob-1']]),
+      [bucketOf('mine.txt')],
+      new Set(['mine.txt']),
+    );
+    expect(entries).toEqual([['mine.txt', 'blob-1', 1]]);
+  });
+
+  it('refuses a tombstone older than the content we hold', () => {
+    const plan = reconcile(
+      [T('flip.txt', 'blob-new', '200:aaa')],
+      [T('flip.txt', TOMBSTONE_BLOB, '100:bbb')],
+    );
+    expect(plan.drop, 'a stale deletion took a newer file').toEqual([]);
+    expect(plan.fetch).toEqual([]);
+    expect(plan.redelete).toEqual([]);
+  });
+
+  it('fetches content newer than the tombstone we hold', () => {
+    // The mirror of the test above, run on the other node. Re-asserting here
+    // is what would undo the re-creation on the peer that already has it.
+    const plan = reconcile(
+      [T('flip.txt', TOMBSTONE_BLOB, '100:bbb')],
+      [T('flip.txt', 'blob-new', '200:aaa')],
+    );
+    expect(plan.fetch, 'a stale tombstone was re-asserted').toEqual([
+      ['flip.txt', 'blob-new'],
+    ]);
+    expect(plan.redelete).toEqual([]);
+  });
+
+  it('still drops a tombstone NEWER than the content we hold', () => {
+    // The case the ordering must not break: a real deletion this node has not
+    // heard about. Refusing it here is how a deletion stops propagating, which
+    // a one-sided version of this rule did — three delivery tests at once.
+    const plan = reconcile(
+      [T('doomed.txt', 'blob-1', '100:aaa')],
+      [T('doomed.txt', TOMBSTONE_BLOB, '200:bbb')],
+    );
+    expect(plan.drop, 'a real deletion was refused').toEqual(['doomed.txt']);
+    expect(plan.fetch).toEqual([]);
+  });
+
+  it('decides as it always did when one side gives no time', () => {
+    // An older peer sends two elements. Absent means "the sender did not say",
+    // and a comparison with one operand is not a comparison — so the rule that
+    // shipped before `editedAt` decides, unchanged.
+    const theirs = reconcile(
+      [T('doomed.txt', 'blob-1', '200:aaa')],
+      [E('doomed.txt', TOMBSTONE_BLOB)],
+    );
+    expect(theirs.drop, 'an untimed tombstone stopped working').toEqual([
+      'doomed.txt',
+    ]);
+    const ours = reconcile(
+      [E('doomed.txt', 'blob-1')],
+      [T('doomed.txt', TOMBSTONE_BLOB, '100:bbb')],
+    );
+    expect(ours.drop, 'our missing time changed their verdict').toEqual([
+      'doomed.txt',
+    ]);
   });
 
   it('re-asserts OUR tombstone when the peer still holds the file', () => {

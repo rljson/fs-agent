@@ -6,9 +6,9 @@ settings:
 
 overrides:
   '@rljson/bs': 0.0.29
-  '@rljson/db': 0.0.51
+  '@rljson/db': 0.0.52
   '@rljson/hash': 0.0.19
-  '@rljson/io': 0.0.83
+  '@rljson/io': 0.0.84
   '@rljson/json': 0.0.23
   '@rljson/rljson': 0.0.83
   '@rljson/server': 0.0.73
@@ -21,14 +21,14 @@ importers:
         specifier: 0.0.29
         version: 0.0.29
       '@rljson/db':
-        specifier: 0.0.51
-        version: 0.0.51
+        specifier: 0.0.52
+        version: 0.0.52
       '@rljson/hash':
         specifier: 0.0.19
         version: 0.0.19
       '@rljson/io':
-        specifier: 0.0.83
-        version: 0.0.83
+        specifier: 0.0.84
+        version: 0.0.84
       '@rljson/json':
         specifier: 0.0.23
         version: 0.0.23
@@ -399,16 +399,16 @@ packages:
     resolution: {integrity: sha512-DXVqDc9oeyxVF75XXVuRxHi9KLFIQbw/zVQNHRYSPAvu2gWVFfzodU9CQxbgYdmMJBR9efWMoNCfvE7lB2DMew==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/db@0.0.51':
-    resolution: {integrity: sha512-Niim8VeW5j0sSsdUKzPVEt08NbmqCqeCrxGiq/qStwY4b6a3MgmT4v9GklDFvIv+FQ8D/oxbjRzMHOnjK2MVpg==}
+  '@rljson/db@0.0.52':
+    resolution: {integrity: sha512-NCPs7GtlRyFw7hsOGwkBtT1N+PGb94Nyr28xm/PKqC+SYcnjPLXkId33YDjyjZLzPLR9RGu29djsuwQF9bIqpg==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/hash@0.0.19':
     resolution: {integrity: sha512-1bBHWbzzaOE3ba2niyvmu4d9VYv5atLzzHDI2ka3AlHLyBDD8Q9qI/HCjimULJlprIGVeN4+jN8sth4CdnGxOQ==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/io@0.0.83':
-    resolution: {integrity: sha512-qeonuNY/zZil8Z1VtFgZI8nioiyczW3mnF3GAOaVi5nMn1jMzXjlYrI6cRp5pQCL0c28zutUS+ChfB7+FXYQsQ==}
+  '@rljson/io@0.0.84':
+    resolution: {integrity: sha512-aL78VfpcozwYt8biUitdFJtZNB3lb0XpLCqPGTz3rRoT5oLfy3m2K/axpA4B/gzRYqmYcoa3H9fkeQIwZpZjZA==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/is-ready@0.0.19':
@@ -2082,10 +2082,10 @@ snapshots:
       '@rljson/json': 0.0.23
       '@rljson/rljson': 0.0.83
 
-  '@rljson/db@0.0.51':
+  '@rljson/db@0.0.52':
     dependencies:
       '@rljson/hash': 0.0.19
-      '@rljson/io': 0.0.83
+      '@rljson/io': 0.0.84
       '@rljson/json': 0.0.23
       '@rljson/rljson': 0.0.83
       '@rljson/validate': 0.0.12
@@ -2096,7 +2096,7 @@ snapshots:
     dependencies:
       '@rljson/json': 0.0.23
 
-  '@rljson/io@0.0.83':
+  '@rljson/io@0.0.84':
     dependencies:
       '@rljson/hash': 0.0.19
       '@rljson/is-ready': 0.0.19
@@ -2119,9 +2119,9 @@ snapshots:
   '@rljson/server@0.0.73':
     dependencies:
       '@rljson/bs': 0.0.29
-      '@rljson/db': 0.0.51
+      '@rljson/db': 0.0.52
       '@rljson/hash': 0.0.19
-      '@rljson/io': 0.0.83
+      '@rljson/io': 0.0.84
       '@rljson/json': 0.0.23
       '@rljson/network': 0.0.23
       '@rljson/rljson': 0.0.83

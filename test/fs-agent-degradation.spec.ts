@@ -29,16 +29,17 @@ import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
-import { existsSync, readFileSync } from 'fs';
-import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AGENT_STATE_FILE,
   ANTI_ENTROPY_ASK_MS,
+  EDIT_TIME_LOG_MAX,
   FsAgent,
   JOIN_ASK_INTERVAL_MS,
   SYNC_ERROR_FILE,
@@ -653,10 +654,15 @@ describe('FsAgent — degradation when a dependency fails', () => {
       // The lookup by tree ref is ambiguous by nature: a tree ref is a content
       // hash, so two nodes holding the same bytes produce the same one. The
       // announced head is what the sender said about ITSELF.
+      // `_currentRef` set to match, because a verdict is only given while the
+      // head NAMES the state the folder is in — see the test below. This
+      // fixture left it unset, which now means "this node holds work no head
+      // speaks for" and answers `incomplete` before any lookup happens.
       (agent as unknown as { _chainHead: unknown })._chainHead = {
         head: 'myHead',
         treeRef: 'myTreeRef',
       };
+      (agent as unknown as { _currentRef: unknown })._currentRef = 'myTreeRef';
       const asked: string[] = [];
       (agent as unknown as { _chain: unknown })._chain = {
         entryForTreeRef: () =>
@@ -673,6 +679,105 @@ describe('FsAgent — degradation when a dependency fails', () => {
 
       expect(await classify(agent, 'theirTreeRef')).toBe('behind');
       expect(asked).toEqual(['headFromTheAnnouncement']);
+    });
+
+    it('records a bucket round\'s agreement only against a hub ref', async () => {
+      // A round can finish after the announcement that prompted it has been
+      // superseded, or before any beacon has arrived. An agreement names both
+      // sides, so with nothing to name on the hub's side there is nothing to
+      // record — and recording it against `undefined` would mark every future
+      // announcement as agreed.
+      const told: string[] = [];
+      (agent as unknown as { _antiEntropy: unknown })._antiEntropy = {
+        status: { hubRef: undefined },
+        agreedOn: (r: string) => told.push(r),
+      };
+      (
+        agent as unknown as { _bucketRoundAgreed: () => void }
+      )._bucketRoundAgreed();
+      expect(told, 'an agreement was recorded with nothing to agree with').toEqual(
+        [],
+      );
+
+      (agent as unknown as { _antiEntropy: unknown })._antiEntropy = {
+        status: { hubRef: 'theHubsRef' },
+        agreedOn: (r: string) => told.push(r),
+      };
+      (
+        agent as unknown as { _bucketRoundAgreed: () => void }
+      )._bucketRoundAgreed();
+      expect(told, 'a proven agreement was not recorded').toEqual([
+        'theHubsRef',
+      ]);
+    });
+
+    it('gives no verdict when the walk itself fails', async () => {
+      // The chain is BEST EFFORT everywhere, and a walk that throws is not a
+      // verdict. `incomplete` keeps a failed read from being mistaken for a
+      // clean answer — a `behind` invented here authorises a repair to replace
+      // the folder.
+      //
+      // The head must NAME the folder for the walk to be reached at all, so
+      // both are set: the guard below returns before `classify` otherwise, and
+      // that is how this path stopped being exercised.
+      (agent as unknown as { _chainHead: unknown })._chainHead = {
+        head: 'myHead',
+        treeRef: 'whereIAm',
+      };
+      (agent as unknown as { _currentRef: unknown })._currentRef = 'whereIAm';
+      (agent as unknown as { _chain: unknown })._chain = {
+        classify: () => Promise.reject(new Error('the walk cannot be read')),
+      };
+      priv<Map<string, string>>(agent, '_announcedHeads').set(
+        'theirTreeRef',
+        'theirHead',
+      );
+
+      expect(
+        await classify(agent, 'theirTreeRef'),
+        'a failed walk was reported as a clean verdict',
+      ).toBe('incomplete');
+    });
+
+    it('gives no verdict while its own head does not name its folder', async () => {
+      // THE DEFECT THIS EXISTS FOR, and it cost a file every time it fired.
+      //
+      // `classify` compares two chain HEADS. This node's head can lag its own
+      // folder — a write is on disk and in `_currentRef` before
+      // `_recordChainEntry` has appended the entry for it, and an apply that
+      // re-derives a different ref leaves the head naming the state it came
+      // from. Asked in that window the chain answers truthfully about a state
+      // this node has already left:
+      //
+      //   ours=fZ79puL0 theirs=KDeHB45d -> behind
+      //     chainHeadTree=B4-SH9ZX current=hd3PHz1r
+      //
+      // `behind` was right about the head and wrong about the folder, which
+      // held a file no peer had. The repair read it as `pull`, replaced the
+      // folder, and did it again — 45 times in 89 seconds on `I7b`.
+      //
+      // `incomplete` becomes `blocked`: nothing applied, nothing latched,
+      // retried. `fork` was tried instead and measured WORSE, 3 of 8 churn
+      // runs against 1 of 8.
+      (agent as unknown as { _chainHead: unknown })._chainHead = {
+        head: 'myHead',
+        treeRef: 'theStateMyHeadNames',
+      };
+      (agent as unknown as { _currentRef: unknown })._currentRef =
+        'theStateMyFolderIsActuallyIn';
+      (agent as unknown as { _chain: unknown })._chain = {
+        classify: () =>
+          Promise.reject(new Error('must not be asked about a stale head')),
+      };
+      priv<Map<string, string>>(agent, '_announcedHeads').set(
+        'theirTreeRef',
+        'theirHead',
+      );
+
+      expect(
+        await classify(agent, 'theirTreeRef'),
+        'a verdict was given about a head that does not name this folder',
+      ).toBe('incomplete');
     });
   });
 
@@ -1227,18 +1332,42 @@ describe('FsAgent — degradation when a dependency fails', () => {
       expect(manifest.size).toBe(0);
     });
 
-    it('announces a bare tree ref when it is not at that state', async () => {
-      // The marked `~H~` form says "this is the head I am at". For any other
-      // state there is no head to mark it with, so the plain ref travels.
+    it('announces a bare tree ref only when nothing can name the state', async () => {
+      // THE OLD CLAIM HERE WAS WRONG, and it was the comment that made it look
+      // settled: "for any other state there is no head to mark it with". There
+      // is, whenever the chain recorded one — which is every state this node
+      // ever passed through. `_chainHead` is a cache for the state just
+      // appended, not the limit of what can be named.
+      //
+      // Bare is honest for exactly one case: nothing names the tree. Here the
+      // agent has no chain at all, which is that case.
       priv<Map<string, string>>(agent, '_announcedHeads');
       (agent as unknown as { _chainHead: unknown })._chainHead = {
         head: 'myHead',
         treeRef: 'theStateIAmAt',
       };
-      const announced = (
-        agent as unknown as { _announceAs: (r: string) => string }
+      (agent as unknown as { _chain: unknown })._chain = undefined;
+      const announced = await (
+        agent as unknown as { _announceAs: (r: string) => Promise<string> }
       )._announceAs('someOtherState');
       expect(announced).toBe('someOtherState');
+    });
+
+    it('marks a state it is no longer at, from a head a peer announced', async () => {
+      // The re-announcement case: an anti-entropy push, or a folder that
+      // returned to a state it held before. This node is not at that state's
+      // head any more and still has to name it, or the receiver gets a ref it
+      // cannot ask the chain about.
+      const heads = priv<Map<string, string>>(agent, '_announcedHeads');
+      heads.set('aStateIPassedThrough', 'thatStatesHead');
+      (agent as unknown as { _chainHead: unknown })._chainHead = {
+        head: 'myHead',
+        treeRef: 'theStateIAmAtNow',
+      };
+      const announced = await (
+        agent as unknown as { _announceAs: (r: string) => Promise<string> }
+      )._announceAs('aStateIPassedThrough');
+      expect(announced).toBe('~H~thatStatesHead');
     });
   });
 
@@ -1580,6 +1709,773 @@ describe('FsAgent — degradation when a dependency fails', () => {
         callOnAgent(agent, '_fetchTreeFromDb', db, 'fsTree', ref),
       ).rejects.toThrow(/No tree nodes found/);
     }, 30_000);
+  });
+
+  // ...........................................................................
+  // The states the 100% branch gate asked for, and nothing else reaches.
+  //
+  // Each of these is a decision the agent makes on a shape no scenario in the
+  // suite happens to produce — a hub message arriving with bucket sync off, an
+  // announcement with no sender metadata, a ref heard while a join is still
+  // pending. They are not exotic: each is one configuration switch or one
+  // timing away from being the normal case in the field.
+  //
+  // Driven through `connector.listen`, which is the real entry point, by
+  // capturing the callback the agent registers. Calling it directly is what
+  // makes the shape controllable — a socket cannot be made to deliver an
+  // announcement with a missing field.
+  describe('the ref callback, on shapes no scenario produces', () => {
+    /** Captures the callback `syncFromDb` registers, and the agent's stop. */
+    const listening = async (
+      a: FsAgent,
+      db: Db,
+    ): Promise<{
+      fire: (
+        ref: string,
+        preds?: string[],
+        info?: { isNewestFromSender?: boolean },
+      ) => Promise<void>;
+      stop: () => void;
+    }> => {
+      const connector = new Connector(
+        db,
+        Route.fromFlat('/fsTree'),
+        new SocketMock(),
+      );
+      let captured:
+        | ((
+            ref: string,
+            preds?: string[],
+            info?: { isNewestFromSender?: boolean },
+          ) => Promise<void>)
+        | undefined;
+      const real = connector.listen.bind(connector);
+      (
+        connector as unknown as { listen: (cb: unknown) => void }
+      ).listen = (cb: unknown) => {
+        captured = cb as typeof captured;
+        real(cb as Parameters<typeof real>[0]);
+      };
+      const stop = await a.syncFromDb(db, connector, 'fsTree');
+      if (!captured) throw new Error('the agent registered no callback');
+      return { fire: captured, stop };
+    };
+
+    it('drops a bucket-sync message when bucket sync is off', async () => {
+      // `~BQ~` and friends are a control protocol, and a build with the
+      // protocol switched off still RECEIVES them: every peer on the LAN
+      // speaks it by default. Answering would be wrong and crashing would be
+      // worse, so the message is dropped — and dropped SILENTLY, because a
+      // peer using a feature this node has turned off is not an error.
+      const db = await aDb();
+      // ITS OWN FOLDER: `dir` already holds the suite agent, whose own sync
+      // errors would answer this assertion for it.
+      const own = await mkdtemp(join(tmpdir(), 'fs-agent-nobucket-'));
+      const quiet = new FsAgent(own, undefined, {
+        ...ORIGIN_FIXTURE,
+        bucketSync: false,
+      });
+      const { fire, stop } = await listening(quiet, db);
+      try {
+        await expect(fire('~BQ~{"r":1,"d":[]}')).resolves.toBeUndefined();
+        expect(
+          syncErrors(own),
+          'a peer speaking an off feature was recorded as a failure',
+        ).not.toContain('bucket');
+      } finally {
+        stop();
+        quiet.dispose();
+        await rm(own, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('leaves an unresolvable head to the anti-entropy, and says so', async () => {
+      // Resolving a `~H~` head is a READ, and a read may have to travel to a
+      // peer that cannot answer. Bounded, because an unbounded one is a silent
+      // hang — measured in `I7b`, where a node sat inside this call for the
+      // rest of the run with no log, no retry and no fallback.
+      //
+      // THIS PATH USED TO BE EXERCISED BY ACCIDENT. Before `@rljson/io` 0.0.84
+      // every gate run produced 24–27 reads blocked for a full ten seconds, so
+      // the timeout fired on its own. The io fix removed them — which is why
+      // this needs a test of its own now, and why a test that only ever ran
+      // because something else was broken is worth being suspicious of.
+      const db = await aDb();
+      const own = await mkdtemp(join(tmpdir(), 'fs-agent-slowhead-'));
+      const slow = new FsAgent(own, undefined, {
+        ...ORIGIN_FIXTURE,
+        timeouts: { dbQuery: 60 },
+      });
+      const { fire, stop } = await listening(slow, db);
+      try {
+        (slow as unknown as { _chain: unknown })._chain = {
+          // Open, and never answers — what an unreachable peer looks like.
+          entry: () => new Promise(() => {}),
+        };
+        await fire('~H~aHeadNobodyCanAnswerFor', [], {
+          isNewestFromSender: true,
+        });
+        await sleep(500);
+        expect(
+          syncErrors(own),
+          'a head that could not be resolved was swallowed silently',
+        ).toContain('syncFromDb/resolveAnnouncement');
+      } finally {
+        stop();
+        slow.dispose();
+        await rm(own, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('treats an announcement with no sender metadata as the newest', async () => {
+      // `info.isNewestFromSender` is how a receiver skips a ref its sender has
+      // already superseded. An announcement that carries no metadata at all —
+      // an older peer, or any sender that did not fill the field — must be
+      // treated as NEWS, not discarded: defaulting the other way makes a node
+      // ignore the only thing it was told.
+      const db = await aDb();
+      await writeFile(join(dir, 'seed.txt'), 'seed');
+      const { fire, stop } = await listening(agent, db);
+      try {
+        const other = await mkdtemp(join(tmpdir(), 'fs-agent-sender-'));
+        const sender = new FsAgent(other, undefined, ORIGIN_FIXTURE);
+        const lines: string[] = [];
+        const spy = vi
+          .spyOn(console, 'log')
+          .mockImplementation((...a: unknown[]) => {
+            lines.push(a.map(String).join(' '));
+          });
+        try {
+          await writeFile(join(other, 'fromPeer.txt'), 'peer');
+          const ref = await sender.storeInDb(db, 'fsTree');
+
+          // No third argument at all: the default is what is under test.
+          await fire(ref, []);
+          await sleep(1200);
+          expect(
+            lines.filter((l) => l.includes('newestFromSender=')),
+            'the announcement was never applied, so the default was not exercised',
+          ).not.toEqual([]);
+          expect(
+            lines.filter((l) => l.includes('newestFromSender=false')),
+            'an announcement with no metadata was treated as superseded',
+          ).toEqual([]);
+        } finally {
+          spy.mockRestore();
+          sender.dispose();
+          await rm(other, { recursive: true, force: true });
+        }
+      } finally {
+        stop();
+      }
+    }, 30_000);
+
+    it('ignores a bare ref heard while a join is still pending', async () => {
+      // The join protocol applies the hub's chain head FIRST and judges this
+      // folder's extras against it. An announcement heard mid-join must not
+      // be applied over a folder nobody has judged yet — the ask loop owns the
+      // reconcile, and this ref is dropped rather than restored.
+      const db = await aDb();
+      const { fire, stop } = await listening(agent, db);
+      try {
+        const other = await mkdtemp(join(tmpdir(), 'fs-agent-joinbare-'));
+        const sender = new FsAgent(other, undefined, ORIGIN_FIXTURE);
+        try {
+          await writeFile(join(other, 'wouldArrive.txt'), 'x');
+          const ref = await sender.storeInDb(db, 'fsTree');
+
+          (agent as unknown as { _joinPending: unknown })._joinPending = {
+            resolve: () => {},
+          };
+          await fire(ref, [], { isNewestFromSender: true });
+          await sleep(1200);
+          expect(
+            existsSync(join(dir, 'wouldArrive.txt')),
+            'a mid-join announcement was applied over an unjudged folder',
+          ).toBe(false);
+        } finally {
+          sender.dispose();
+          await rm(other, { recursive: true, force: true });
+        }
+      } finally {
+        (agent as unknown as { _joinPending: unknown })._joinPending =
+          undefined;
+        stop();
+      }
+    }, 30_000);
+
+    it('ignores a resolvable HEAD heard while a join is still pending', async () => {
+      // Same rule, the other wire format. A marked head is the shape the join
+      // is WAITING for, which makes this the easier mistake: the ref resolves,
+      // the entry is there, everything looks ready — and applying it still
+      // skips the judgement the protocol exists to make.
+      const db = await aDb();
+      const { fire, stop } = await listening(agent, db);
+      try {
+        const applied: string[] = [];
+        (
+          agent as unknown as { _rememberAnnouncedHead: unknown }
+        )._rememberAnnouncedHead = (treeRef: string) => {
+          applied.push(treeRef);
+        };
+        (agent as unknown as { _joinPending: unknown })._joinPending = {
+          resolve: () => {},
+        };
+        (agent as unknown as { _chain: unknown })._chain = {
+          entry: () =>
+            Promise.resolve({
+              head: 'theHead',
+              treeRef: 'theTree',
+              changed: [],
+              removed: [],
+              timeId: '1:a',
+            }),
+        };
+        await fire('~H~theHead', [], { isNewestFromSender: true });
+        await sleep(600);
+        expect(
+          applied,
+          'a mid-join head was parked and scheduled instead of dropped',
+        ).toEqual([]);
+      } finally {
+        (agent as unknown as { _joinPending: unknown })._joinPending =
+          undefined;
+        stop();
+      }
+    }, 30_000);
+  });
+
+  // ...........................................................................
+  // The decisions reached by calling the method, not by driving a fleet.
+  //
+  // Each of these is a state the suite's scenarios never produce because they
+  // all start from a scanned folder and a chain that answers. A folder that
+  // has not been scanned yet, a path this node did not author, a chain read
+  // that fails mid-removal — all of them are ordinary in the field and none of
+  // them is reachable from a converged mesh.
+  describe('the removal and reachability paths, called directly', () => {
+    /** Collects `console.log` for the run of one test. */
+    const captureLog = (): { lines: string[]; restore: () => void } => {
+      const lines: string[] = [];
+      const spy = vi
+        .spyOn(console, 'log')
+        .mockImplementation((...a: unknown[]) => {
+          lines.push(a.map(String).join(' '));
+        });
+      return { lines, restore: () => spy.mockRestore() };
+    };
+
+    it('answers reachability when both sides have a head', async () => {
+      // The verdict the whole chain exists to produce. Everything else in this
+      // method is a reason it CANNOT answer — no head of our own, a head that
+      // will not resolve, a tree no entry covers — and those were the only
+      // shapes the suite reached, so the one path that returns a verdict was
+      // never taken here.
+      (agent as unknown as { _chainHead: unknown })._chainHead = {
+        head: 'mine',
+        treeRef: 'myTree',
+      };
+      const asked: Array<[string, string]> = [];
+      (agent as unknown as { _chain: unknown })._chain = {
+        entry: () =>
+          Promise.resolve({
+            head: 'theirs',
+            treeRef: 'theirTree',
+            changed: [],
+            removed: [],
+            timeId: '2:b',
+          }),
+        classify: (a: string, b: string) => {
+          asked.push([a, b]);
+          return Promise.resolve('behind');
+        },
+      };
+
+      const verdict = await callOnAgent(agent, '_reachabilityOf', '~H~theirs');
+      expect(verdict).toEqual({
+        treeRef: 'theirTree',
+        reachability: 'behind',
+      });
+      // Asked FROM our head TO theirs, in that order — reversing it inverts
+      // every verdict the fleet makes.
+      expect(asked, 'the chain was asked the wrong way round').toEqual([
+        ['mine', 'theirs'],
+      ]);
+    });
+
+    it('lifts several tombstones at once and says so in the plural', async () => {
+      // "lifted 1 tombstones" in a support log is how a reader stops trusting
+      // the log — the same reason the removals guard has both forms. And the
+      // folder here has never been scanned, which is the other thing no
+      // scenario reaches: a removal arriving before the first scan completes.
+      const pending = priv<Set<string>>(agent, '_pendingDeletes');
+      pending.add(join(dir, 'a.txt'));
+      pending.add(join(dir, 'b.txt'));
+      priv<Map<string, unknown>>(agent, '_incomingRemovals').set('aRef', {
+        changed: ['a.txt', 'b.txt'],
+        removed: [],
+        timeId: '1:x',
+      });
+
+      const { lines, restore } = captureLog();
+      try {
+        await callOnAgent(agent, '_applyIncomingRemovals', 'aRef');
+      } finally {
+        restore();
+      }
+      expect(
+        lines.filter((l) => l.includes('lifted 2 tombstones a peer re-created')),
+        'the plural form was not used for two paths',
+      ).toHaveLength(1);
+      expect(
+        pending.size,
+        'a tombstone survived the re-creation that lifted it',
+      ).toBe(0);
+    });
+
+    it('asks the chain who last edited a path it did not author', async () => {
+      // A peer's removal of a path THIS node holds but never claimed. The
+      // local claim map is empty for it, so the only thing that can order the
+      // two is the chain — and that is the read this block makes.
+      await writeFile(join(dir, 'peerOwned.txt'), 'v1');
+      await agent.extract();
+
+      (agent as unknown as { _chainHead: unknown })._chainHead = {
+        head: 'mine',
+        treeRef: 'myTree',
+      };
+      const asked: string[] = [];
+      (agent as unknown as { _chain: unknown })._chain = {
+        lastEditOf: (_head: string, path: string) => {
+          asked.push(path);
+          return Promise.resolve({ timeId: '9:z' });
+        },
+      };
+      priv<Map<string, unknown>>(agent, '_incomingRemovals').set('r2', {
+        changed: [],
+        removed: ['peerOwned.txt'],
+        timeId: '5:m',
+      });
+
+      await callOnAgent(agent, '_applyIncomingRemovals', 'r2');
+      expect(
+        asked,
+        'the chain was never asked who last edited the path',
+      ).toEqual(['peerOwned.txt']);
+    });
+
+    it('still applies a removal when that chain read fails', async () => {
+      // Best effort, as everywhere else the chain is read: losing the ordering
+      // it provides must not lose the removal. Without the catch this rejects
+      // into the apply and the peer deletion is dropped on the floor.
+      await writeFile(join(dir, 'peerOwned.txt'), 'v1');
+      await agent.extract();
+
+      (agent as unknown as { _chainHead: unknown })._chainHead = {
+        head: 'mine',
+        treeRef: 'myTree',
+      };
+      (agent as unknown as { _chain: unknown })._chain = {
+        lastEditOf: () =>
+          Promise.reject(new Error('the chain cannot read lastEditOf')),
+      };
+      priv<Map<string, unknown>>(agent, '_incomingRemovals').set('r3', {
+        changed: [],
+        removed: ['peerOwned.txt'],
+        timeId: '5:m',
+      });
+
+      await expect(
+        callOnAgent(agent, '_applyIncomingRemovals', 'r3'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('refuses a mass deletion against a folder it has not scanned', async () => {
+      // `held` is read from the scan, and an unscanned folder reports ZERO
+      // held. The guard divides by it, so this is the shape that either
+      // refuses everything or divides by zero depending on one `Math.max` —
+      // and no scenario reaches it, because every scenario scans first.
+      const db = await aDb();
+      const drop = Array.from({ length: 150 }, (_, i) => `gone-${i}.txt`);
+      await callOnAgent(
+        agent,
+        '_applyReconcilePlan',
+        { fetch: [], drop, redelete: [], conflict: [] },
+        db,
+        'fsTree',
+      );
+      expect(
+        syncErrors(dir),
+        'a 150-file deletion against an unscanned folder was carried out',
+      ).toContain('bucketSync/massDeleteGuard');
+      expect(
+        priv<Set<string>>(agent, '_pendingDeletes').size,
+        'a refused deletion still tombstoned the paths',
+      ).toBe(0);
+    });
+
+    it('treats a revision with no recorded predecessors as a root', async () => {
+      // The ancestry walk follows `previous` links. A revision whose row names
+      // none — a lineage root, or one whose parent row never arrived — ends the
+      // walk, and the fallback that makes it end is the one no fork in the
+      // suite needs.
+      const db = await aDb();
+      const ref = await agent.storeInDb(db, 'fsTree');
+      // A PREDECESSOR WHOSE ROW NEVER ARRIVED. Every ref the table holds has
+      // an entry in the predecessor map, empty list and all, so the fallback
+      // fires for exactly one thing: a causal gap. The walk must END there
+      // rather than throw — a sender naming a revision this node never
+      // received is ordinary after a partition.
+      const relation = await callOnAgent(
+        agent,
+        '_ancestryRelation',
+        db,
+        'fsTree',
+        ref,
+        'aRefNobodyStored',
+        ['aPredecessorNobodyStored'],
+      );
+      expect(
+        relation,
+        'a causal gap was not reported as diverged',
+      ).toBe('diverged');
+    });
+  });
+
+  // ...........................................................................
+  // What a repair does when the bucket round is not available to answer it.
+  //
+  // The repair callback the anti-entropy holds is the last thing between a
+  // detected divergence and a whole-folder apply. With `bucketSync` on — the
+  // shipping default — it hands every divergence to the bucket round and
+  // returns, so the two decisions BELOW that point are never reached by any
+  // scenario in this suite. They are the ones that decide whether a repair may
+  // prune, and that is not a decision to leave unmeasured.
+  describe('the repair callback, with the bucket round switched off', () => {
+    /** The repair the agent registered with its anti-entropy. */
+    const repairOf = (
+      a: FsAgent,
+    ): ((
+      action: 'pull' | 'push' | 'merge',
+      hubRef: string,
+      hubPredecessors: string[],
+      attempt: number,
+    ) => void) =>
+      (
+        priv<{
+          _deps: {
+            repair: (
+              action: 'pull' | 'push' | 'merge',
+              hubRef: string,
+              hubPredecessors: string[],
+              attempt: number,
+            ) => void;
+          };
+        }>(a, '_antiEntropy')._deps
+      ).repair;
+
+    const withAgent = async (): Promise<{
+      a: FsAgent;
+      db: Db;
+      own: string;
+      stop: () => void;
+      close: () => Promise<void>;
+    }> => {
+      const db = await aDb();
+      const own = await mkdtemp(join(tmpdir(), 'fs-agent-norepair-'));
+      const a = new FsAgent(own, undefined, {
+        ...ORIGIN_FIXTURE,
+        bucketSync: false,
+      });
+      const connector = new Connector(
+        db,
+        Route.fromFlat('/fsTree'),
+        new SocketMock(),
+      );
+      const stop = await a.syncFromDb(db, connector, 'fsTree');
+      return {
+        a,
+        db,
+        own,
+        stop,
+        close: async () => {
+          stop();
+          a.dispose();
+          await rm(own, { recursive: true, force: true });
+        },
+      };
+    };
+
+    it('keeps the hub ancestry on the FIRST attempt at a merge', async () => {
+      // Ancestry is what lets a receiver tell a deletion from a straggler, so
+      // the first try keeps it and prunes under the ordinary rules.
+      const { a, own, close } = await withAgent();
+      try {
+        const lines: string[] = [];
+        const spy = vi
+          .spyOn(console, 'log')
+          .mockImplementation((...x: unknown[]) => {
+            lines.push(x.map(String).join(' '));
+          });
+        try {
+          repairOf(a)('merge', 'aHubRef', ['itsParent'], 1);
+          await sleep(500);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(
+          lines.filter((l) => l.includes('bucket-sync round')),
+          'a build with bucket sync off answered a divergence with one',
+        ).toEqual([]);
+        expect(
+          syncErrors(own),
+          'the repair failed rather than scheduling an apply',
+        ).not.toContain('antiEntropy/push');
+      } finally {
+        await close();
+      }
+    }, 30_000);
+
+    it('drops the hub ancestry on a REPEATED merge, so the apply is additive', async () => {
+      // The concession. A merge that ran once and did not converge is retried
+      // WITHOUT the ancestry, which makes the apply purely additive: nothing is
+      // pruned, both sides end up with the union, and the next round pushes it.
+      //
+      // The trade is stated in the code and worth repeating: losing a deletion
+      // this way is recoverable, guessing which side deleted is not. A repeat
+      // is also the only evidence of a livelock — one push is not one.
+      const { a, own, close } = await withAgent();
+      try {
+        // Two paths through one line, so both are measured in one run: the
+        // second attempt of a merge drops ancestry, a `pull` never does.
+        repairOf(a)('merge', 'aHubRef', ['itsParent'], 2);
+        repairOf(a)('pull', 'anotherHubRef', ['itsParent'], 3);
+        await sleep(500);
+        expect(
+          syncErrors(own),
+          'a repair with no ancestry was recorded as a failure',
+        ).not.toContain('antiEntropy/push');
+      } finally {
+        await close();
+      }
+    }, 30_000);
+  });
+
+  // ...........................................................................
+  // Applied the state and re-derived a different ref.
+  //
+  // A node that applies a peer's state and then hashes its own folder to
+  // something else is short of what it applied — a locked file, a blob that
+  // would not fetch, a path it refused. That is a real divergence and the
+  // correct signal, and it went unnoticed for exactly as long as nothing said
+  // it, which is why the apply says it.
+  //
+  // The folder here ends up holding MORE than the sender: an empty directory
+  // of its own that the additive restore does not remove. Measured while
+  // writing this — an empty directory is in the content map, not only in the
+  // tree, so it is a genuine content difference and not merely a hash one.
+  describe('a re-derived ref that differs from the one applied', () => {
+    it('says out loud that it is short of what it applied', async () => {
+      const db = await aDb();
+      // ONE blob store, shared: the restore has to succeed for the apply to
+      // reach its own bookkeeping, and a per-node store cannot fetch a peer's
+      // blobs. That is its own defect class — see the mesh harness.
+      const bs = new BsMem();
+      const sendDir = await mkdtemp(join(tmpdir(), 'fs-agent-emptydir-s-'));
+      const recvDir = await mkdtemp(join(tmpdir(), 'fs-agent-emptydir-r-'));
+      const sender = new FsAgent(sendDir, bs, ORIGIN_FIXTURE);
+      const receiver = new FsAgent(recvDir, bs, ORIGIN_FIXTURE);
+      const connector = new Connector(
+        db,
+        Route.fromFlat('/fsTree'),
+        new SocketMock(),
+      );
+      let fire:
+        | ((
+            ref: string,
+            preds?: string[],
+            info?: { isNewestFromSender?: boolean },
+          ) => Promise<void>)
+        | undefined;
+      const real = connector.listen.bind(connector);
+      (connector as unknown as { listen: (cb: unknown) => void }).listen = (
+        cb: unknown,
+      ) => {
+        fire = cb as typeof fire;
+        real(cb as Parameters<typeof real>[0]);
+      };
+      const stop = await receiver.syncFromDb(db, connector, 'fsTree');
+
+      const agreed: string[] = [];
+      const ae = priv<{ agreedOn: (r: string) => void } | undefined>(
+        receiver,
+        '_antiEntropy',
+      );
+      if (ae) ae.agreedOn = (r: string) => agreed.push(r);
+
+      const warnings: string[] = [];
+      const spy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation((...a: unknown[]) => {
+          warnings.push(a.map(String).join(' '));
+        });
+      try {
+        await writeFile(join(sendDir, 'keep.txt'), 'k');
+        const ref = await sender.storeInDb(db, 'fsTree');
+
+        // The empty directory sits on the RECEIVER, not the sender. A restore
+        // is additive — it writes what the sender has and removes nothing it
+        // was not told to — so the directory survives the apply. The folder
+        // then holds exactly the sender's files and hashes to something else.
+        await mkdir(join(recvDir, 'mine'), { recursive: true });
+
+        await fire!(ref, [], { isNewestFromSender: true });
+        await sleep(1500);
+
+        expect(
+          existsSync(join(recvDir, 'keep.txt')),
+          'the restore did not run, so the bookkeeping under test was not reached',
+        ).toBe(true);
+        expect(
+          existsSync(join(recvDir, 'keep.txt')),
+          'the restore did not run, so the bookkeeping under test was not reached',
+        ).toBe(true);
+        expect(
+          warnings.filter((w) =>
+            w.includes('this node is short of what it applied'),
+          ),
+          'a folder that does not match what it applied said nothing',
+        ).toHaveLength(1);
+        // And it did NOT tell the anti-entropy the two agree, because they do
+        // not: this folder holds a directory the sender never sent.
+        expect(
+          agreed,
+          'a real divergence was recorded as agreement',
+        ).toEqual([]);
+      } finally {
+        spy.mockRestore();
+        stop();
+        receiver.dispose();
+        sender.dispose();
+        await rm(sendDir, { recursive: true, force: true });
+        await rm(recvDir, { recursive: true, force: true });
+      }
+    }, 30_000);
+  });
+
+  // ...........................................................................
+  // When each path was last edited, and why it has to outlive the process.
+  //
+  // `reconcile` orders a peer's tombstone against our content by comparing two
+  // `timeId`s — see `ManifestEntry.editedAt`. Ours comes from
+  // `_pathEditTimes`, and a comparison with one operand is not a comparison:
+  // a restarted node that has forgotten its times sends entries with no
+  // `editedAt`, the rule falls back to "the tombstone wins", and `I7b` fails
+  // again on every restart. The tombstones in the same file are persisted for
+  // the mirror-image reason.
+  describe('the path edit times', () => {
+    const note = (a: FsAgent, paths: string[], timeId: string): void =>
+      (
+        a as unknown as {
+          _notePathEdits: (p: readonly string[], t: string) => void;
+        }
+      )._notePathEdits(paths, timeId);
+
+    it('survives a restart of the agent', async () => {
+      note(agent, ['doc.txt'], '500:aaa');
+      const restarted = new FsAgent(dir);
+      try {
+        expect(
+          priv<Map<string, string>>(restarted, '_pathEditTimes').get('doc.txt'),
+          'a restart forgot when the path was edited — a stale tombstone wins again',
+        ).toBe('500:aaa');
+      } finally {
+        restarted.dispose();
+      }
+    });
+
+    it('keeps the NEWEST time, whichever order the entries arrive in', async () => {
+      // Entries arrive out of order: a peer's older state can be heard after a
+      // newer one. Taking whatever came last would make the manifest advertise
+      // a stale edit as current, which is the failure this index prevents.
+      note(agent, ['doc.txt'], '500:aaa');
+      note(agent, ['doc.txt'], '100:bbb');
+      const times = priv<Map<string, string>>(agent, '_pathEditTimes');
+      expect(
+        times.get('doc.txt'),
+        'an older entry overwrote a newer one',
+      ).toBe('500:aaa');
+
+      note(agent, ['doc.txt'], '900:ccc');
+      expect(
+        times.get('doc.txt'),
+        'a newer entry was ignored',
+      ).toBe('900:ccc');
+    });
+
+    it('forgets the oldest times when the log is full', async () => {
+      // Bounded, like the tombstone log beside it: this covers every path
+      // either side has touched, so on a catalogue it would otherwise grow
+      // without limit and take the state file with it. Forgetting the oldest
+      // is what puts those paths back on the rules that predate `editedAt` —
+      // the safe direction, and the only one available.
+      const many = Array.from(
+        { length: EDIT_TIME_LOG_MAX + 1 },
+        (_, i) => `f-${i}.txt`,
+      );
+      note(agent, many, '400:aaa');
+      const times = priv<Map<string, string>>(agent, '_pathEditTimes');
+      expect(times.size, 'the log grew past its bound').toBe(
+        EDIT_TIME_LOG_MAX,
+      );
+      expect(
+        times.has('f-0.txt'),
+        'the bound forgot the newest instead of the oldest',
+      ).toBe(false);
+      expect(times.has(`f-${EDIT_TIME_LOG_MAX}.txt`)).toBe(true);
+    }, 30_000);
+
+    it('ignores malformed entries in the state file', async () => {
+      // The file is on a user's disk and can be edited, truncated or written
+      // by another build. Every shape that is not a usable pair is skipped
+      // rather than throwing, because a state file that cannot be parsed must
+      // degrade to "this process cannot say when these paths were edited" —
+      // never to an agent that will not start.
+      writeFileSync(
+        join(dir, AGENT_STATE_FILE),
+        JSON.stringify({
+          editTimes: [
+            'not-a-pair',
+            ['only-one-element'],
+            [42, '100:aaa'],
+            ['', '100:aaa'],
+            ['no-time', ''],
+            ['no-time-either', 7],
+            ['good.txt', '100:aaa'],
+          ],
+        }),
+        'utf-8',
+      );
+      const restarted = new FsAgent(dir);
+      try {
+        const times = priv<Map<string, string>>(restarted, '_pathEditTimes');
+        expect(
+          [...times],
+          'a malformed entry was accepted, or a good one was dropped with it',
+        ).toEqual([['good.txt', '100:aaa']]);
+      } finally {
+        restarted.dispose();
+      }
+    });
+
+    it('records a removal as readily as a write', async () => {
+      // A deletion is a word on the path, and the ordering needs it: a
+      // tombstone with no time of its own cannot be compared with anything.
+      note(agent, ['gone.txt'], '700:ddd');
+      expect(
+        priv<Map<string, string>>(agent, '_pathEditTimes').get('gone.txt'),
+      ).toBe('700:ddd');
+    });
   });
 });
 

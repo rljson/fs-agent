@@ -535,6 +535,55 @@ export const ANNOUNCED_HEAD_MAX = 200;
 export const TOMBSTONE_LOG_MAX = 10_000;
 
 /**
+ * How many path edit times survive a restart. See `_pathEditTimes`.
+ *
+ * Larger than the tombstone log because it covers every path either side has
+ * touched rather than only the deletions, and smaller than a catalogue because
+ * the whole point is to bound the state file. Past it the oldest entries go,
+ * and a path with no remembered time is one whose tombstone ordering falls
+ * back to the rules that shipped before the field existed.
+ */
+export const EDIT_TIME_LOG_MAX = 50_000;
+
+/** How many refused deletions {@link FsAgent.refusedDeletions} keeps. */
+export const REFUSED_DELETION_LOG_MAX = 20;
+
+/**
+ * A deletion the mass-delete guard refused to carry out.
+ *
+ * THE GUARD IS NOT A FAILURE, IT IS A DECISION DEFERRED — and until something
+ * asks the user, the deletion simply does not happen. It is refused on every
+ * node, so the fleet stays split and no message will ever fix that: the
+ * refusal is the correct answer to "a wiped peer is telling everyone to wipe",
+ * and it is the wrong answer to "the user deleted 10 000 files on purpose".
+ * Nothing in this package can tell those apart, which is why it is surfaced
+ * rather than resolved.
+ *
+ * Already written to the log and to the sync-error file at every site. This is
+ * the same fact in a form a client can READ: a UI cannot grep a log on a
+ * machine it is not running on, and "why did my deletion not arrive" is the
+ * question it has to answer.
+ */
+export interface RefusedDeletion {
+  /** When it was refused. */
+  readonly atMs: number;
+  /**
+   * Which rule refused it, matching the sync-error key.
+   *
+   * `restore` is an incoming whole tree, `bucketSync` an additive round's drop
+   * list, `removals` a peer's stated removals. All three share the floors; a
+   * client showing this does not need to care which, but a support case does.
+   */
+  readonly route: 'restore' | 'bucketSync' | 'removals';
+  /** How many paths would have been deleted. */
+  readonly wouldRemove: number;
+  /** How many this folder holds, which is what the ratio is taken against. */
+  readonly held: number;
+  /** The first few paths, for a message a person can act on. */
+  readonly paths: readonly string[];
+}
+
+/**
  * What an agent concluded about an inbound ref.
  *
  * See `FsAgent._inboundRefVerdict` for why this is one decision rather than
@@ -805,6 +854,63 @@ export class FsAgent {
    * rather than a read.
    */
   private _chainHead?: { head: string; treeRef: string };
+
+  /**
+   * `relativePath → timeId` of the newest edit ANYBODY made to each path, as
+   * far as this node has heard.
+   *
+   * Not the same as {@link _localPathTimeIds}, which holds only this node's
+   * OWN edits and drops a path when this node deletes it. This one keeps every
+   * path either side ever touched, removals included, because the question it
+   * answers is "when was the last word on this path" and a deletion is a word.
+   *
+   * It exists for the bucket manifest: `ManifestEntry.editedAt` is read from
+   * here, and it is what lets a peer order our tombstone against its write
+   * rather than taking either on trust. Fed only from chain entries — our own
+   * in `_recordChainEntry`, a peer's in `_applyIncomingRemovals` — so nothing
+   * in it is inferred from a filesystem observation.
+   *
+   * In memory, like `_localPathTimeIds`. A restart loses it and the manifest
+   * then says nothing about those paths, which puts the round back on the
+   * rules that shipped before the field existed. Losing the ordering is not
+   * losing the ability to sync.
+   */
+  private readonly _pathEditTimes = new Map<string, string>();
+
+  /** See {@link FsAgent.refusedDeletions}. Bounded, newest last. */
+  private readonly _refusedDeletions: RefusedDeletion[] = [];
+
+  /**
+   * Records the time of an edit for each path it names, keeping the newest.
+   *
+   * `compareTimeId` rather than "last write wins": entries arrive out of
+   * order — a peer's older state can be heard after a newer one — and taking
+   * whatever came last would make the manifest claim a stale edit is current,
+   * which is the exact failure this index exists to prevent.
+   * @param paths - The paths the entry changed or removed.
+   * @param timeId - That entry's time.
+   */
+  private _notePathEdits(paths: readonly string[], timeId: string): void {
+    let changed = false;
+    for (const path of paths) {
+      const known = this._pathEditTimes.get(path);
+      if (known !== undefined && compareTimeId(timeId, known) <= 0) continue;
+      // Re-inserted rather than updated, so iteration order is "least recently
+      // noted first" and the bound below forgets the right end.
+      this._pathEditTimes.delete(path);
+      this._pathEditTimes.set(path, timeId);
+      changed = true;
+    }
+    if (!changed) return;
+    while (this._pathEditTimes.size > EDIT_TIME_LOG_MAX) {
+      const oldest = this._pathEditTimes.keys().next().value as string;
+      this._pathEditTimes.delete(oldest);
+    }
+    // Written here because the answer has to survive the process. The state
+    // file is already rewritten whole on every tombstone, so this is the cost
+    // profile that shipped — and an edit is no more frequent than a tombstone.
+    this._writeAgentState();
+  }
 
   /**
    * `relativePath → timeId` of the newest edit THIS node made to each path.
@@ -1129,6 +1235,7 @@ export class FsAgent {
     // had deleted is how a deletion is undone by the first peer that never
     // heard about it.
     this._loadPersistedTombstones();
+    this._loadPersistedEditTimes();
 
   }
 
@@ -1174,6 +1281,24 @@ export class FsAgent {
    * A divergence that lasts is the one thing a lost message leaves behind, and
    * until now nothing reported it: this is what a diagnostics view should show.
    */
+  /**
+   * Deletions the mass-delete guard refused, newest last.
+   *
+   * For a client that has to answer "why did my deletion not arrive". The
+   * guard refuses on every node, so a real mass deletion stalls the whole
+   * fleet silently as far as a UI is concerned — the only trace today is a
+   * line in each machine's log. See {@link RefusedDeletion} and
+   * `doc/known-limits.md`.
+   *
+   * Bounded at {@link REFUSED_DELETION_LOG_MAX}; in memory, so a restart
+   * clears it while the folders stay split. That is a reason to show it
+   * promptly, not a reason to persist it: the refusal repeats on the next
+   * announcement, so the list refills on its own.
+   */
+  get refusedDeletions(): readonly RefusedDeletion[] {
+    return this._refusedDeletions;
+  }
+
   get antiEntropyStatus(): AntiEntropyStatus | null {
     return this._antiEntropy?.status ?? null;
   }
@@ -1253,6 +1378,16 @@ export class FsAgent {
           tombstones: [...this._pendingDeletes].map((abs) =>
             relative(this._rootPath, abs).split(sep).join('/'),
           ),
+          // AND WHEN EACH PATH WAS LAST EDITED, or the ordering a tombstone is
+          // compared against dies with the process.
+          //
+          // Without this, a restarted node sends manifest entries with no
+          // `editedAt`, `reconcile` has only one operand, and a stale
+          // tombstone wins again — the exact failure `I7b` measures, returning
+          // after every restart. The tombstones beside it were persisted for
+          // the mirror-image reason: "a restart that forgot what it had
+          // deleted is how a deletion is undone".
+          editTimes: [...this._pathEditTimes],
         }),
         'utf-8',
       );
@@ -1286,6 +1421,36 @@ export class FsAgent {
       }
     } catch {
       /* v8 ignore next -- @preserve best-effort; a lost log is a lost guard */
+    }
+  }
+
+  /**
+   * Reloads the path edit times written by a previous run.
+   *
+   * Absent, unreadable and malformed all mean "this process cannot say when
+   * these paths were last edited", and all leave the map empty — which puts
+   * tombstone ordering back on the rules that shipped before `editedAt`
+   * existed. Safe, and the reason it is worth reloading at all is that the
+   * safe answer is also the one that loses a file: see `_writeAgentState`.
+   */
+  private _loadPersistedEditTimes(): void {
+    try {
+      const file = join(this._rootPath, AGENT_STATE_FILE);
+      if (!existsSync(file)) return;
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'));
+      const pairs = (parsed as { editTimes?: unknown })?.editTimes;
+      if (!Array.isArray(pairs)) return;
+      // Newest kept, as the tombstone log does: the file may have been written
+      // by a build with a larger bound.
+      for (const pair of pairs.slice(-EDIT_TIME_LOG_MAX)) {
+        if (!Array.isArray(pair) || pair.length < 2) continue;
+        const [path, timeId] = pair as [unknown, unknown];
+        if (typeof path !== 'string' || path.length === 0) continue;
+        if (typeof timeId !== 'string' || timeId.length === 0) continue;
+        this._pathEditTimes.set(path, timeId);
+      }
+    } catch {
+      /* v8 ignore next -- @preserve best-effort; an empty map is the old rules */
     }
   }
 
@@ -1544,7 +1709,10 @@ export class FsAgent {
     // a match. That decision outranks the connector's ref history, so the ref
     // is cleared from both dedup sets before it goes out. Bounce-backs are
     // still suppressed — they never reach this point.
-    connector.invalidateSent?.(this._announceAs(ref));
+    // Resolved ONCE: `_announceAs` may read the chain now, and the dedup must
+    // be cleared for the exact string that goes on the wire.
+    const announced = await this._announceAs(ref);
+    connector.invalidateSent?.(announced);
 
     // Ancestry travels with every push, not only when conflict resolution is
     // on.
@@ -1565,6 +1733,37 @@ export class FsAgent {
     //
     // Sent on its own, as the identity and sequence metadata was before it, so
     // that the rule which consumes it can be enabled and measured separately.
+    // NOT THE SAME CLAIM AS THE EDIT'S `previous`, AND NOT DERIVABLE FROM IT.
+    //
+    // Both look like "the predecessors", and the obvious reading is that this
+    // field duplicates the chain: an Edit records `previous` as EDIT refs,
+    // each of those Edits names a `treeRef`, so the tree refs are one walk
+    // away. That reading was acted on — this field was derived from the chain,
+    // with the caller's value as a fallback — and it broke three tests:
+    // *does NOT false-detect conflicts on a clean linear propagation*,
+    // *resolves a real offline divergent edit, preserving both versions*, and
+    // *J9: a deletion made while the agent was down propagates*.
+    //
+    // The two answer DIFFERENT QUESTIONS:
+    //
+    //   the Edit's `previous`  — which Edits was this state made from?
+    //                            A fact about authorship, fixed when written.
+    //   this field             — which state that YOU hold do I descend from?
+    //                            A claim aimed at the receiver, chosen per
+    //                            send so the receiver can recognise it.
+    //
+    // The anti-entropy push is the clearest case: it announces the state this
+    // node is in naming `[hubRef]`, because the decision only says `push` when
+    // the hub holds an earlier push of ours or the state ours was made from.
+    // That is deliberately NOT the Edit's parent — it is the state the
+    // receiver has, picked so the prune rule can answer "does this sender name
+    // a state I am in". Replacing it with the authorship record makes a linear
+    // hand-off unrecognisable, and the receiver reads a fork.
+    //
+    // So the duplication is real and the redundancy is not. Two call sites
+    // passing nothing is still a hazard worth closing — an announcement with
+    // no ancestry is prune-authorising — but it has to be closed by giving
+    // THOSE sends the right claim, not by deriving every send from the chain.
     connector.setPredecessors(predecessorRefs ?? []);
 
     // THE WIRE CARRIES THE HEAD, not the tree ref. See `_announceAs`.
@@ -1575,8 +1774,6 @@ export class FsAgent {
     // separates a deletion from a straggler. The head is an additional
     // identity for the announced state, not a replacement for the ancestry
     // already on the payload.
-    const announced = this._announceAs(ref);
-
     // Retry on a transient socket-layer failure (e.g. a dropped packet or a
     // reconnect blip) so a single hiccup doesn't lose an entire ref.
     await FsAgent._withRetry(
@@ -1748,19 +1945,17 @@ export class FsAgent {
       ) {
         // Loud, because the alternative to noticing this is discovering it
         // from a user whose folder emptied.
-        console.error(
-          `${this._tag} MASS DELETE REFUSED on ${target}: the incoming tree ` +
-            `would remove ${wouldPrune} of ${preRestore.size} files ` +
-            `(incoming tree has ${expectedFiles.size}). Nothing was deleted. ` +
-            `If this deletion is real, it has to be applied deliberately.`,
+        this._refuseDeletion(
+          'restore',
+          wouldPrune,
+          preRestore.size,
+          [...preRestore].filter((p) => !expectedFiles.has(p)),
+          `The incoming tree has ${expectedFiles.size}.`,
         );
-        this._writeSyncError(
-          'restore/massDeleteGuard',
-          new Error(
-            `refused to prune ${wouldPrune}/${preRestore.size} files; ` +
-              `incoming tree had ${expectedFiles.size}`,
-          ),
-        );
+        // AND THIS ONE THROWS, unlike the other two. The restore is mid-flight
+        // and its caller has to know the folder was left alone; the bucket
+        // round and the removals path both reach their refusal as a decision
+        // about a plan they then simply do not carry out.
         throw new MassDeleteRefusedError(
           wouldPrune,
           preRestore.size,
@@ -2946,18 +3141,54 @@ export class FsAgent {
     // current is the whole of the damage. Staying quiet costs nothing: this
     // node needs to RECEIVE what it missed, not to tell anyone about a state
     // it has not changed.
-    const resumingUnchanged =
-      initialParentRef !== undefined &&
-      initialTree.rootHash === initialParentRef;
+    // RESOLVED BY THE LINE BELOW, which is why no flag is computed here any
+    // more. This case used to set `skipNotification` on its own, and that is
+    // all it ever did: the branch further down calls `_sendRef` regardless, so
+    // the explicit announcement went out anyway. The flag suppressed the
+    // duplicate, never the announcement.
+    //
+    // And the duplicate was the damage. The rollback above happened because
+    // the announcement carried no ancestry — `initialIsNew` is false here, so
+    // `_sendRef` is called with no predecessors — and a receiver that cannot
+    // ask "does this sender name a state I am in" grants the prune by default.
+    // The BARE form is what cannot be asked. A marked head can: the receiver
+    // resolves it to the chain entry, reads that entry's own `previous`, and
+    // gets a reachability verdict for a state whose payload declared none.
+    //
+    // So the case is still real and still dangerous; it is the wire format
+    // that disarms it, not a flag at this call site. Announcing where this
+    // node stands is also the only way a peer learns to push what it missed —
+    // which is what the comment above says this node needs.
 
     const initialRef = await FsAgent._withTimeout(
       new FsDbAdapter(db, treeKey).storeFsTree(initialTree, {
         ...options,
         previous: initialPrevious,
-        skipNotification:
-          isSilentJoiner || resumingUnchanged || joinsWithUnknownFiles
-            ? true
-            : options?.skipNotification,
+        // ALWAYS, AND THE THREE QUIET CASES ARE NO LONGER WHAT DECIDES IT.
+        //
+        // This used to fall back to `options?.skipNotification` — unset in
+        // practice — whenever none of the three quiet cases held. The db
+        // observer then broadcast this state, and it sends the raw tree ref:
+        // bare, with no chain head, BEFORE `_recordChainEntry` below has
+        // written the entry that would give it one. The explicit `_sendRef`
+        // that follows announces the same state again, marked. So every node
+        // announced its startup state TWICE, worst form first.
+        //
+        // Measured with a store-site choke point and a connector-level ref
+        // census over `fs-mesh-field-defects.spec.ts`: 27 stores reached this
+        // line with `skipNotification` unset, and the run emitted exactly 27
+        // bare refs. One to one, nothing else bare.
+        //
+        // A receiver takes the bare one first and cannot ask the chain
+        // anything about it, so it decides by content heuristic — and by the
+        // time the marked twin arrives it has already acted. That is the
+        // heuristic path being entered on the commonest event in a fleet, a
+        // node starting up, for no reason but an unset default.
+        //
+        // Suppressing it loses no announcement: every branch below that should
+        // speak calls `_sendRef` explicitly, after the chain entry exists, and
+        // the branches that should stay silent already did.
+        skipNotification: true,
       }),
       this._timeouts.fetchTree,
       `syncToDb → initial storeFsTree(${treeKey})`,
@@ -3508,6 +3739,8 @@ export class FsAgent {
    * @param incomingRef - The incoming revision's content ref
    * @param incomingTree - The fetched incoming tree
    * @param predecessorRefs - The incoming revision's predecessor content refs
+   * @param connector - Used to announce the merge revision once the chain
+   *   entry for it exists. See `storeMerge`.
    */
   private async _resolveConflictInline(
     db: Db,
@@ -3515,6 +3748,7 @@ export class FsAgent {
     incomingRef: string,
     incomingTree: FsTree,
     predecessorRefs: string[],
+    connector: Connector,
   ): Promise<void> {
     // The folder BEFORE the merge touches it, so `_recordReceived` can tell
     // what was delivered from what was already here. See its doc.
@@ -3532,8 +3766,36 @@ export class FsAgent {
 
     const headTimeIds = await db.getTimeIdsForRef(treeKey, this._currentRef!);
     const incomingTimeIds = await db.getTimeIdsForRef(treeKey, incomingRef);
+
+    // THE MERGE DESCENDS FROM BOTH SIDES AND HAS TO SAY SO.
+    //
+    // This path RETURNS before the apply's own bookkeeping, which is where
+    // `_adoptedChainHead` is normally set — and that block's own comment names
+    // "a merge" as one of the cases it is for. It never ran for one, so the
+    // merge revision's entry named only the LOCAL parent.
+    //
+    // A one-parent merge is not merely incomplete, it is wrong in a way that
+    // does not settle: the state resolves BOTH branches but descends from one,
+    // so the peer whose branch was merged in classifies it as a `fork` against
+    // its own head and resolves it again. Announcing such a head would turn a
+    // finished merge into a standing disagreement.
+    //
+    // The direction the old comment said was unresolved — tree ref to chain
+    // head — is `_headForTreeRef`, and it has been there since the announced
+    // heads were parked.
+    const incomingHead = await this._headForTreeRef(incomingRef);
+    if (incomingHead !== undefined) this._adoptedChainHead = incomingHead;
+
+    // The parents AS TREE REFS, captured before the merge store moves
+    // `_currentRef`. `_sendRef` wants tree refs for the ancestry it puts on
+    // the wire — see its doc on why those are deliberately not translated.
+    const mergeParents = [this._currentRef, incomingRef].filter(
+      (r): r is string => r !== undefined,
+    );
     const resolver = new FsConflictResolver(
-      this._buildConflictResolverDeps(db, treeKey),
+      this._buildConflictResolverDeps(db, treeKey, async (ref) => {
+        await this._sendRef(connector, ref, mergeParents);
+      }),
     );
     // The two sides, so the merge revision claims only what it produced.
     this._mergeInputs = {
@@ -4086,15 +4348,40 @@ export class FsAgent {
    * @param treeRef - The announced state.
    * @returns The relation, or `incomplete` when the chain cannot say.
    */
+  /**
+   * The chain head that stands for a tree ref, when anything names one.
+   *
+   * Two sources, in this order, and neither is a guess — both are statements
+   * somebody made. The head a peer ANNOUNCED for that state, parked by
+   * `_rememberAnnouncedHead`; failing that, this node's own chain, which knows
+   * the head if it ever recorded an entry landing on that tree.
+   *
+   * Pulled out of {@link _classifyAnnouncedRef} because the merge needs the
+   * same answer for a different reason: to name the side it merged IN as a
+   * parent. See {@link _resolveConflictInline}.
+   * @param treeRef - The state to name.
+   * @returns The head standing for it, or undefined when nothing does.
+   */
+  private async _headForTreeRef(treeRef: string): Promise<string | undefined> {
+    return (
+      this._announcedHeads.get(treeRef) ??
+      (await this._chain?.entryForTreeRef(treeRef).catch(() => undefined))?.head
+    );
+  }
+
   private async _classifyAnnouncedRef(
     treeRef: string,
   ): Promise<'behind' | 'ahead' | 'fork' | 'incomplete'> {
     /* v8 ignore next -- @preserve the caller checks both before asking */
     if (!this._chain || !this._chainHead) return 'incomplete';
-    const theirHead =
-      this._announcedHeads.get(treeRef) ??
-      (await this._chain.entryForTreeRef(treeRef).catch(() => undefined))?.head;
+    const theirHead = await this._headForTreeRef(treeRef);
     if (!theirHead) return 'incomplete';
+
+    // A VERDICT ABOUT HEADS IS ONLY A VERDICT ABOUT THIS FOLDER WHILE THE HEAD
+    // NAMES IT. See the test `gives no verdict while its own head does not
+    // name its folder` for the measurement.
+    if (this._chainHead.treeRef !== this._currentRef) return 'incomplete';
+
     return this._chain
       .classify(this._chainHead.head, theirHead)
       .catch(() => 'incomplete' as const);
@@ -4377,11 +4664,32 @@ export class FsAgent {
    *   entry for that state — a re-announcement of something older, or a build
    *   whose chain could not be created.
    */
-  private _announceAs(treeRef: string): string {
+  private async _announceAs(treeRef: string): Promise<string> {
     if (this._announceTreeRef) return treeRef;
-    return this._chainHead?.treeRef === treeRef
-      ? `${CHAIN_HEAD_PREFIX}${this._chainHead.head}`
-      : treeRef;
+    // The fast path, and the only one that costs nothing: the state this node
+    // just appended. `_chainHead` is a cache FOR this comparison — see its doc,
+    // which says a re-announcement has to find the head for a state it did not
+    // just append, and that the pair is there to save a read rather than to
+    // replace one.
+    if (this._chainHead?.treeRef === treeRef) {
+      return `${CHAIN_HEAD_PREFIX}${this._chainHead.head}`;
+    }
+    // ASK THE CHAIN BEFORE GIVING UP. A node re-announcing an older state —
+    // an anti-entropy push, a state it returned to — is not at that state's
+    // head any more, but its chain recorded one when it passed through. The
+    // old code read the cache and nothing else, so it announced such a state
+    // bare, and a bare ref is one the receiver cannot ask the chain about at
+    // all.
+    //
+    // Measured as zero occurrences across the mesh tier once the merge and the
+    // startup duplicate were fixed, so this closes a path rather than a
+    // symptom. It is kept because the two that WERE firing were each invisible
+    // until something counted refs on the wire.
+    const head = await this._headForTreeRef(treeRef);
+    if (head !== undefined) return `${CHAIN_HEAD_PREFIX}${head}`;
+    // Genuinely unnameable: no chain at all, or no entry covering this tree.
+    // That is the one case the bare form is honest for.
+    return treeRef;
   }
 
   /**
@@ -4470,13 +4778,26 @@ export class FsAgent {
     // Ambiguous by nature (a folder returning to earlier content produces a
     // second entry with the same `dataRef`), so the newest wins. That is why
     // it is the fallback and `~H~` is the primary.
-    const entry =
-      resolved.entry ??
-      (await this._chain.entryForTreeRef(resolved.treeRef).catch(() => {
-        /* v8 ignore next -- @preserve a failed query falls back to heuristics */
-        return undefined;
-      }));
-    if (!entry) return { treeRef: resolved.treeRef };
+    // Written as statements, NOT as `resolved.entry ?? (await …)`.
+    //
+    // The expression form is equivalent and reads better, and it made the
+    // `if` below uncoverable: v8 reported its else branch `0,0` while a probe
+    // inside that branch printed on every run and the test asserting the
+    // verdict passed. The last branch between this package and a 100% gate
+    // was a mapping artifact of an `await` inside a `??` with a block arrow.
+    // Kept in this shape for that reason alone — the query still runs only
+    // when the announcement brought no entry.
+    let entry = resolved.entry;
+    if (entry === undefined) {
+      // A failed query falls back to the heuristics, which is what an absent
+      // entry selects below.
+      entry = await this._chain
+        .entryForTreeRef(resolved.treeRef)
+        .catch(() => undefined);
+    }
+    if (!entry) {
+      return { treeRef: resolved.treeRef };
+    }
 
     // SAME CONTENT IS NOT A FORK, whatever the two chains call themselves.
     //
@@ -4537,6 +4858,11 @@ export class FsAgent {
       // changed. Only a real local edit sets a claim — receiving a path does
       // not — so a node can never claim bytes it merely holds.
       claimed: () => new Set(this._localPathTimeIds.keys()),
+      // WHEN, beside WHO. The claim says this node edited the path; this says
+      // when the newest edit of it was minted, by anybody. `reconcile` needs
+      // the second to order a tombstone against a write — see
+      // `ManifestEntry.editedAt`.
+      editTimes: () => this._pathEditTimes,
       send: (ref) => {
         // Cleared first, because `Connector` dedups by ref on both sides and a
         // round is only unique by its id — the clear makes a RE-sent message
@@ -4562,14 +4888,7 @@ export class FsAgent {
         !this._remoteApplyInFlight &&
         this._joinPending === undefined,
       apply: (plan) => this._applyReconcilePlan(plan, db, treeKey),
-      agreed: () => {
-        // The roots matched, so this folder and the hub's hold the same
-        // content whatever either calls itself. Told to the anti-entropy,
-        // which is comparing REFS and cannot reach that conclusion — and
-        // which otherwise re-reports the same divergence on every beacon.
-        const hubRef = this._antiEntropy?.status.hubRef;
-        if (hubRef) this._antiEntropy?.agreedOn(hubRef);
-      },
+      agreed: () => this._bucketRoundAgreed(),
       log: (message) => console.log(message),
     };
     return new FsBucketSync(host);
@@ -4638,6 +4957,20 @@ export class FsAgent {
     }
 
     // ---- destructive half, bounded ----
+    //
+    // THE ORDERING LIVES IN `reconcile`, NOT HERE. A one-sided rule was built
+    // first and measured: refuse a drop whenever this node's own chain has a
+    // newer write for the path. It fixed `I7b` and broke three deletion
+    // deliveries — *delivers a deletion a peer never received*, *does not undo
+    // a peer deletion it missed*, and the churn fuzzer — because a node that
+    // has never HEARD a deletion has exactly the same local history as one
+    // whose write superseded it. Its own chain cannot tell the two apart.
+    //
+    // What separates them is WHEN the tombstone was minted, and that is a fact
+    // only its author holds. So it travels: `ManifestEntry.editedAt`, filled
+    // from the chain, compared by `reconcile` on both sides. The decision is
+    // made where both nodes reach the same verdict, which is also the only
+    // place it can be made correctly.
     if (plan.drop.length > 0) {
       const held = this._scanner.tree
         ? this._getFileContentMap(this._scanner.tree).size
@@ -4669,15 +5002,7 @@ export class FsAgent {
         (plan.drop.length > MASS_DELETE_MIN_FILES &&
           plan.drop.length / Math.max(held, 1) > MASS_DELETE_MAX_RATIO);
       if (tooMany) {
-        console.error(
-          `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: a bucket-sync ` +
-            `round would remove ${plan.drop.length} of ${held} files. ` +
-            `Nothing was deleted.`,
-        );
-        this._writeSyncError(
-          'bucketSync/massDeleteGuard',
-          new Error(`refused ${plan.drop.length}/${held} drops`),
-        );
+        this._refuseDeletion('bucketSync', plan.drop.length, held, plan.drop);
       } else {
         for (const path of plan.drop) {
           const target = join(this._rootPath, ...path.split('/'));
@@ -4707,6 +5032,71 @@ export class FsAgent {
           `${plan.conflict.slice(0, 3).join(', ')}`,
       );
     }
+  }
+
+  /**
+   * Says, once, that a deletion was refused — in the log, the sync-error file
+   * and {@link FsAgent.refusedDeletions}.
+   *
+   * Three call sites had three copies of this, which is how they came to say
+   * three different things about the same decision. A client reading one of
+   * them saw a third of the picture.
+   * @param route - Which rule refused it.
+   * @param wouldRemove - How many paths it would have deleted.
+   * @param held - How many this folder holds.
+   * @param paths - The paths, of which the first few are kept.
+   * @param detail - Extra wording for the log line, where a route has some.
+   */
+  private _refuseDeletion(
+    route: RefusedDeletion['route'],
+    wouldRemove: number,
+    held: number,
+    paths: readonly string[],
+    detail = '',
+  ): void {
+    // Loud, because the alternative to noticing this is discovering it from a
+    // user whose folder emptied.
+    console.error(
+      `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: ${route} ` +
+        `would remove ${wouldRemove} of ${held} files. Nothing was deleted. ` +
+        `If this deletion is real, it has to be applied deliberately.` +
+        (detail === '' ? '' : ` ${detail}`),
+    );
+    this._writeSyncError(
+      `${route}/massDeleteGuard`,
+      new Error(`refused ${wouldRemove}/${held} (${route})`),
+    );
+    this._refusedDeletions.push({
+      atMs: Date.now(),
+      route,
+      wouldRemove,
+      held,
+      paths: paths.slice(0, 10),
+    });
+    while (this._refusedDeletions.length > REFUSED_DELETION_LOG_MAX) {
+      this._refusedDeletions.shift();
+    }
+  }
+
+  /**
+   * Records that a bucket round proved this folder and the hub's agree.
+   *
+   * The roots matched, so the two hold the same content whatever either calls
+   * itself. The anti-entropy is comparing REFS and cannot reach that
+   * conclusion on its own — and without being told it re-reports the same
+   * divergence on every beacon.
+   *
+   * Nothing is recorded when there is no hub ref to record it against. A round
+   * can finish after the announcement that prompted it has been superseded, or
+   * before any beacon has arrived at all, and an agreement needs both sides to
+   * name: see `FsAntiEntropy`'s agreement key.
+   *
+   * A method rather than a closure inside `_makeBucketSync` so that both
+   * answers can be measured; as a closure neither was.
+   */
+  private _bucketRoundAgreed(): void {
+    const hubRef = this._antiEntropy?.status.hubRef;
+    if (hubRef) this._antiEntropy?.agreedOn(hubRef);
   }
 
   /**
@@ -4811,6 +5201,13 @@ export class FsAgent {
     this._incomingRemovals.delete(treeRef);
     if (!incoming) return;
 
+    // A PEER'S EDITS ARE EDITS. Recorded before anything is decided, because
+    // the manifest this node advertises next has to be able to say when the
+    // last word on these paths was spoken — and for a path this node never
+    // touched, the peer's entry is the only place that is written down.
+    this._notePathEdits(incoming.changed, incoming.timeId);
+    this._notePathEdits(incoming.removed, incoming.timeId);
+
     const lifted: string[] = [];
     for (const path of incoming.changed) {
       const absolute = join(this._rootPath, ...path.split('/'));
@@ -4897,16 +5294,11 @@ export class FsAgent {
     if (plan.blocked) {
       // Loud, because the alternative to noticing this is discovering it from
       // a user whose folder emptied.
-      console.error(
-        `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: a peer's edit ` +
-          `would remove ${incoming.removed.length} of ${held.size} files. ` +
-          `Nothing was deleted.`,
-      );
-      this._writeSyncError(
-        'removals/massDeleteGuard',
-        new Error(
-          `refused ${incoming.removed.length}/${held.size} peer removals`,
-        ),
+      this._refuseDeletion(
+        'removals',
+        incoming.removed.length,
+        held.size,
+        incoming.removed,
       );
       return;
     }
@@ -4980,9 +5372,9 @@ export class FsAgent {
    *
    * A chain that cannot be written must never stop a folder syncing, so every
    * failure is recorded and swallowed — the same discipline as
-   * {@link _persistCurrentRef}. Nothing reads the chain yet, so a gap in it
-   * costs nothing today; when something does, a gap is what `complete: false`
-   * is for.
+   * {@link _persistCurrentRef}. A gap is what `complete: false` is for, and it
+   * is read: `classify` answers `incomplete` across one, which is what stops a
+   * walk it cannot trust from being mistaken for a clean verdict.
    * @param treeRef - The state the folder ended up at.
    * @param delta - What that push changed and removed.
    */
@@ -5008,6 +5400,8 @@ export class FsAgent {
         previous: parents,
       });
       this._chainHead = { head: entry.head, treeRef };
+      this._notePathEdits(entry.changed, entry.timeId);
+      this._notePathEdits(entry.removed, entry.timeId);
       for (const path of entry.changed) {
         this._localPathTimeIds.set(path, entry.timeId);
       }
@@ -5067,10 +5461,14 @@ export class FsAgent {
    * settles to a no-op instead of re-broadcasting.
    * @param db - Database instance
    * @param treeKey - Tree table key
+   * @param announce - Puts the merge revision on the wire, called after its
+   *   chain entry exists. REQUIRED: the merge store suppresses the connector's
+   *   own broadcast, so without this the merge never leaves the node.
    */
   private _buildConflictResolverDeps(
     db: Db,
     treeKey: string,
+    announce: (ref: string) => Promise<void>,
   ): ConflictResolverDeps {
     return {
       treeKey,
@@ -5175,7 +5573,32 @@ export class FsAgent {
       scan: () => this._scanner.scan(),
       storeMerge: async (tree, previous) => {
         const dbAdapter = new FsDbAdapter(db, treeKey);
-        const ref = await dbAdapter.storeFsTree(tree, { previous });
+        // `skipNotification`, AND THE MERGE IS ANNOUNCED BY HAND BELOW.
+        //
+        // THE MERGE REVISION WAS THE ONE STATE IN THE SYSTEM ANNOUNCED WITHOUT
+        // A CHAIN HEAD. This store had no `skipNotification`, so `Connector`'s
+        // db observer broadcast it — and that observer sends the raw
+        // `<table>Ref` from the insert row, which is the TREE ref. Every other
+        // push in this file goes out through `_sendRef`, which announces
+        // `_announceAs(ref)`: the head. The merge went out bare, and it went
+        // out BEFORE `_recordChainEntry` had written the entry at all, so there
+        // was no head to announce even in principle.
+        //
+        // Measured, with the harness logging every ref that leaves each node
+        // (`J9`, two scenarios): node A emitted 4 refs, all `~H~` heads; node B
+        // emitted 2, both bare, both from this line. That is the whole of
+        // "announcements carry no chain head" recorded in
+        // `doc/convergence-contract.md` — not the hub, which relays faithfully
+        // whatever it was handed, but this store.
+        //
+        // A receiver given a bare ref cannot ask the chain anything about it,
+        // so it falls through to the content heuristics. The merge — the state
+        // produced by the one mechanism that exists to settle disagreement —
+        // was the state least able to be reasoned about.
+        const ref = await dbAdapter.storeFsTree(tree, {
+          previous,
+          skipNotification: true,
+        });
         // Echo suppression: the materialisation touched disk, so record the
         // merged state as last-sent; the watcher's re-scan then settles to a
         // no-op rather than re-broadcasting the merge. The merge revision D is
@@ -5185,9 +5608,11 @@ export class FsAgent {
         this._lastSentContentKey = this._contentKeyFromTree(tree);
         // A merge revision is the one state with TWO parents, and that is
         // exactly the shape `FsEditChain` writes its rows by hand to allow.
-        // The chain entry is still LINEAR here, because naming both parents
-        // means mapping two tree refs to two chain heads, and nothing resolves
-        // that direction yet. It belongs with the walk.
+        // It now names both: `_resolveConflictInline` adopts the incoming
+        // side's head before the resolve, and `_recordChainEntry` turns an
+        // adopted head into the second parent. The note that used to sit here
+        // said nothing resolved tree ref to chain head; `_headForTreeRef`
+        // does, and did already.
         //
         // AND IT CLAIMS ONLY WHAT THE MERGE PRODUCED. See `_mergeInputs`: a
         // path whose merged bytes came from either side was authored by
@@ -5206,6 +5631,11 @@ export class FsAgent {
         }
         await this._recordChainEntry(ref, mergeDelta);
         this._currentRef = ref;
+        // ANNOUNCED AS A HEAD, which is the whole point of suppressing the
+        // observer above. Ordered after `_recordChainEntry` on purpose: the
+        // entry is what gives this state a head, and `_announceAs` falls back
+        // to the bare tree ref for a state it cannot name.
+        await announce(ref);
         return ref;
       },
       // Resolution failures are surfaced by `_onConflict`; success is silent.
@@ -5627,6 +6057,7 @@ export class FsAgent {
                 treeRef,
                 incomingTree,
                 predecessorRefs,
+                connector,
               );
               return;
             }
@@ -5792,15 +6223,30 @@ export class FsAgent {
               postRestoreTree,
               incomingTree,
             );
+            let why = 'this node is short of what it applied';
+            /* v8 ignore start -- @preserve ONLY A MIXED-VERSION FLEET REACHES
+               THIS, and one build cannot produce it. "Same content, different
+               ref" needs two builds that hash one folder differently, which is
+               the rollout case this comment names. Both in-process candidates
+               were measured and neither works: an empty directory IS in the
+               content map (`keep.txt`,`mine` against `keep.txt`), so it makes
+               the contents differ too; and mtime no longer moves the root hash
+               at all (`XJjnid6B…` before and after a `utimes`), since it left
+               the content identity. A refused tombstone leaves this node
+               holding a file the sender lacks, which is a content difference
+               by definition. The branch stays because deleting it reinstates
+               the failure it was written for — `diverged: true` standing for
+               eight minutes on a node holding exactly the hub's files during a
+               rollout. The reachable half is asserted by `says out loud that
+               it is short of what it applied`. */
             if (sameContent) {
               this._antiEntropy?.agreedOn(treeRef);
+              why = 'same content, so not a divergence';
             }
+            /* v8 ignore stop -- @preserve */
             console.warn(
               `${this._tag} applied ${treeRef.slice(0, 8)}… but re-derived ` +
-                `${postRestoreRef.slice(0, 8)}… — ` +
-                (sameContent
-                  ? 'same content, so not a divergence'
-                  : "this node is short of what it applied"),
+                `${postRestoreRef.slice(0, 8)}… — ${why}`,
             );
           }
           // NOT recorded when the refs already match. `_contentAgreed` is
@@ -6224,16 +6670,26 @@ export class FsAgent {
         schedule(treeRef);
         // AND look its chain entry up anyway, in parallel.
         //
-        // **The hub's own announcements are unmarked**, and that is where most
-        // refs come from after a partition heals: the bootstrap and the state
-        // beacon advertise from the server's TREES table, not from the ref log
-        // it relayed. So a plain tree ref is not only an older peer — it is the
-        // hub, every time, and a chain consulted only on `~H~` is a chain the
-        // hub routes around.
+        // A plain tree ref still reaches here, and the chain has to be
+        // consulted for it or a chain consulted only on `~H~` is one the
+        // sender routes around.
         //
         // Traced on a failing T4: the marked heads stopped arriving once the
         // partition healed, every walk returned `removed=[]`, and the peer
         // deletion path never fired ONCE in the scenario it was built for.
+        //
+        // WHERE THE UNMARKED REFS ACTUALLY CAME FROM — this comment used to
+        // say the hub, advertising from the server's trees table rather than
+        // the ref log it relayed, and that was WRONG. `Server` keeps
+        // `this._latestRef = ref` with the prefix intact and `_bootstrapPayload`
+        // relays exactly that, so the hub is faithful. The unmarked refs were
+        // this package's own: `storeMerge` and the initial store let
+        // `Connector`'s db observer broadcast a raw tree ref. Both fixed; see
+        // `doc/convergence-contract.md`, "Where the headless announcements came
+        // from", and the invariant `every announcement carries a chain head`.
+        //
+        // The lookup stays, because an OLD peer (`announceTreeRef`) is a real
+        // case and the mixed-fleet spec still exercises it.
         //
         // Scheduled FIRST and synchronously, then the lookup — because a query
         // is a peer read and awaiting one before queueing an apply is how a
@@ -6284,7 +6740,24 @@ export class FsAgent {
         // Parked for the apply, which happens after a debounce. The sender's
         // removals are the authorisation the ancestry rule cannot give, so
         // they have to survive the gap between hearing and acting.
-        if (resolved.entry) {
+        // `resolved.entry` IS ALWAYS PRESENT HERE, so there is no branch.
+        //
+        // Only a `~H~` ref reaches this continuation — the bare path returned
+        // several lines up — and for one of those `_resolveAnnouncement`
+        // answers either `undefined`, which the line above returned on, or
+        // `{ treeRef, entry }` with the entry set. There is no third shape.
+        //
+        // It USED to be written as `if (resolved.entry) { … } else
+        // schedule(resolved.treeRef)`, and that else was unreachable: an
+        // ordinary apply of an unjudged state, which is exactly what the join
+        // protocol exists to prevent, sitting behind a condition that could
+        // not fire. Found by the 100% branch gate, which is the only thing
+        // that would ever have found it.
+        /* v8 ignore if -- @preserve unreachable, per the note above; kept so the
+           type narrows without a cast, and so a future third shape from
+           `_resolveAnnouncement` is dropped rather than applied unjudged */
+        if (!resolved.entry) return;
+        {
           // THE FIRST HEAD A JOINING NODE SEES IS NOT AN ORDINARY APPLY.
           //
           // A folder with files and no history has established nothing, so it
@@ -6308,9 +6781,7 @@ export class FsAgent {
           void this._collectIncomingRemovals(resolved.entry).then(() =>
             schedule(resolved.treeRef),
           );
-          return;
         }
-        schedule(resolved.treeRef);
       });
     };
 

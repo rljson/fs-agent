@@ -460,45 +460,113 @@ export class FsAntiEntropy {
    * beacon — and so a mixed-version fleet does not spend its rollout window
    * showing red.
    *
-   * **KNOWN UNSOUND, and deliberately left so for now — do not "fix" this in
-   * isolation.** The thing proven is "the hub's ref X describes the same
-   * content as the state I am in", a statement about two sides that is true
-   * only while neither moves. Keyed on X alone it survives this node changing
-   * underneath it, so a later announcement of X clears the divergence with no
-   * content check at all, for ever. Measured: all four nodes of a churn run
+   * **KNOWN UNSOUND, AND THE PAIR KEY HAS NOW BEEN TRIED TWICE.** Do not fix
+   * this in isolation; read the whole note first.
+   *
+   * What a bucket round proves is "the hub's ref X describes the same content
+   * as the state I am in" — a statement about TWO sides, true only while
+   * neither moves. Keyed on X alone it survives this node changing underneath
+   * it, so a later announcement of X clears the divergence with no content
+   * check at all, for ever.
+   *
+   * Measured twice, and the second measurement is the one that matters.
+   * First as contradictory health signals: all four nodes of a churn run
    * reporting `diverged=false` while their own `differingPaths` named
-   * `two.txt`, with the content genuinely different.
+   * `two.txt`. Then as what that costs, in the churn fuzzer at seed 2:
    *
-   * Keying it on the pair (`${hubRef}@${localRef}`) fixes that, and was
-   * written, measured and then REVERTED — because it turns the divergence
-   * detector back on and the repair behind it is not safe yet. With the memo
-   * corrected, I7b (*a delivered deletion does not beat a later re-creation*)
-   * went from 5 of 5 to 0 of 6: the anti-entropy decided `pull` for a node
-   * that was AHEAD and merged its freshly re-created file away. Bucket
-   * envelopes reaching `observe` was one input (fixed separately, in
-   * `fs-agent.ts`); it was not the only one.
+   *   A: 11 files  diverged=false  hub=goDX1oLq  local=kderYtfA  differing=[]
+   *   B: 10 files  diverged=false  hub=goDX1oLq  local=goDX1oLq  differing=[sub/three.txt]
    *
-   * So the trade, stated plainly: this memo makes the fleet UNDER-REPORT
-   * divergence, and correcting it makes the fleet LOSE FILES. Under-reporting
-   * is the safer of the two until the repair can tell "I am ahead" from "I am
-   * behind" without a chain verdict. The guard for the real behaviour is in
-   * `test/fs-anti-entropy.spec.ts`, inverted, with the measurement in it.
+   * B had deleted `sub/three.txt`, nobody re-created it, and A, C and D all
+   * held it while reporting no divergence — so none of them ever repaired. The
+   * fleet does not merely MISREPORT under this memo; the repair is gated on
+   * the signal it falsifies, so **the fleet does not heal.** That is worse
+   * than the note here used to claim, and it is why this will have to be
+   * fixed rather than tolerated.
    *
-   * Measured: all four nodes of a churn run reporting `diverged=false` while
-   * their own `differingPaths` named `two.txt`, stable, with the content
-   * genuinely different. The two signals contradicted each other because one
-   * was memoised and the other was not — and the repair is gated on the
-   * memoised one.
+   * WHY THE PAIR KEY STILL DOES NOT WORK. The note here used to say it must
+   * wait "until the repair can tell 'I am ahead' from 'I am behind' without a
+   * chain verdict", and that reads as though a chain verdict were the only
+   * missing piece. It is not sufficient. `antiEntropyDecision` does switch on
+   * `hub.reachability` before any heuristic — `ahead` answers `push` — and the
+   * second attempt still took `I7b` to 0 of 8.
+   *
+   * Two inputs were found and fixed on the way, and NEITHER was enough:
+   *
+   *  - bucket-sync envelopes were reaching `observe` as if they were states
+   *    (`hub=~BR~{"r"…`), so the folder looked permanently diverged and the
+   *    decision came from heuristics on a JSON envelope. Fixed in
+   *    `fs-agent.ts` — the note here had already claimed this was fixed
+   *    elsewhere, which was wrong;
+   *  - a bare hub beacon was observed with no reachability at all, so the
+   *    heuristics decided `pull` for a node that was ahead
+   *    (`hub=hd3PHz1r… local=_esQ4A0L… — pull`). Now resolved through the
+   *    chain and offered as a second observation.
+   *
+   * THE DEFECT UNDERNEATH IS A LIVELOCK, AND IT HAS ONE ROOT CAUSE. Traced by
+   * removing the masks one at a time and then logging the decision inputs:
+   *
+   *   anti-entropy: hub=_esQ4A0L… local=hd3PHz1r… diverged for 89s — pull (attempt 44)
+   *
+   * Forty-four attempts over eighty-nine seconds, and every one of them with
+   * `reachability` UNDEFINED. With no verdict the switch above falls through
+   * and the heuristic answers `pull` for a divergence it cannot close, for
+   * ever — the same unbounded retry `@rljson/mongo-agent` bounded in 0.0.52.
+   *
+   * So the chain never decides here, not because the decision ignores it but
+   * because the verdict does not arrive: resolving the announced state is a
+   * read, and on this path it still takes the full ten seconds
+   * (`Timeout after 10000ms: … resolveAnnouncement`). A verdict that arrives
+   * late is indistinguishable from no verdict.
+   *
+   * THE ORDER THAT FOLLOWS, and it is not "fix the memo":
+   *
+   *  1. make the reachability read return on the anti-entropy path;
+   *  2. then the switch above answers from the chain and the livelock stops;
+   *  3. then both masks come off together — this key, and the envelope filter;
+   *  4. the memo is one line at the end of that, exactly as the convergence
+   *     contract has said all along.
+   *
+   * The masks, found while attempting step 4 first:
+   *
+   *   memo pair key applied, both fixes in    I7b 0 of 8
+   *   memo reverted, both fixes in            I7b 0 of 6
+   *   memo reverted, second observe removed   I7b 0 of 3
+   *   memo reverted, envelope filter removed  I7b 3 of 3
+   *
+   * Dropping bucket envelopes from `observe` is correct in principle — an
+   * envelope names no tree — and it BREAKS `I7b` on its own, because the
+   * spurious divergence those envelopes produce is what keeps the tracked hub
+   * state moving so the livelock above never persists long enough to run.
+   *
+   * Both masks are therefore load-bearing today, and neither may be removed
+   * before step 1. That is why the pair key failed twice with a different
+   * explanation each time.
    *
    * The code already knew the rule and applied it to one side only: a `no` is
    * deliberately never cached, because *"caching a `no` would have to be
    * invalidated the moment either side changes"*. A `yes` needs exactly the
-   * same invalidation, and the pair key is what provides it.
+   * same invalidation, and the pair key is what provides it — once the repair
+   * behind it is safe.
    *
    * Bounded, because it is keyed on refs a peer chooses: a hub that changes
    * state constantly must not grow this without limit.
    */
   private readonly _contentAgreed = new Set<string>();
+
+  /**
+   * The memo key: what the hub announced AND the state this node was in.
+   * @param hubRef - The ref the hub announced.
+   * @param localRef - The state this node is in, read fresh from `view`.
+   * @returns A key no other pair can spell.
+   */
+  private static _agreementKey(
+    hubRef: string,
+    localRef: string | undefined,
+  ): string {
+    return `${hubRef}\u0000${localRef ?? ''}`;
+  }
+
 
 
   /**
@@ -538,10 +606,11 @@ export class FsAntiEntropy {
    */
   private _checkContent(ref: string): void {
     if (!this._deps.sameContent) return;
-    if (
-      this._contentAgreed.has(ref) ||
-      this._contentChecking.has(ref)
-    ) {
+    const key = FsAntiEntropy._agreementKey(
+      ref,
+      this._deps.view().currentRef,
+    );
+    if (this._contentAgreed.has(key) || this._contentChecking.has(ref)) {
       return;
     }
     this._contentChecking.add(ref);
@@ -568,7 +637,9 @@ export class FsAntiEntropy {
    * @param ref - The hub ref that was compared.
    */
   agreedOn(ref: string): void {
-    this._contentAgreed.add(ref);
+    this._contentAgreed.add(
+      FsAntiEntropy._agreementKey(ref, this._deps.view().currentRef),
+    );
     // Agreement means there is nothing to list, and a stale list is worse than
     // none: it is what a UI shows somebody.
     this._differingPaths = [];
@@ -623,7 +694,11 @@ export class FsAntiEntropy {
 
     // A ref already proven content-equivalent is not a divergence, however
     // different the two hashes look. (`unknown` has already returned above.)
-    if (this._contentAgreed.has(hubRef)) {
+    if (
+      this._contentAgreed.has(
+        FsAntiEntropy._agreementKey(hubRef, view.currentRef),
+      )
+    ) {
       this._key = null;
       this._divergedSince = null;
       this._attempts = 0;

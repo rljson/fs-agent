@@ -246,6 +246,15 @@ export interface BucketSyncHost {
    */
   claimed?(): ReadonlySet<string>;
 
+  /**
+   * `path → timeId` of the newest edit this node has heard of for each path.
+   *
+   * Optional for the same reason {@link claimed} is: a host that cannot answer
+   * leaves the entries without times, and `reconcile` falls back to the rules
+   * that shipped before the field existed.
+   */
+  editTimes?(): ReadonlyMap<string, string>;
+
   /** Puts a protocol ref on the wire. */
   send(ref: string): void;
   /**
@@ -370,6 +379,7 @@ export class FsBucketSync {
             this._host.manifest(),
             parsed.buckets,
             this._host.claimed?.(),
+            this._host.editTimes?.(),
           ),
         ),
       );
@@ -394,7 +404,17 @@ export class FsBucketSync {
       this._awaiting?.round === parsed.round
         ? this._awaiting.buckets
         : [...new Set(parsed.entries.map(([path]) => bucketOf(path)))];
-    const ourEntries = entriesInBuckets(this._host.manifest(), buckets);
+    // OUR times go in too, or the comparison has only one operand: `reconcile`
+    // reads `editedAt` from both sides' entries, and the side it is handed as
+    // `ours` is built right here. Leaving them off made every tombstone
+    // unorderable in the direction that matters most — the one where this node
+    // holds the live file.
+    const ourEntries = entriesInBuckets(
+      this._host.manifest(),
+      buckets,
+      this._host.claimed?.(),
+      this._host.editTimes?.(),
+    );
     const plan = reconcile(
       ourEntries,
       parsed.entries,

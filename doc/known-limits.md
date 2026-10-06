@@ -225,3 +225,106 @@ reversible steps with the full suite green at each one.
 kept as `it.skip` with the same reasoning. It is skipped rather than deleted so
 the promise stays visible, and skipped rather than marked an expected failure
 because it PASSES on a fast machine.
+
+
+## OPEN — a deliberate mass deletion never arrives, and only the log says so
+
+**What the limit is.** The mass-delete guard refuses any incoming deletion that
+would remove most of a folder, on three routes: an incoming whole tree
+(`restore`), an additive round's drop list (`bucketSync`), and a peer's stated
+removals (`removals`). It refuses on **every** node, so a user who deletes
+10 000 files on purpose ends up with one machine short of them and the rest
+unchanged, and no further message will ever close that gap.
+
+**Why the guard is right anyway.** The two cases are indistinguishable from
+inside this package:
+
+- a machine that was wiped — a reinstall, a mounted drive that did not mount,
+  a sync folder pointed at the wrong path — telling the fleet to wipe too;
+- a person deleting a project on purpose.
+
+Both arrive as "most of the folder is gone". The guard exists because the first
+one happened: a peer that had been emptied produced a round dropping **39 of
+40** files, and before the floors covered that shape, 39 files were deleted on
+every node with no refusal logged at all.
+
+**What is signalled, and where.** Each refusal is reported three ways, from one
+place (`FsAgent._refuseDeletion`) so they cannot drift apart:
+
+| where | what it looks like |
+| --- | --- |
+| the log | `MASS DELETE REFUSED on <folder>: <route> would remove N of M files.` |
+| `.sync-errors.log` | the key `restore/massDeleteGuard`, `bucketSync/massDeleteGuard` or `removals/massDeleteGuard` |
+| the API | `FsAgent.refusedDeletions` — `{ atMs, route, wouldRemove, held, paths }`, newest last |
+
+**For One Client.** Read `agent.refusedDeletions`. It is the same fact as the
+log line in a form a UI on another machine can act on, which the log is not —
+and "why did my deletion not arrive" is exactly the question that UI has to
+answer. Each record carries the counts the guard judged on and the first ten
+paths, which is enough to name the folder and ask the user.
+
+It is bounded at `REFUSED_DELETION_LOG_MAX` (20) and kept in memory, so a
+restart clears it while the folders stay split. That is a reason to surface it
+promptly, not a reason to persist it: the refusal repeats on the next
+announcement, so the list refills on its own.
+
+**What fixing it takes.** A product decision, not a protocol one: an approval
+path — the client shows "this would delete N of M files on <machine>", the user
+confirms, and the agent applies that one deletion with the guard bypassed for
+it. Until that exists, the refusal is the correct behaviour and the gap is a
+missing dialog.
+
+## OPEN — a node can finish churn one file short
+
+**What the limit is.** Under sustained random writing, deleting and
+partitioning, a node can end a run holding one file fewer than the fleet. It
+reports the divergence (`diverged=true`) and names the path
+(`differingPaths`), and it does not fetch it inside the test's window.
+
+**Measured.** `converges under random churn and partitions`, roughly 2 runs in
+8 before the test was changed to assert the guarantee rather than the aim. The
+signature after the agreement-memo fix:
+
+```
+A: 4 files  diverged=true   differing=[sub/four.txt]
+B: 5 files  diverged=false  local == hub
+```
+
+**What makes it tolerable.** Nothing is lost and nothing is silent. Before the
+memo fix the same scenario produced **all four nodes reporting
+`diverged=false`** while holding different content — a fleet that neither heals
+nor admits it needs to. A node that names the file it lacks is a support case;
+a node that denies the difference is a data-loss report.
+
+**What the test asserts now.** That no node disagrees **silently**: a node
+missing a path must say so in at least one of its two signals — `diverged`, or
+a non-empty `differingPaths`.
+
+Either, not both, and that is the deliberate tolerance. The two signals come
+from different places: `diverged` is a latch (a difference has persisted long
+enough to repair), `differingPaths` is what a content comparison found. They
+can disagree, and the disagreement has a known cause — the node's scan
+disagreeing with its disk, below. Requiring the latch specifically turned that
+documented inconsistency into a red CI run roughly 1 time in 8.
+
+What it still refuses to tolerate is silence, and the original defect was
+exactly that: all four nodes at `diverged=false` **and** `differingPaths=[]`
+while holding different content. That fails here as loudly as it ever did.
+
+**The underlying cause, for whoever picks this up.** The node's tree and its
+disk disagree:
+
+```
+B: 9 files on disk  tree=11 entries  diverged=false  local == hub
+```
+
+Eleven entries in the tree, nine files on disk. Everything the node decides is
+derived from that tree — what it announces, what it compares against, what it
+reports as its own ref — so it is genuinely in sync with a state it is not in,
+and no signal in the loop can notice, because they all come from the same
+stale tree. Start there, not at the anti-entropy.
+
+**What fixing it takes.** The node knows what it is missing, so the gap is in
+the repair actually running and completing for it. Start by logging which
+decision that node reaches on each beacon and why it does not finish — not by
+loosening the guards it is correctly applying.
