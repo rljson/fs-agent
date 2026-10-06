@@ -70,7 +70,7 @@
       "@rljson/io": "0.0.84",
       "@rljson/json": "0.0.23",
       "@rljson/rljson": "0.0.83",
-      "@rljson/server": "0.0.73"
+      "@rljson/server": "0.0.74"
     }
   },
   "packageManager": "pnpm@10.11.0"
