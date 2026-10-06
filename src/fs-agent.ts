@@ -3258,11 +3258,7 @@ export class FsAgent {
         // directory was never in it, nor was the root, nor was a file deleted
         // before it was ever announced — and that last one needs no tombstone,
         // because no peer can push it back.
-        const deleted = join(this._rootPath, change.path);
-        if (this._announcedFiles.has(deleted)) {
-          this._pendingDeletes.add(deleted);
-          this._persistTombstones();
-        }
+        this._tombstoneDeleted(change.path);
       }
       // A local re-creation supersedes the tombstone. Without this, a path
       // deleted once could never be written again on this node: the guard in
@@ -5002,6 +4998,60 @@ export class FsAgent {
           `${plan.conflict.slice(0, 3).join(', ')}`,
       );
     }
+  }
+
+  /**
+   * Records a tombstone for a deletion the watcher reported.
+   *
+   * Two shapes arrive here. A FILE this node announced is tombstoned directly.
+   * A DIRECTORY is not in `_announcedFiles` — only files are — and it stands
+   * for every announced file beneath it.
+   *
+   * THE DIRECTORY CASE IS NOT INFERENCE FROM ABSENCE. The watcher reported
+   * that path deleted, and removing a directory necessarily removes what is
+   * inside it, so each announced file under that prefix is a deletion this node
+   * performed and may be stated as one.
+   *
+   * It matters because on Linux the child events do not arrive. `rm -r` unlinks
+   * the children and then the directory; when the watched directory goes,
+   * inotify removes its watch and drops any queued child events, so one child's
+   * deletion is observed and the rest are lost. macOS FSEvents reports them
+   * all, which is why this branch cannot be reached on a developer's Mac and
+   * has a test that calls it directly.
+   *
+   * The consequence was not a slow deletion but an UNDONE one: nothing stated
+   * those removals, so a peer still holding the files announced them back and
+   * this node restored the directory it had just deleted. Measured on Linux CI
+   * twice, a different subset surviving each time.
+   *
+   * Bounded by `_announcedFiles` in both shapes: a path no peer could know
+   * about needs no tombstone, because no peer can push it back.
+   * @param relativePath - The path the watcher reported deleted.
+   * @returns How many tombstones were recorded.
+   */
+  private _tombstoneDeleted(relativePath: string): number {
+    const deleted = join(this._rootPath, relativePath);
+    if (this._announcedFiles.has(deleted)) {
+      this._pendingDeletes.add(deleted);
+      this._persistTombstones();
+      return 1;
+    }
+    const prefix = `${deleted}${sep}`;
+    let held = 0;
+    for (const announced of this._announcedFiles) {
+      if (!announced.startsWith(prefix)) continue;
+      this._pendingDeletes.add(announced);
+      held++;
+    }
+    if (held > 0) {
+      this._persistTombstones();
+      console.log(
+        `${this._tag} "${relativePath}" was deleted — stating the removal of ` +
+          `the ${held} file(s) it held, whose own events the watcher did not ` +
+          `receive`,
+      );
+    }
+    return held;
   }
 
   /**

@@ -175,6 +175,59 @@ describe('FsAgent — degradation when a dependency fails', () => {
       }
     }, 30_000);
 
+    it('a deleted DIRECTORY states the removal of the files it held', async () => {
+      // UNREACHABLE ON macOS, so it is called directly.
+      //
+      // `rm -r` unlinks the children and then the directory. On Linux, when the
+      // watched directory goes inotify removes its watch and drops any queued
+      // child events — one child's deletion is observed and the rest are lost.
+      // FSEvents reports them all, so on a developer's Mac the file branch
+      // always wins and this one never runs.
+      //
+      // The consequence was not a slow deletion but an UNDONE one: nothing
+      // stated those removals, so a peer still holding the files announced them
+      // back and the node restored the directory it had just deleted. Measured
+      // on Linux CI twice, a different subset surviving each time.
+      //
+      // It is not inference from absence: the watcher reported the directory
+      // deleted, and removing a directory removes what is inside it.
+      const announced = priv<Set<string>>(agent, '_announcedFiles');
+      const held = [
+        join(dir, 'old', 'f0.txt'),
+        join(dir, 'old', 'f1.txt'),
+        join(dir, 'old', 'nested', 'f2.txt'),
+      ];
+      for (const p of held) announced.add(p);
+      // A file OUTSIDE the directory, which must not be touched.
+      const elsewhere = join(dir, 'keep.txt');
+      announced.add(elsewhere);
+
+      const stated = (
+        agent as unknown as { _tombstoneDeleted: (p: string) => number }
+      )._tombstoneDeleted('old');
+
+      expect(stated, 'the files the directory held were not stated').toBe(3);
+      const pending = priv<Set<string>>(agent, '_pendingDeletes');
+      for (const p of held) {
+        expect(pending.has(p), `${p} was not tombstoned`).toBe(true);
+      }
+      expect(
+        pending.has(elsewhere),
+        'a file outside the deleted directory was tombstoned',
+      ).toBe(false);
+    });
+
+    it('a deleted directory nobody heard of states nothing', async () => {
+      // The bound. A path no peer could know about needs no tombstone, because
+      // no peer can push it back — the same rule the file branch applies, and
+      // what keeps a scratch directory from filling the log.
+      const stated = (
+        agent as unknown as { _tombstoneDeleted: (p: string) => number }
+      )._tombstoneDeleted('never-announced');
+      expect(stated).toBe(0);
+      expect(priv<Set<string>>(agent, '_pendingDeletes').size).toBe(0);
+    });
+
     it('keeps the entry when both spellings are ONE file', async () => {
       // THE ONLY BRANCH THAT KEEPS ANYTHING, and it was covered by accident.
       //
