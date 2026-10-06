@@ -1061,4 +1061,44 @@ describe('FsScanner', () => {
       expect(setBlob2).toHaveBeenCalledTimes(1);
     });
   });
+
+  // ...........................................................................
+  describe('stopWatch', () => {
+    it('clears a settle timer that was still pending', async () => {
+      // A SETTLE TIMER OUTLIVING ITS SCANNER WOULD FIRE INTO A STOPPED ONE.
+      //
+      // The timer is armed when a scan finds a file still growing, and it is
+      // deliberately NOT re-armed while one is pending — re-arming on every
+      // scan starves the files it exists for. So whether one is pending when
+      // the watcher stops depends on the timing of a write that happens to
+      // straddle a scan, which is why these two lines were covered on macOS
+      // and uncovered on Linux CI: `fs-scanner.ts` 1369-1370, reported as
+      // `Coverage for lines (99.9%) does not meet global threshold (100%)`.
+      //
+      // Arranging a mid-settle write on demand is not reliable on either
+      // platform. The behaviour under test is pure cleanup, so the timer is
+      // armed directly and the assertion is that stopping clears it: the
+      // callback must never run, and the field must be released so a later
+      // scan can arm a fresh one.
+      const scanner = new FsScanner(testDir, { bs: new BsMem() });
+      let fired = false;
+      const pending = setTimeout(() => {
+        fired = true;
+      }, 50);
+      (scanner as unknown as { _settleTimer: NodeJS.Timeout | null })._settleTimer =
+        pending;
+
+      scanner.stopWatch();
+
+      expect(
+        (scanner as unknown as { _settleTimer: unknown })._settleTimer,
+        'the timer was not released, so a later scan cannot arm one',
+      ).toBeNull();
+      await new Promise((r) => setTimeout(r, 120));
+      expect(
+        fired,
+        'the settle timer fired into a scanner that had been stopped',
+      ).toBe(false);
+    });
+  });
 });
