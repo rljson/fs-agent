@@ -30,7 +30,7 @@ import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
+import { link, mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -131,6 +131,84 @@ describe('FsAgent — degradation when a dependency fails', () => {
           ) => Promise<boolean>;
         }
       )._isSameFileAsExpected(fullPath, expected);
+
+    it('the prune KEEPS an entry that is the expected file renamed', async () => {
+      // The same rule one level up, at the only caller left: a direct
+      // `restore({ cleanTarget: true })`, which means "make this folder be
+      // exactly this tree". The prune walks an entry the tree does not contain
+      // and must not delete it when it IS the tree's file under another
+      // spelling — deleting it would destroy the very file being restored.
+      //
+      // This is the half that was uncovered on Linux CI (`fs-agent.ts`
+      // 2965-2966): on a case-sensitive filesystem the two spellings are two
+      // files, so the keep never fires, and a hard link is what makes them one
+      // without assuming anything about the volume.
+      const spelled = join(dir, 'Angebot.docx');
+      await writeFile(spelled, 'the real document');
+      const tree = await agent.extract();
+
+      const other = join(dir, 'angebot.docx');
+      let oneFile = true;
+      try {
+        await link(spelled, other);
+      } catch {
+        // Already one file — a case-insensitive volume, and then the entry the
+        // prune walks is the tree's own spelling, which it keeps anyway.
+        oneFile = false;
+      }
+
+      await agent.restore(tree, dir, { cleanTarget: true });
+
+      expect(
+        existsSync(spelled),
+        'the restore deleted the file it was restoring',
+      ).toBe(true);
+      if (oneFile) {
+        expect(
+          existsSync(other),
+          'the prune deleted the expected file under its other spelling',
+        ).toBe(true);
+        expect(
+          priv<number>(agent, '_restoreSkipped'),
+          'the keep was not counted',
+        ).toBeGreaterThan(0);
+      }
+    }, 30_000);
+
+    it('keeps the entry when both spellings are ONE file', async () => {
+      // THE ONLY BRANCH THAT KEEPS ANYTHING, and it was covered by accident.
+      //
+      // On a case-insensitive filesystem — macOS by default — writing
+      // `Angebot.docx` makes `angebot.docx` reachable too, both spellings land
+      // on one inode, and this returns true without anything being arranged.
+      // On a case-SENSITIVE filesystem they are two files, the inodes differ,
+      // and the branch is unreachable.
+      //
+      // So the whole `same === true` path, and the prune's `continue` that
+      // depends on it, were 100% covered on a developer's Mac and uncovered on
+      // Linux CI: `fs-agent.ts` lines 2451 and 2965-2966, reported as
+      // `Coverage for lines (99.85%) does not meet global threshold (100%)`.
+      // A green local gate said nothing about it.
+      //
+      // A HARD LINK arranges it on either kind of filesystem: two directory
+      // entries differing only in case, one inode. On a case-insensitive one
+      // the link is refused because the name already resolves — which is the
+      // condition under test, so the refusal is ignored rather than asserted.
+      const spelled = join(dir, 'Angebot.docx');
+      await writeFile(spelled, 'x');
+      const other = join(dir, 'angebot.docx');
+      try {
+        await link(spelled, other);
+      } catch {
+        // Already one file: a case-insensitive filesystem has arranged it.
+      }
+
+      const expected = new Map([[other.toLowerCase(), spelled]]);
+      expect(
+        await sameFileAsExpected(agent, other, expected),
+        'two spellings of one inode were not recognised as one file',
+      ).toBe(true);
+    });
 
     it('keeps nothing when NEITHER path is on disk any more', async () => {
       const gone = join(dir, 'Angebot.docx');
