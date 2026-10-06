@@ -504,30 +504,40 @@ truncated version until the copy finishes — at which point the size and timest
 change, the file is re-read, and the complete version propagates. Nothing is
 corrupted permanently.
 
-**Under heavy churn a re-created file can be lost from the whole fleet.** The
-fuzzer's own log shows a path written, deleted, then written again — and the
-re-creation absent from every machine afterwards. The signature is all machines
-agreeing on a tree with **six entries while holding four files on disk**: the
-path is in everybody's tree, on nobody's disk, and no blob error is reported.
-Because every machine agrees, nothing reports a divergence and nothing repairs
-it.
+**Heavy churn can leave the fleet disagreeing, and agreeing that it agrees.**
+Under sustained random writing, deleting and partitioning, three things were
+measured, all of them with the same root: a node's health signals are derived
+from its own tree, so when that tree is wrong every signal built on it is wrong
+in the same direction.
 
-Measured at roughly one run in two, and **one in four on the code as it stood
-before 0.1.0** — so this release did not introduce it; it is the first release
-that looks for it. Nothing asserted it before, which is why it was never
-reported.
+- **A machine ends up one file short.** It reports the divergence and names the
+  path, so this one is visible.
+- **A re-created file is lost from every machine.** The fuzzer's log shows a path
+  written, deleted, then written again, and the re-creation absent everywhere
+  afterwards. The signature is every machine agreeing on a tree with **six
+  entries while holding four files on disk** — the path in everybody's tree, on
+  nobody's disk, and no blob error. Roughly one run in two, and **one in four on
+  the code as it stood before 0.1.0**, so this release did not introduce it; it
+  is the first release that looks for it.
+- **Two machines hold different bytes for one path while both report perfect
+  health.** Measured on CI: four nodes, all reporting `hub == local` and
+  `diverged: false`, one holding the second-to-last write of a contested file
+  and another the last.
 
-It is not gated in CI, deliberately: a fuzzer that fails half the time teaches
-people to re-run the build, which is worse than no gate. Reinstating the
-assertion needs a seeded scenario that fails every time. The assertion itself is
-written down in `mesh/fs-mesh-invariants.spec.ts`, beside what it caught.
+None of the three is gated, deliberately: a fuzzer that fails half the time
+teaches people to re-run the build, which is worse than no gate. What **is**
+gated is that a disagreement is never silent — if the nodes differ, some node's
+`diverged` or `differingPaths` must say something. The stronger assertions are
+written out in `mesh/fs-mesh-invariants.spec.ts` beside the measurement each one
+produced, and reinstating any of them needs a seeded scenario that fails every
+time.
 
-**A machine can finish heavy churn one file short.** Under sustained random
-writing, deleting and partitioning, a machine can end up holding one file fewer
-than the fleet. It reports the divergence and names the path, so nothing is lost
-silently, and it does not catch up inside the test's window. The cause is
-recorded: its scan disagrees with its disk, so it is in sync with its own wrong
-tree.
+**What this means in practice.** A fleet doing ordinary work — people saving
+files, machines going offline and coming back — is covered by the rest of this
+suite. These three need sustained simultaneous churn on the same few paths from
+several machines at once, which is what the fuzzer does on purpose. Treat
+`agent.antiEntropyStatus.differingPaths` as the signal to watch rather than
+`diverged` alone, because it is the one that was non-empty in all three cases.
 
 ---
 

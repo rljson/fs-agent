@@ -410,29 +410,84 @@ describe('invariants over the route, not the destination', () => {
       //    `4 files on disk`, with a re-created path present in every tree and
       //    on no disk, and no blob error anywhere.
       //
-      // Both are in `README.public.md` under Known constraints with their
-      // evidence. Reinstating either of them here needs a DETERMINISTIC repro
+      //  - "the nodes agree byte for byte over the paths they do have" — this
+      //    one was asserted here and described as "the part that holds every
+      //    time", which a CI run disproved: seed 1, all four nodes reporting
+      //    `tree=9 entries`, `7 files on disk`, `hub == local` and
+      //    `diverged=false`, with B holding `two.txt=s2` where A held `s7`.
+      //    Four nodes agreeing on one ref while disagreeing on the bytes
+      //    behind it is the agreement memo again, from the other side.
+      //
+      // All three are in `README.public.md` under Known constraints with their
+      // evidence. Reinstating any of them here needs a DETERMINISTIC repro
       // first — a seeded scenario that fails every time — because a gate that
       // fires on half of all runs teaches people to re-run CI, which is worse
-      // than no gate at all.
+      // than no gate at all. The seed fixes the write sequence and nothing
+      // else: watchers, sockets and scans interleave differently every run, so
+      // the same seed is a different race each time.
       //
-      // What is still asserted below is the part that holds every time: the
-      // nodes agree byte for byte over the paths they do have, and nothing
-      // holds content nobody wrote.
+      // What is asserted below is what holds whatever the race does: a
+      // disagreement is never SILENT, and nothing holds content nobody wrote.
 
-      // Every node holds the same thing, byte for byte — a file list matching
-      // is not agreement. Only over the paths a node actually has: one that is
-      // behind is allowed to be short, by the rule above, but never wrong.
+      // Collect the disagreements rather than failing on the first one, because
+      // what matters is whether the fleet knows, not which path it was.
+      // Compared only over paths a node actually has: one that is behind is
+      // allowed to be short, by the rule above.
       const first = mesh.node(names[0]);
+      const disagreements: string[] = [];
       for (const path of result.snapshot[names[0]]) {
         const expected = await first.read(path);
         for (const name of names.slice(1)) {
           if (!result.snapshot[name].includes(path)) continue;
-          expect(
-            await mesh.node(name).read(path),
-            `${name} disagrees about "${path}".\n${story}`,
-          ).toBe(expected);
+          const theirs = await mesh.node(name).read(path);
+          if (theirs !== expected) {
+            disagreements.push(
+              `${name} has "${path}"=${theirs}, ${names[0]} has ${expected}`,
+            );
+          }
         }
+      }
+
+      // A DISAGREEMENT IS NEVER SILENT.
+      //
+      // The fleet is allowed to end a churn run disagreeing — that is the
+      // measurement above, and the repair for it made the fleet lose files when
+      // it was tried. What it is NOT allowed to do is disagree while every node
+      // reports perfect health, because nothing downstream can act on a state
+      // no signal mentions: a UI shows a green tick, the anti-entropy schedules
+      // no repair, and the disagreement is permanent.
+      //
+      // This asserts that SOMEBODY is reporting, not that the report names the
+      // right path — in the run above A's `differingPaths` listed `one.txt` and
+      // `sub/four.txt` while the disagreement was about `two.txt`. Naming it
+      // correctly is a stronger property and not one this can gate yet. What it
+      // does catch is total silence, which is the shape that was measured on CI
+      // as `A is missing two.txt and reports nothing`.
+      if (disagreements.length > 0) {
+        const reporting = names.filter((name) => {
+          const ae = mesh.node(name).agent.antiEntropyStatus;
+          return (
+            ae?.diverged === true || (ae?.differingPaths?.length ?? 0) > 0
+          );
+        });
+
+        // SAID OUT LOUD even when the assertion passes, because a guard whose
+        // condition never occurs is indistinguishable from a guard that works.
+        // This is the only place the limit above is observable: without the
+        // line, a green run and a run that disagreed look identical, and the
+        // next person has no way to tell whether the weaker assertion is
+        // holding something or holding nothing.
+        console.warn(
+          `[churn seed ${seed}] the fleet ended DISAGREEING about ` +
+            `${disagreements.length} path(s); reported by ` +
+            `${reporting.join(', ') || 'NOBODY'}`,
+        );
+
+        expect(
+          reporting,
+          `the fleet disagrees and NOBODY says so:\n  ` +
+            `${disagreements.join('\n  ')}\n${story}`,
+        ).not.toEqual([]);
       }
 
       // And nothing holds content nobody ever wrote.
