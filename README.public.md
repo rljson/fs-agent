@@ -481,6 +481,17 @@ above. Read `agent.refusedDeletions` to find out it happened: the guard cannot
 tell a person deleting a project from a machine that was wiped telling the fleet
 to wipe, and the second one is why the guard exists.
 
+**On Linux, deleting a whole directory may leave its files behind.** `rm -r`
+unlinks the children and then the directory; when the watched directory goes,
+inotify removes its watch and the queued child events are lost. A removal is
+only stated for a deletion the agent **watched** — an absence is not a deletion,
+which is what stops a folder that failed to mount from wiping the fleet — so an
+unobserved child is not merely unpropagated: a peer still holding it announces
+it back and the folder is restored. Measured on Linux CI across four runs, a
+different subset surviving each time. macOS reports every child deletion and is
+unaffected. Deleting the files individually, or deleting the directory a second
+time, propagates normally.
+
 **A machine can finish heavy churn one file short.** Under sustained random
 writing, deleting and partitioning, a machine can end up holding one file fewer
 than the fleet. It reports the divergence and names the path, so nothing is lost
