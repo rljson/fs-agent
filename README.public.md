@@ -492,12 +492,16 @@ different subset surviving each time. macOS reports every child deletion and is
 unaffected. Deleting the files individually, or deleting the directory a second
 time, propagates normally.
 
-**A file still being written is occasionally distributed half-done.** The settle
-rule holds a file back until it stops growing, and about one run in ten of its
-guard test sees a partial copy hashed anyway — measured both under load and in
-isolation, so it is the rule itself and not the harness. Nothing is corrupted
-permanently: the next scan hashes the finished file and the complete version
-propagates. A reader of a shared folder can see a truncated file in between.
+**A file still being written cannot be recognised with certainty.** The settle
+rule holds a file back on the first sight of it and for as long as its size keeps
+moving, which covers a copy in progress whatever the machine's clock says. What
+no rule over `stat` can decide is a writer that pauses for a long time: a file
+whose timestamp looks finished and whose size has not moved between two scans is
+indistinguishable from one that was written and closed. If that happens the file
+is hashed and distributed truncated, and a reader of the shared folder sees the
+truncated version until the copy finishes — at which point the size and timestamp
+change, the file is re-read, and the complete version propagates. Nothing is
+corrupted permanently.
 
 **Under heavy churn a re-created file can be lost from the whole fleet.** The
 fuzzer's own log shows a path written, deleted, then written again — and the

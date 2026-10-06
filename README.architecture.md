@@ -72,6 +72,7 @@ a silent hang and an unbounded list is tomorrow's memory ceiling.
 | what a joining machine does | [Joining a Network](#joining-a-network-planjoin) |
 | who is recorded as having changed a file | [Authorship](#authorship-a-node-claims-only-what-it-changed) |
 | which files are skipped | [Ignore Matching](#ignore-matching-srcfs-ignorets) |
+| why a half-written file does not go out | [A Copy in Progress](#a-copy-in-progress-does-not-reach-the-wire-fsscanner-the-settle-rule) |
 | the signature of anything named here | [README.api.md](README.api.md) |
 
 ## Pull-Based Reference Architecture
@@ -1655,6 +1656,53 @@ this question once per file.
 **Tested by** `test/fs-ignore.spec.ts` (28), whose first block is one case per
 pattern that appears in the shipped configuration or in the agent's own list —
 that being the half which can break a running fleet.
+
+## A Copy in Progress Does Not Reach the Wire (`FsScanner`, the settle rule)
+
+A watcher fires while a large file is still being written, and a scan that reads
+it then publishes a truncated file that every peer accepts as the whole thing.
+The scanner therefore defers a file rather than reading it, and the deferral is a
+promise to come back: `_unsettledDuringScan` reuses the previous node for that
+path and arms a follow-up scan, so a deferred file is late and never lost.
+
+Three signals defer, and the file waits if any of them fires:
+
+| signal | what it catches |
+| --- | --- |
+| `mtime > scanStartedAt` | the file changed **while this scan ran** — free, no window, cannot race |
+| `growing` — the size moved since the last scan | a writer whose gaps are wider than one read |
+| `firstSight` — never read, and either touched inside `settleMs` or seen for the first time | a copy already in progress when the scanner met it |
+
+**`firstSight` is two conditions on purpose, and neither replaces the other.**
+"touched inside `settleMs`" is strong while a copy is actively writing, because
+its timestamp keeps moving; its hole is a writer that stalls past the window and
+is then seen "cold". "Seen for the first time" closes that hole with no clock
+term at all, and terminates through `growing` rather than through a window — the
+first sight records the size, so the next scan reads the file once the size has
+stopped moving. Keeping only the clock-free half was measured and is worse: an
+active copy is then protected by the size comparison alone, and one stalled
+`fsync` between two scans gets through.
+
+**A future timestamp is not evidence of anything.** Both clock-based halves read
+a timestamp ahead of now as "touched just now" — `mtime > scanStartedAt` is
+permanently true and `now - mtime` is negative — so a file dated one day ahead
+was invisible to the tree for good. An archive carries whatever it likes, a file
+copied from a machine running fast arrives dated ahead, and a BIOS clock can be
+years out; none of those is a file being written. `inTheFuture` excludes all
+three.
+
+**Only while watching, and never while paused.** A one-shot `extract()` or
+`storeInDb()` has no follow-up scan, so deferring there does not delay a file, it
+drops one — and `extract()` is public API. A pause means the agent is writing the
+folder itself, where every restored file looks fresh; deferring those made the
+post-restore scan reuse pre-restore nodes, which is how a node leaves the
+ancestry conversation and gets its deletions refused everywhere.
+
+What no rule over `stat` can decide is a writer that pauses for a long time, and
+`README.public.md` → "Known constraints" says what that costs.
+
+**Tested by** `test/fs-clock-skew.spec.ts` (6) for the clock half and
+`test/fs-slow-copy.spec.ts` (3) for the deferral itself.
 
 ## Known Constraints
 
