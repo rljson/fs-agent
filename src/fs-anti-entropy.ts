@@ -52,8 +52,8 @@
 //
 // NOT COPIED FROM THE MONGO ANTI-ENTROPY
 // That one is driven by noticing a PEER's root, so a node that receives
-// nothing never starts it (`the weakness register` §10), and it applies a peer's
-// tombstone without any recency check (§11). Here the trigger is the hub's own
+// nothing never starts it, and it applies a peer's tombstone without any
+// recency check. Here the trigger is the hub's own
 // periodic announcement, and every destructive step goes through the ordinary
 // apply with its ancestry and mass-delete rules — this module never deletes
 // anything itself.
@@ -152,9 +152,10 @@ export interface HubAnnouncement {
    * What the edit chain says about the two histories, when it can say.
    *
    * **This is the field the whole protocol change exists to provide.** Without
-   * it the decision has a ref and ONE generation of ancestry, and §2.2's two
-   * situations — "a peer deleted what we added" and "a peer forked from an
-   * ancestor we share" — arrive at this signature as the SAME VALUE. No rule
+   * it the decision has a ref and ONE generation of ancestry, and the two
+   * situations that need opposite actions — "a peer deleted what we added" and
+   * "a peer forked from an ancestor we share" — arrive at that signature as the
+   * SAME VALUE. No rule
    * can separate them, which is why narrowing one was tried twice and cost a
    * discarded folder the first time and a livelock the second.
    *
@@ -190,9 +191,8 @@ export function antiEntropyDecision(
   // THE CHAIN ANSWERS FIRST, when it can answer at all.
   //
   // Everything below this block is inference from a content hash and one
-  // generation of ancestry, and §2.2 is the proof that it cannot be made
-  // correct: the two situations that need opposite actions arrive here as the
-  // same value. Reachability is not a better heuristic, it is the missing
+  // generation of ancestry, and that cannot be made correct: the two situations
+  // that need opposite actions arrive here as the same value. Reachability is not a better heuristic, it is the missing
   // fact — and where it is present, no heuristic may overrule it.
   //
   // `ahead` does NOT require `lastPushedRef` to match. That condition exists
@@ -229,8 +229,8 @@ export function antiEntropyDecision(
   // The hub's state was made FROM ours: we are the one behind.
   //
   // **`lastAppliedRef` is NOT counted once we have authored something since**,
-  // and that narrowing is 0.0.84's — the change that fixed §1.1 and was
-  // reverted the same afternoon.
+  // and that narrowing is 0.0.84's — the change that fixed a fork being read as
+  // a lag, and was reverted the same afternoon for causing a livelock.
   //
   // The reasoning was always right: a state we have built on is behind us, so
   // a hub state descending from it is a sibling of our work, not a successor

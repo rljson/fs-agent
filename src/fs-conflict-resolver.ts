@@ -77,7 +77,7 @@ export interface BranchTip {
    * `clientId` equal for everybody, both top comparisons collapsed and the
    * winner fell through to *whichever content hash sorts higher*. Deterministic,
    * so the fleet converged; but unrelated to who edited last, which is what
-   * `§11.1` says decides.
+   * decides.
    *
    * The chain's stamp is what the agent already mints for exactly this kind of
    * question, so nothing new has to be transported. Absent only for a tip no
@@ -141,8 +141,8 @@ export function compareTips(a: BranchTip, b: BranchTip): number {
 }
 
 /**
- * Picks the path-owning winner of a conflict. Per design decision §11.1 the
- * revision with the greater InsertHistory timestamp keeps the original path;
+ * Picks the path-owning winner of a conflict. The revision with the greater
+ * InsertHistory timestamp keeps the original path;
  * the loser's content is preserved under a renamed conflict copy.
  * @param a - First tip
  * @param b - Second tip
@@ -456,7 +456,7 @@ export interface MergePlan {
  * `winnerSide` decides who keeps the path on a real conflict; the loser's
  * content is preserved under a {@link conflictCopyName}. Pure & deterministic.
  *
- * Per relative path (see design §4.4):
+ * Per relative path:
  * - both sides equal → keep it (covers unchanged + add-same + delete-both)
  * - only theirs changed (`ours === o`) → take theirs
  * - only ours changed (`theirs === o`) → take ours
@@ -667,8 +667,8 @@ export class FsConflictResolver {
 
     // Resolve the two lowest tips this round (deterministic; ensures progress
     // when there are 3+ tips — the rest re-fire and converge). Sorted ascending
-    // by {@link compareTips}, so `loser` is first and `winner` (keeps the path,
-    // per design §11.1) is second.
+    // by {@link compareTips}, so `loser` is first and `winner` (which keeps the
+    // path) is second.
     const ordered = [...branchTips].sort((x, y) => compareTips(x, y));
     const loserTip = ordered[0];
     const winnerTip = ordered[1];

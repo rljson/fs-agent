@@ -75,9 +75,8 @@ export interface FsAgentOptions {
    * With this on, a divergence the anti-entropy would have answered with
    * `pull` or `merge` runs a bucket-sync round instead: the two sides compare
    * manifests and each fetches what it is missing. Nothing is replaced, so
-   * neither side's work can be discarded — which is the property §3.1 of the
-   * plan says makes the two measured data losses impossible rather than
-   * rarer.
+   * neither side's work can be discarded — the property that makes the two
+   * measured data losses impossible rather than rarer.
    *
    * **Default off.** It replaces the repair model rather than correcting it,
    * and `src/fs-agent.ts` records that this class of change "has been reverted
@@ -404,7 +403,7 @@ export const AGENT_STATE_FILE = '.fsagent-state.json';
  *
  * A tree ref is a content hash and never starts with `~`, so the two are
  * unambiguous on one channel — the trick `@rljson/mongo-agent` uses for its
- * own protocol refs (`~R~`, `~AEQ~`…), blessed by §6 of the plan.
+ * own protocol refs (`~R~`, `~AEQ~`…).
  *
  * The marker is not decoration. Without it a receiver cannot tell a head from
  * a tree ref, so it has to TRY resolving every ref it hears — and a miss goes
@@ -3357,8 +3356,8 @@ export class FsAgent {
             // Such a ref is PRIVATE: this node derived it and never announced
             // it, so no peer can be in it. A push naming it as parent has its
             // deletions refused by everybody — and that is the mechanism
-            // behind `the weakness register` §1, the register's
-            // most-reproduced entry. A directory removal is what exposes it,
+            // behind the register's most-reproduced entry. A directory
+            // removal is what exposes it,
             // exactly as the register says: *"a rename or a directory removal
             // is 'delete everything and re-add' to this system"*, so the
             // folder must return to a state whose ref still agrees.
@@ -3369,7 +3368,7 @@ export class FsAgent {
             //
             // Measured on 10 runs of the four-node directory deletion: 8 of
             // 10 with the old rule, 9 of 10 with this one. So it helps and it
-            // does not close §1 — a private ref is still private, and the
+            // does not close it — a private ref is still private, and the
             // merge can still resurrect what one node deleted. What closes it
             // is taking mtime out of the content identity, so the refs never
             // diverge in the first place; this rule is what keeps a push
@@ -4624,7 +4623,7 @@ export class FsAgent {
    * that returns to a state it held earlier re-derives that state's exact ref —
    * and a receiver cannot then find the chain row for it by hash, only by
    * query. Announcing the head makes every announcement resolvable to an entry,
-   * which is what the `previous` walk needs in order to exist at all (§13.5).
+   * which is what the `previous` walk needs in order to exist at all.
    *
    * It also makes each announcement UNIQUE. An A → B → A deletion produces
    * three entries with three heads, so the returning state is news by
@@ -5745,7 +5744,7 @@ export class FsAgent {
     // It used to read: without ancestry on the wire, a tree that simply
     // predates this node's newest write is indistinguishable from one deleting
     // it, so the prune rule needed a deliberate escape hatch — and the hatch
-    // was where `the weakness register` §3 lived, *"two people save different
+    // was where the register's worst entry lived, *"two people save different
     // files at the same moment on different machines, one file disappears, and
     // the node that lost it is the one that created it"*. It then said the
     // case could not be closed from inside this agent, because no fact
@@ -5757,7 +5756,7 @@ export class FsAgent {
     // that performed it. The distinction the comment said was impossible is no
     // longer needed, because nothing is inferred from a tree's silence. Mesh
     // F2 — *two nodes writing DIFFERENT files at the same instant keep both* —
-    // asserts §3's exact scenario and passes.
+    // asserts that exact scenario and passes.
     //
     // What `causalOrdering` is still needed for: the predecessor refs it
     // carries are what let the merge gate in `processRef` fire at all, so a
@@ -6958,9 +6957,8 @@ export class FsAgent {
         // hub's tree under the ordinary rules — both are whole-folder, so both
         // can discard work. A bucket round cannot: the two sides compare
         // manifests and each fetches what it is missing. That is the property
-        // §3.1 of the plan says makes the two measured data losses impossible
-        // rather than rarer, and it is why this is the last work package and
-        // its own switch.
+        // which makes the two measured data losses impossible rather than
+        // rarer, and it is why this has a switch of its own.
         if (this._bucketSync?.start()) {
           console.log(
             `${this._tag} divergence answered by a bucket-sync round rather ` +
@@ -6994,8 +6992,8 @@ export class FsAgent {
       // Mapped here too, and forgetting it would be invisible and total: the
       // anti-entropy compares what it hears with `_currentRef`, a TREE ref, so
       // an unmapped head never matches and every node reports a permanent
-      // divergence against a fleet it agrees with. That is the §2.1b symptom
-      // arriving by a second route.
+      // divergence against a fleet it agrees with — the same symptom as a ref
+      // changing underneath the fleet, arriving by a second route.
       //
       // An unmarked ref is observed SYNCHRONOUSLY, exactly as it always was.
       // Deferring even by a microtask changes when the status is readable, and

@@ -43,10 +43,13 @@
 // table. The fit is exact.
 //
 // WHAT USES IT
-// Nothing yet, deliberately. This is written and announced to nobody, so the
-// fleet accumulates real chains before anything depends on their shape — they
-// are the fixtures the walk needs, and a week of production ancestry is worth
-// more than any fixture we could write.
+// Everything. This was written to be read by nobody — the fleet was meant to
+// accumulate real chains before anything depended on their shape — and that
+// phase is over: the chain is the sync mechanism. A node announces this entry's
+// ref (`CHAIN_HEAD_PREFIX`, `~H~`) on every change, a receiver resolves it to a
+// row and then to a tree, repairs decide from `classify` walking `previous`,
+// and a deletion is applied because an entry here STATES it. A bare tree ref on
+// the wire is a degradation, not the normal case.
 // .............................................................................
 
 import type { Db } from '@rljson/db';
@@ -151,7 +154,9 @@ export const createFsChainTables = async (
  * The append-only chain for one folder.
  *
  * Append-only and never merged: each node keeps its own lineage, exactly as
- * mongo does. Nothing here rewrites or prunes an entry — that is WP5's job.
+ * mongo does. Nothing here rewrites or prunes an entry, and nothing collects
+ * one either — the chain grows for the life of the folder. See
+ * `README.public.md`, "Known constraints".
  */
 export class FsEditChain {
   private _head: string | undefined;
@@ -349,8 +354,8 @@ export class FsEditChain {
    *
    * **Ambiguous by nature, which is why it is the fallback and not the
    * primary.** A tree ref is a content hash, so a folder that returns to an
-   * earlier state produces a SECOND entry with the same `dataRef` — §2.1,
-   * exactly the ambiguity the chain exists to remove. The newest by `timeId`
+   * earlier state produces a SECOND entry with the same `dataRef` — exactly
+   * the ambiguity the chain exists to remove. The newest by `timeId`
    * is the right pick: it is the entry that most recently produced this
    * content, and the one whose ancestry describes how the folder got here now.
    *
@@ -761,13 +766,20 @@ export class FsEditChain {
   /**
    * The newest entry nothing else descends from.
    *
-   * **A single slot, and that is a known limit.** Every node keeps its own
-   * lineage and chains are never merged, so once the walk starts pulling peers'
-   * rows (WP3) this table holds several tips and "the newest" can be somebody
-   * else's. `@rljson/mongo-agent` had exactly this bug — lost updates
-   * root-caused to a single `_lastApplied` slot rather than per-node lineages —
-   * and fixed it by tracking lineages. Nothing reads this chain yet, so the
-   * limit is not reachable; WP3 must replace it rather than build on it.
+   * **This table holds several tips, and "the newest" can be somebody else's.**
+   * That was once written here as a hazard to be removed; it is now the
+   * behaviour {@link refreshHead} depends on, because a joining node has no
+   * entries of its own and has to adopt the fleet's tip as the peers' rows
+   * replicate in.
+   *
+   * What makes it safe is that this is no longer the only place a head lives. A
+   * peer's head is parked against the tree ref it described
+   * (`_announcedHeads`) and promoted only once that state is actually applied,
+   * so hearing a head never makes this node claim a lineage it does not hold —
+   * `@rljson/mongo-agent` lost updates to exactly that, one `_lastApplied` slot
+   * standing in for per-node lineages. Ancestry questions go to
+   * {@link classify}, which walks `previous`; this answers only "where do I
+   * start".
    *
    * "Newest" is by `timeId`, which is `<millis>:<nanoid>` — so two entries
    * minted in the same millisecond are separated by a random tail. That order

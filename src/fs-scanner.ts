@@ -425,7 +425,7 @@ export class FsScanner {
 
     // A file this scan would not read has to be come back for, or it waits on
     // the five-second safety rescan — which turns a 300 ms settle window into
-    // seconds of latency for every new file, and §8's long tail is already a
+    // seconds of latency for every new file, and sync latency is already a
     // complaint. One timer per scan, replacing any still pending.
     if (this._unsettledDuringScan.length > 0) {
       const waiting = [...this._unsettledDuringScan];
@@ -792,7 +792,8 @@ export class FsScanner {
             size: childStats.size,
             // NO mtime, and no absolute `path` — see {@link FsNodeMeta}, which
             // has documented both as excluded from the content identity all
-            // along. `path` was; mtime was not, and the gap cost §1.
+            // along. `path` was; mtime was not, and the gap is what made a
+            // node's deletions refusable by everybody.
             //
             // A tree ref is meant to be a SHARED IDENTITY: the same bytes give
             // the same ref on every machine, which is what lets a receiver
@@ -809,8 +810,8 @@ export class FsScanner {
             // A node whose ref disagrees with its peers' for identical content
             // is out of the ancestry conversation: it announces parents nobody
             // can be in, so every deletion it sends is refused by everybody.
-            // That is `the weakness register` §1, the register's
-            // most-reproduced entry, and a directory removal is what makes it
+            // That is the register's most-reproduced entry, and a directory
+            // removal is what makes it
             // visible because it returns a folder to a state whose ref must
             // still agree. Measured: 10 of 10 on the four-node directory
             // deletion with mtime out, 8 of 10 with it in.
