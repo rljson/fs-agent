@@ -65,6 +65,7 @@ a silent hang and an unbounded list is tomorrow's memory ceiling.
 | how a divergence is repaired without replacing a folder | [Additive Reconciliation](#additive-reconciliation-fs-manifestts--fs-bucket-syncts) |
 | why a node sometimes gives no verdict about itself | [A Verdict Is Only About This Folder](#a-verdict-is-only-about-this-folder-while-the-head-names-it) |
 | how a deletion travels | [A Delete Travels as a Fact](#a-delete-travels-as-a-fact-collectremovals--planremovals) |
+| what a host application is told, and when a person must act | [One Channel For Everything](#one-channel-for-everything-that-happened-srcfs-signalsts) |
 | why a big deletion is refused, and how to find out | [Refused Deletions Are Reported](#refused-deletions-are-reported-not-only-logged-fsagentrefuseddeletions) |
 | what a restart remembers | [Tombstone Log](#tombstone-log-_pendingdeletes--fsagent-statejson) |
 | why an older edit cannot beat a newer one | [Ordering Every Difference](#ordering-every-difference-by-when-it-happened-manifestentryeditedat) |
@@ -1174,6 +1175,98 @@ invariant *every node ends on the last save*.
 T4 — *a delete made while cut off is not resurrected on rejoin* — is an ordinary
 assertion in `test/mesh/fs-mesh.spec.ts`, measured **8 of 8** under
 `bucketSync`.
+
+## One Channel For Everything That Happened (`src/fs-signals.ts`)
+
+The agent knew more than it said. A same-file merge reported itself through
+`onConflict`, a mass-delete refusal through `refusedDeletions`, and **everything
+else that touched a user's folder went to `console.warn`** — a bucket round
+settling two edits, a joining machine moving files into `.fsagent-recovered/`, a
+path the filesystem rejected, a configuration that keeps less than it could. A
+host cannot grep a log on a machine it is not running on, and *"why is my file
+called (conflicted copy …)"* is a question it has to answer.
+
+### Three facts, and the third is the new one
+
+Every signal says **what** happened and to **which paths**, **how** it was
+decided, and whether a **person** has to do something. The third is what no
+earlier surface carried, and it is the one a UI is built on:
+
+| `action` | meaning |
+| --- | --- |
+| `none` | resolved; nothing to do |
+| `review` | resolved, but somebody may want to know — a kept copy, an arbitrary pick |
+| `required` | **not** resolved. It stays this way until a person acts |
+
+Only two kinds earn `required`: a deletion the mass-delete guard refused, and a
+path this filesystem will never accept. Both are genuinely terminal — no retry,
+no repair, no further message. Everything else is either resolved or retried,
+and marking it `required` would train people to ignore the list, which is the
+failure mode this whole section exists to avoid.
+
+### `decidedBy`, and why it is not a detail
+
+A conflict settled from the edit chain is a fact about what happened. One settled
+by comparing content hashes converges and is otherwise arbitrary — the winner has
+nothing to do with who edited last. **Two defects shipped in exactly that
+distinction this quarter**, both converging on the superseded version about half
+the time they arose, and neither visible from outside the package. So the verdict
+travels: `reconcile` fills `ReconcilePlan.conflictDecidedBy` per path, and a
+round reports `conflict/merged` for the paths the chain decided and
+`conflict/arbitrary` for the rest.
+
+That also made the bucket round's signal worth splitting rather than summing. A
+round can name hundreds of paths; a caller wants the shape before the detail, so
+the paths are grouped by verdict into one signal each instead of one signal per
+path.
+
+### Bounded, and nothing silently forgotten
+
+`SIGNAL_LOG_MAX` (200) signals are kept, newest first to be dropped last,
+because the newest describe the current state. **The per-kind counters are not
+bounded**: a folder that produced two thousand refusals still says two thousand
+after the oldest are dropped. A cap that hides the scale of what it dropped is
+worse than no cap.
+
+One signal names at most `SIGNAL_PATHS_MAX` (20) paths and counts the rest in
+`pathCount`, because a mass deletion names thousands and a signal has to stay
+small enough to keep 200 of.
+
+`addOnce` keys are bounded too (`SIGNAL_ONCE_MAX`), which matters because a key
+can be derived from live state — `repair/blocked` is keyed on the **pair** of
+refs the divergence is between. Keying on the hub's ref alone reports the same
+deadlock again every time this node moves, and keying on ours alone reports it
+again every time the hub does; that is the content-agreement memo's lesson
+applied one level up. Dropping an old key means such a signal may be reported
+again later, which is noise rather than a falsehood, where an unbounded set
+would be a leak.
+
+### Persisted, because a callback cannot reach a host that was not running
+
+The log is written to `SIGNAL_LOG_FILE` (`.fsagent-signals.json`) inside the
+synced folder and read back on first access — lazily, not in the constructor,
+which does no I/O. A UI launched after the event, or restarted, still sees it.
+Restoring deliberately does **not** fire subscribers: replaying history through
+the callback would make every restart look like a fresh folder-wide conflict.
+
+A log that cannot be understood is skipped rather than thrown, one entry at a
+time, because a corrupt notification file must never stop a folder from syncing.
+A `kind` this build has never heard of is **kept**: an unknown kind is still a
+true record of something that happened, and dropping it would make a downgrade
+lose history it could have shown.
+
+### What stayed
+
+`onConflict`, `refusedDeletions`, `.fsagent-conflicts.json` and
+`.sync-errors.log` are unchanged and still fire. The signal channel is additive,
+the 0.1.0 tests that pin those surfaces are still in the suite, and a host
+written against 0.1.0 keeps working — see
+[README.api.md § Migrating from 0.1.0](README.api.md#migrating-from-010).
+
+**Tested by** `test/fs-signals.spec.ts` (the sink, without a filesystem) and
+`test/fs-agent-signals.spec.ts` (one case per producer, asserting the fields
+rather than that something was emitted — a signal with the right kind and the
+wrong `action` is worse than none, because it gets filtered into silence).
 
 ## Refused Deletions Are Reported, Not Only Logged (`FsAgent.refusedDeletions`)
 

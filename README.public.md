@@ -22,6 +22,7 @@ machine switched off for a week catches up without replaying the week.
 - [Starting and stopping](#starting-and-stopping)
 - [Configuration](#configuration)
 - [Ignore patterns](#ignore-patterns)
+- [Knowing what happened to the folder](#knowing-what-happened-to-the-folder)
 - [Reading what the agent is doing](#reading-what-the-agent-is-doing)
 - [Using it without sync](#using-it-without-sync)
 - [What it guarantees — and what it does not](#what-it-guarantees--and-what-it-does-not)
@@ -325,6 +326,45 @@ matcher.ignores('src/server.log'); // true
 
 ---
 
+## Knowing what happened to the folder
+
+**Start here, and read one thing:** `agent.signalsNeedingAction`. It is the list
+of things this machine could not resolve and will not resolve — a deletion the
+guard refused, a path this filesystem rejects. If it is empty, the folder has
+dealt with everything it met.
+
+```ts
+const agent = await FsAgent.fromClient(folder, 'fileTree', client, socket, {
+  onSignal: (signal) => {
+    if (signal.action === 'required') alertSomebody(signal.detail);
+  },
+});
+
+// On start, for whatever happened while this process was not running:
+for (const signal of agent.signalsNeedingAction) alertSomebody(signal.detail);
+```
+
+|  |  |
+| --- | --- |
+| `agent.signals` | everything that happened to this folder worth telling somebody, oldest first. Survives a restart: it is read back from `.fsagent-signals.json` the first time you ask |
+| `agent.signalsNeedingAction` | only the ones a **person** has to act on |
+| `agent.signalTotals` | how many of each kind ever happened — unbounded, so "and 1 240 more" stays answerable after the list has dropped the oldest |
+| `agent.onSignal(cb)` | subscribe at any time; returns an unsubscribe |
+
+Each signal says what happened (`kind`), to what (`paths`, `pathCount`), how it
+was decided (`decidedBy`), and whether somebody has to act (`action`). Two of the
+nine kinds are `required` — a refused deletion and an unwritable path — because
+those are the only two that nothing here will ever resolve on its own.
+
+**The one to watch for is `conflict/arbitrary`.** It means both versions were
+kept and nothing could say which edit came last, so which one keeps the original
+name was chosen arbitrarily. It converges, and it has nothing to do with who
+edited last. `conflict/merged` is the same event decided from the history, and
+needs no attention.
+
+The full table of kinds, the field reference and a migration path from 0.1.0 are
+in [README.api.md § Signals](README.api.md#signals--what-happened-to-the-folder).
+
 ## Reading what the agent is doing
 
 |  |  |
@@ -333,9 +373,10 @@ matcher.ignores('src/server.log'); // true
 | `agent.antiEntropyStatus` | whether this machine agrees with the hub, and what it last did about it |
 | `agent.refusedDeletions` | deletions the mass-delete guard **refused**, newest last — `{ atMs, route, wouldRemove, held, paths }`. Read this to answer "why did my deletion not arrive": the guard refuses on every machine, so a deliberate mass deletion stalls the whole fleet and the only other trace is a line in each machine's log. Bounded at `REFUSED_DELETION_LOG_MAX`, in memory, and it refills on the next announcement |
 | `agent.scanner.onChange(cb)` | every filesystem event the scanner accepted |
-| `onConflict` | conflicts, as they are resolved |
+| `onConflict` | same-file conflicts, as they are resolved. Still supported; `onSignal` above is the superset |
 | `SYNC_ERROR_FILE` | `.sync-errors.log` in the folder: a keyed, append-only record of every refusal and failure — a locked file, an unfetchable blob, an impossible path, a refused mass deletion |
 | `.fsagent-conflicts.json` | resolved conflicts, bounded |
+| `.fsagent-signals.json` | every signal, bounded, plus the per-kind totals that are not |
 | `.fsagent-recovered/` | files a join kept but deliberately did not announce |
 | `.fsagent-state.json` | what this machine remembers across restarts: the state it was last at, the paths it deleted, and **when each path was last edited**. The edit times are what let a peer's tombstone be ordered against the write it claims to supersede — a machine that has forgotten them sends no time, and the comparison has one operand |
 

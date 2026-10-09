@@ -8,8 +8,8 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**70 files, 923 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 922 must pass; one is committed inverted, and §2.11 says which and why.
+**72 files, 988 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 987 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 923 does
+This document says what the suite actually proves, because the number 988 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -194,6 +194,41 @@ seconds. Ninety seconds of a production folder rewriting itself was an
 expensive way to learn something a loop over a three-element set says before
 the commit.
 
+### 2.6b That a host application is told what happened
+
+`fs-signals.spec.ts` (34) tests the sink with no filesystem at all, which is
+what lets it assert the awkward parts directly: the cap dropping the oldest, the
+per-kind counters surviving that drop, a listener that throws not costing the
+next one its notification, and a persisted log coming back from a shape nobody
+validated on the way out.
+
+That last part is most of the file, deliberately. A signal log is read from a
+folder that users, backup tools and other builds of this agent all write into,
+so it will be truncated, half-written and occasionally produced by a newer
+version. Every branch of that tolerance has a case: not an object, `null`, a
+`signals` that is not an array, an entry missing each required field in turn, a
+total that is not a finite number, and a good entry either side of a bad one.
+Two of those encode decisions rather than defences — an unknown `kind` is
+**kept**, because it is still a true record of something that happened, and
+restoring does **not** fire subscribers, because replaying history through the
+callback would make every restart look like a fresh folder-wide conflict.
+
+`fs-agent-signals.spec.ts` (29) is the other half: one case per place in the
+agent that does something to a user's folder, asserting the **fields** rather
+than that something was emitted. A signal with the right kind and the wrong
+`action` is worse than no signal, because it gets filtered into silence.
+
+Two of those cases are the compatibility guarantee rather than new behaviour —
+*still calls the 0.1.0 listener* and *still fills `refusedDeletions`* — because
+the channel is additive and a host written against 0.1.0 has to keep working.
+
+**What was NOT migrated, and why.** `fs-agent-conflict-log.spec.ts`,
+`fs-agent-mass-delete-guard.spec.ts` and the mesh harness's `mesh.conflicts`
+collector all still assert the 0.1.0 surfaces directly, unchanged. Rewriting them
+onto signals would have removed the only tests that prove those surfaces still
+work — the migration's whole risk is a host that stops being told, and these are
+what catch it. They stay until a release actually removes something.
+
 ### 2.7 That a node claims only what it changed
 
 The standing design rule: one identical chain on every client, an edit exists
@@ -355,7 +390,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 923 above.
+loop are counted as they run. They sum to the 988 above.
 
 ### Mesh tier
 
@@ -410,12 +445,14 @@ loop are counted as they run. They sum to the 923 above.
 | `fs-agent-incremental-restore.spec.ts` | 8 | a restore writes only what changed |
 | `fs-agent-locked-file.spec.ts` | 8 | a file held open by another process |
 | `fs-agent-inbound-verdict.spec.ts` | 7 | is an inbound ref news to this agent |
-| `fs-agent-anti-entropy.spec.ts` | 7 | the anti-entropy wiring |
+| `fs-agent-anti-entropy.spec.ts` | 8 | the anti-entropy wiring, `onBlocked` included |
 | `fs-ref-vs-content.spec.ts` | 6 | ref identity vs content identity |
 | `fs-filetype-changes.spec.ts` | 6 | a path changes what it is |
 | `fs-agent-no-laundering.spec.ts` | 6 | a node does not re-advertise what it adopted |
 | `fs-db-adapter.spec.ts` | 6 | storing a tree with its predecessors |
 | `fs-agent-conflict-log.spec.ts` | 5 | recording a resolved conflict |
+| `fs-agent-signals.spec.ts` | 30 | one case per thing the agent signals, asserting the fields |
+| `fs-signals.spec.ts` | 34 | the signal sink: the cap, the counters, and a log read from a hostile folder |
 | `fs-conflict-integration.spec.ts` | 6 | conflict resolution end to end |
 | `fs-filenames.spec.ts` | 5 | unicode and case |
 | `fs-level2-surfaces.spec.ts` | 5 | the model must be able to EXPRESS it |

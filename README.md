@@ -20,7 +20,7 @@ decision everything else follows from.
 
 ```bash
 npm install @rljson/fs-agent
-pnpm test     # 70 files, 923 scenarios, 100 % coverage, then eslint
+pnpm test     # 72 files, 988 scenarios, 100 % coverage, then eslint
 ```
 
 ## Where to start
@@ -28,7 +28,7 @@ pnpm test     # 70 files, 923 scenarios, 100 % coverage, then eslint
 | if you are | read |
 | --- | --- |
 | **using the package** | [README.public.md](README.public.md) — install, the production configuration, every option and what it costs, troubleshooting |
-| **deciding whether to trust it** | [README.tests.md](README.tests.md) — what the 923 scenarios actually prove, and what they cannot |
+| **deciding whether to trust it** | [README.tests.md](README.tests.md) — what the 988 scenarios actually prove, and what they cannot |
 | **changing the sync** | [README.architecture.md](README.architecture.md) — the mechanism, and why each rule exists |
 | **calling the API** | [README.api.md](README.api.md) — every export, grouped by module, with what it costs |
 | **setting the repo up** | [README.contributors.md](README.contributors.md) — run, debug, build, publish |

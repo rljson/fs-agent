@@ -9,7 +9,7 @@ found in the LICENSE file in the root of this package.
 # @rljson/fs-agent — API reference
 
 Every symbol the package exports, grouped by the module it comes from, with what
-it is for and what it costs. **89 exports across 11 modules.**
+it is for and what it costs. **100 exports across 12 modules.**
 
 Most consumers need only the first section. The rest is the protocol, exported
 because the sync is assembled from parts that are separately testable — not
@@ -97,6 +97,108 @@ never sets it.** Read
 before you do.
 
 ---
+
+## Signals — what happened to the folder
+
+**The channel a host application should read.** Everything else in this section
+reports one thing each; this reports everything a person might care about,
+through one type, and is the only surface that says whether somebody still has
+to act.
+
+| member | type | |
+| --- | --- | --- |
+| `agent.signals` | `readonly FsSignal[]` | everything signalled, oldest first. Seeded from disk on first read, so a host that starts late still sees it |
+| `agent.signalsNeedingAction` | `readonly FsSignal[]` | only `action: 'required'` — the list a UI should surface |
+| `agent.signalTotals` | `Record<string, number>` | how many of each kind EVER happened, dropped ones included |
+| `agent.onSignal(cb)` | `() => void` | subscribe; returns an unsubscribe |
+| `FsAgentOptions.onSignal` | `(signal) => void` | the same channel, from the constructor |
+| `SIGNAL_LOG_FILE` | `'.fsagent-signals.json'` | where it persists, inside the synced folder |
+| `SIGNAL_LOG_MAX` | `200` | signals kept |
+| `SIGNAL_PATHS_MAX` | `20` | paths one signal names before it only counts them |
+| `SIGNAL_ONCE_MAX` | `500` | distinct "report once" keys remembered |
+
+### `interface FsSignal`
+
+| field | type | |
+| --- | --- | --- |
+| `kind` | `FsSignalKind` | what happened |
+| `at` | `number` | epoch ms |
+| `paths` | `readonly string[]` | affected paths, sorted, at most `SIGNAL_PATHS_MAX` |
+| `pathCount` | `number` | how many were affected, which may exceed `paths.length` |
+| `action` | `'none' \| 'review' \| 'required'` | whether a person has to do something |
+| `decidedBy` | `'chain' \| 'clock' \| 'claim' \| 'hash' \| 'guard'` | how the outcome was chosen |
+| `copyPath` | `string` | where the version that lost the path was kept |
+| `timeId` | `string` | the edit this belongs to |
+| `detail` | `string` | one sentence for a person. Never a stack trace |
+
+### The kinds, and what a host should do with each
+
+| `kind` | `action` | what it means |
+| --- | --- | --- |
+| `conflict/merged` | `review` | two machines edited one file; both versions kept, the newer edit keeps the path |
+| `conflict/arbitrary` | `review` | both kept, but nothing could say which edit came last — **the one worth asking a person about** |
+| `conflict/overwritten` | `review` | one version won and the other was not kept. Only reachable with `resolveConflicts` off |
+| `deletion/refused` | **`required`** | the mass-delete guard refused. The deletion will not arrive and nothing will resolve it |
+| `join/recovered` | `review` | a rejoining machine moved files the network had deleted into `.fsagent-recovered/` |
+| `join/conflicted` | `review` | a rejoining machine kept its own edit beside the network's |
+| `repair/blocked` | `review` | a divergence the history cannot settle. Retried as more history arrives |
+| `path/unwritable` | **`required`** | a path this filesystem rejects. It will not arrive until renamed |
+| `config/degraded` | `review` | this agent is configured to keep less than it could. Reported once per agent |
+
+**`action` is the field to build on.** `review` means the agent dealt with it and
+a person may want to know; `required` means **nothing in this package will ever
+resolve it**. Only two kinds earn `required`, deliberately — a list that cries
+wolf gets ignored, and these two are the ones a user can actually act on.
+
+**`decidedBy` is not a detail.** `'chain'` is a fact about which edit came after
+which. `'hash'` converges and is otherwise arbitrary: the winner has nothing to
+do with who edited last. Two defects hid in exactly that distinction, both
+converging on the superseded version about half the time they arose, and neither
+visible from outside the package. A host that can see `'hash'` can ask; one that
+cannot has to trust a coin flip.
+
+### The supporting types
+
+| export | |
+| --- | --- |
+| `FsSignalKind` | the union of kinds in the table above |
+| `FsSignalAction` | `'none' \| 'review' \| 'required'` |
+| `FsSignalDecidedBy` | `'chain' \| 'clock' \| 'claim' \| 'hash' \| 'guard'`, ordered by how much it is worth trusting |
+| `FsSignalInput` | what a producer passes before the sink stamps `at` and counts `paths` |
+| `FsSignalLog` | the persisted shape: `{ signals, totals }` |
+| `FsSignals` | the sink itself — bounded, countable, subscribable, and does no I/O |
+
+`FsSignals` is exported because it is useful on its own: a host that aggregates
+several agents can own one and feed it from each `onSignal`. It holds no
+filesystem state, so the agent writes the file and this stays testable without
+one.
+
+### Migrating from 0.1.0
+
+Nothing is removed and nothing changes behaviour — `onConflict`,
+`refusedDeletions`, `.fsagent-conflicts.json` and `.sync-errors.log` all work
+exactly as before, and the tests that pin them are still in the suite. The
+signal channel is a superset:
+
+| if you read | you can now read | and you additionally get |
+| --- | --- | --- |
+| `onConflict` | `onSignal` / `signals` | bucket-round conflicts, join outcomes, refusals, unwritable paths, configuration problems |
+| `refusedDeletions` | `signalsNeedingAction` | the same refusals plus anything else a person must act on, in one list |
+| `.sync-errors.log` (parsing) | `signals` | a typed record instead of text, with `action` and `decidedBy` |
+
+A minimal host needs one subscription and one list:
+
+```ts
+const agent = await FsAgent.fromClient(folder, 'fileTree', client, socket, {
+  onSignal: (signal) => inbox.push(signal),
+});
+
+// …and on start, for anything that happened while the UI was down:
+for (const signal of agent.signalsNeedingAction) inbox.push(signal);
+```
+
+`ReconcilePlan` gains `conflictDecidedBy` (a `path → verdict` map). `conflict`
+keeps its shape, so a caller reading it is unaffected.
 
 ## Observability
 
