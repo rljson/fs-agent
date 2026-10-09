@@ -365,12 +365,16 @@ const T = (path: string, blob: string, editedAt: string): ManifestEntry => [
   });
 
   it('does nothing where the two agree', () => {
+    // Whole-object equality on purpose: it is the one assertion that fails when
+    // a field is ADDED to the plan, which is how a caller finds out that
+    // something new travels. `conflictDecidedBy` arrived this way.
     const plan = reconcile([E('a.txt', '1')], [E('a.txt', '1')]);
     expect(plan).toEqual({
       fetch: [],
       drop: [],
       redelete: [],
       conflict: [],
+      conflictDecidedBy: {},
     });
   });
 
