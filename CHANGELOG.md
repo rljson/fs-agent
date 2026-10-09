@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.1.1]
+
+### One channel for everything that happened to the folder
+
+The agent knew more than it said. A same-file merge reported itself through
+`onConflict` and a refused deletion through `refusedDeletions`; everything else
+that touched a user's folder went to `console.warn` and nowhere a program can
+read — a bucket round settling two edits, a joining machine moving files into
+`.fsagent-recovered/`, a path the filesystem rejected, a configuration keeping
+less than it could. A host cannot grep a log on a machine it is not running on.
+
+`agent.signals`, `agent.signalsNeedingAction`, `agent.signalTotals`,
+`agent.onSignal(cb)` and the `onSignal` option now carry all of it through one
+type. Each signal says what happened, to which paths, **how it was decided**, and
+whether a person still has to act.
+
+- **`action`** is the field to build on. `review` means the agent dealt with it
+  and somebody may want to know; `required` means nothing here will ever resolve
+  it. Only two of the nine kinds earn `required` — a refused deletion and a path
+  this filesystem rejects — because a list that cries wolf gets ignored.
+- **`decidedBy`** separates a verdict from a coin flip. A conflict settled from
+  the edit chain is a fact; one settled on the content hash converges and is
+  otherwise arbitrary. Two defects hid in exactly that distinction, so the
+  verdict travels: `ReconcilePlan` gains `conflictDecidedBy`, and a bucket round
+  reports `conflict/merged` for what the chain decided and `conflict/arbitrary`
+  for the rest.
+- Persisted to `.fsagent-signals.json`, so a host that starts after the event
+  still sees it. Bounded at 200, with per-kind totals that are **not** bounded —
+  a cap that hides the scale of what it dropped is worse than no cap.
+
+**Nothing is removed.** `onConflict`, `refusedDeletions`,
+`.fsagent-conflicts.json` and `.sync-errors.log` are unchanged, the tests that
+pin them are still in the suite, and `ReconcilePlan.conflict` keeps its shape. A
+host written against 0.1.0 keeps working — see `README.api.md`, *Migrating from
+0.1.0*.
+
+### Fixed
+
+- `_applyReconcilePlan` indexed the new verdict map without guarding it, so a
+  plan built anywhere other than `reconcile` — a test, a host driving the apply,
+  a plan across a version boundary — threw and took the whole round with it.
+- Two comments in `fs-edit-chain.ts` described the opposite of what the code
+  does, including one telling the reader the chain is unused scaffolding that
+  a later work package must replace. Nineteen pointers into documents that are
+  not in this repository were replaced with what they say.
+
+### Internal
+
+`.fsagent-signals.json` has to be in the scanner's ignore list AND in the mesh
+harness's, which are one decision in two places. Missing either made the
+notification into content: a folder that writes a file to itself on every event
+never stops changing, and twelve tests across six files read it as a divergence
+over a file no peer has. Both lists now say so.
+
+72 files, 988 scenarios, 100 % on statements, branches, functions and lines.
+
 ## [0.1.0]
 
 The edit chain becomes the sync mechanism. A folder's state is no longer a bare
