@@ -23,6 +23,7 @@ import {
   REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
+import { SIGNAL_LOG_FILE } from '../src/fs-signals.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
@@ -71,8 +72,13 @@ describe('FsAgent — the mass-delete guard', () => {
   const sourceTree = (bs: BsMem) => new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract();
 
   /** Files currently in the target. */
+  // The agent's own bookkeeping is not content, so it is not counted. Every
+  // file it keeps in the folder it watches has to be listed here — a refusal
+  // now writes a signal as well as a log line, and counting that made the
+  // folder look one file larger than the guard had left it.
+  const AGENT_OWN = [SYNC_ERROR_FILE, SIGNAL_LOG_FILE];
   const targetFiles = async () =>
-    (await readdir(targetDir)).filter((f) => f !== SYNC_ERROR_FILE);
+    (await readdir(targetDir)).filter((f) => !AGENT_OWN.includes(f));
 
   const POPULATED = MASS_DELETE_MIN_FILES + 20;
 

@@ -105,6 +105,7 @@ import {
   RECOVERED_DIR,
   SYNC_ERROR_FILE,
 } from '../../src/fs-agent.ts';
+import { SIGNAL_LOG_FILE } from '../../src/fs-signals.ts';
 
 import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
 import type { FsConflictReport } from '../../src/fs-conflict-resolver.ts';
@@ -136,11 +137,17 @@ export const MESH_ANTI_ENTROPY: AntiEntropyOptions = {
 // divergence — which `RECOVERED_DIR` produced the moment it existed: a joiner
 // correctly kept a file outside the synced tree and `converged()` called the
 // fleet divided over it.
+// THIS LIST AND THE AGENT'S IGNORE LIST ARE ONE DECISION IN TWO PLACES, and
+// they were out of step the moment the signal log existed: the agent stopped
+// syncing it and this kept counting it, so twelve tests across six files read
+// as a divergence over a file no peer has. The agent's own ignore list is in
+// `FsAgent`'s constructor — a file added there belongs here too.
 const BOOKKEEPING = [
   SYNC_ERROR_FILE,
   ATOMIC_TMP_PREFIX,
   AGENT_STATE_FILE,
   CONFLICT_LOG_FILE,
+  SIGNAL_LOG_FILE,
   RECOVERED_DIR,
 ];
 
