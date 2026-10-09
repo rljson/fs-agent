@@ -161,4 +161,33 @@ describe('FsAgent — anti-entropy wiring', () => {
     expect(repairs[0]).toContain('merge (attempt 1)');
     expect(repairs[1]).toContain('merge (attempt 2)');
   });
+
+  // ...........................................................................
+  it('turns an unrepairable divergence into a signal, keyed on the pair', async () => {
+    // THE WIRING, not the sink. `fs-agent-signals.spec.ts` proves the sink
+    // deduplicates; this proves the agent actually hands `onBlocked` to the
+    // anti-entropy, which is the half a direct call to the emitter cannot show.
+    //
+    // `blocked` means every action available is destructive in one direction or
+    // the other, so the divergence stays open and the next announcement tries
+    // again — which is why the signal is keyed on the PAIR of refs rather than
+    // fired per retry.
+    const { agent } = await start();
+    const deps = (
+      agent as unknown as {
+        _antiEntropy?: {
+          _deps: { onBlocked?: (hub: string, local: string) => void };
+        };
+      }
+    )._antiEntropy?._deps;
+
+    expect(deps?.onBlocked, 'the agent did not wire onBlocked').toBeDefined();
+    deps?.onBlocked?.('HUBREF', 'MYREF');
+    deps?.onBlocked?.('HUBREF', 'MYREF');
+
+    const blocked = agent.signals.filter((s) => s.kind === 'repair/blocked');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].action).toBe('review');
+    expect(blocked[0].detail).toContain('reconciled by hand');
+  });
 });

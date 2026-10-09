@@ -5,6 +5,19 @@
 // found in the LICENSE file in the root of this package.
 
 export {
+  FsSignals,
+  SIGNAL_LOG_FILE,
+  SIGNAL_LOG_MAX,
+  SIGNAL_ONCE_MAX,
+  SIGNAL_PATHS_MAX,
+  type FsSignal,
+  type FsSignalAction,
+  type FsSignalDecidedBy,
+  type FsSignalInput,
+  type FsSignalKind,
+  type FsSignalLog,
+} from './fs-signals.ts';
+export {
   FsAgent,
   REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,

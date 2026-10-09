@@ -41,6 +41,12 @@ import {
 } from './fs-conflict-resolver.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import {
+  FsSignals,
+  SIGNAL_LOG_FILE,
+  type FsSignal,
+  type FsSignalDecidedBy,
+} from './fs-signals.ts';
+import {
   FsBucketSync,
   isBucketSync,
   type BucketSyncHost,
@@ -146,6 +152,24 @@ export interface FsAgentOptions {
    * regardless of whether a callback is given.
    */
   onConflict?: (reports: FsConflictReport[]) => void;
+
+  /**
+   * Told about everything that happened to this folder that a person might
+   * care about — see {@link FsSignal}.
+   *
+   * **The superset of {@link onConflict}.** That callback reports one thing: a
+   * same-file merge. This one also reports a bucket round settling two edits, a
+   * joining machine moving files aside, a deletion the guard refused, a path
+   * that could not be written, and a configuration that keeps less than it
+   * could. Each signal says which paths it touched, how the outcome was chosen,
+   * and — the part no other surface carried — whether a PERSON still has to do
+   * something.
+   *
+   * `onConflict` is unchanged and still fires, so a host written against 0.1.0
+   * keeps working. A host that wants one channel instead of several should read
+   * this and {@link signals}.
+   */
+  onSignal?: (signal: FsSignal) => void;
   /**
    * Repair a divergence from the hub that no message is going to fix — a
    * push the hub never received, a forward this node never received, an
@@ -1149,6 +1173,18 @@ export class FsAgent {
   /** Told when a same-file conflict was resolved. See `onConflict`. */
   private readonly _onConflict?: (reports: FsConflictReport[]) => void;
 
+  /**
+   * Everything this folder has signalled, bounded and countable.
+   *
+   * Seeded from {@link SIGNAL_LOG_FILE} on the first write rather than in the
+   * constructor, because the constructor does no I/O and a host may construct
+   * an agent for a folder that does not exist yet.
+   */
+  private readonly _signals = new FsSignals();
+
+  /** Whether {@link SIGNAL_LOG_FILE} has been read back yet this process. */
+  private _signalsRestored = false;
+
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
 
@@ -1172,6 +1208,7 @@ export class FsAgent {
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._onConflict = options.onConflict;
+    if (options.onSignal) this._signals.subscribe(options.onSignal);
     // Bucket sync is on unless a caller turns it off. It used to default to
     // "on unless this build speaks the old wire format", and there is no old
     // wire format any more — nothing is in production, so nothing has to be
@@ -1193,7 +1230,15 @@ export class FsAgent {
         // Or the notification becomes content: every conflict would write a
         // file inside the synced folder, which is a change, which propagates,
         // which every peer then rewrites with its own copy of the log.
+        //
+        // ADDING A FILE HERE IS ADDING A LINE HERE. The signal log was written
+        // without this entry and ten tests across seven files went red at once
+        // — modification propagation, deletion propagation, the mass-delete
+        // guard, `differingPaths`. Not one of them mentions a log: a folder that
+        // writes a file to itself on every event never stops changing, so every
+        // assertion about what a folder contains becomes a race.
         CONFLICT_LOG_FILE,
+        SIGNAL_LOG_FILE,
         // And the set-aside copies, for the same reason one level up: they are
         // deliberately NOT announced, which a tree ref cannot express about a
         // file inside the folder it describes. See `RECOVERED_DIR`.
@@ -1266,6 +1311,56 @@ export class FsAgent {
    * promptly, not a reason to persist it: the refusal repeats on the next
    * announcement, so the list refills on its own.
    */
+  /**
+   * Everything that happened to this folder that a person might care about,
+   * oldest first — see {@link FsSignal}.
+   *
+   * Seeded from {@link SIGNAL_LOG_FILE} the first time it is read, so a host
+   * that starts after the event still sees it. Bounded; {@link signalTotals}
+   * keeps the count of what was dropped.
+   * @returns The signals kept.
+   */
+  get signals(): readonly FsSignal[] {
+    this._restoreSignals();
+    return this._signals.all;
+  }
+
+  /**
+   * The signals a person still has to act on — `action: 'required'`.
+   *
+   * The list a UI should surface. Everything else is a record of something the
+   * agent already dealt with.
+   * @returns The unresolved signals.
+   */
+  get signalsNeedingAction(): readonly FsSignal[] {
+    this._restoreSignals();
+    return this._signals.needingAction;
+  }
+
+  /**
+   * How many signals of each kind this folder has EVER produced.
+   *
+   * Not bounded by the log, so a folder that produced two thousand refusals
+   * still says two thousand after the oldest are dropped.
+   * @returns Counts keyed by {@link FsSignalKind}.
+   */
+  get signalTotals(): Readonly<Record<string, number>> {
+    this._restoreSignals();
+    return this._signals.totals();
+  }
+
+  /**
+   * Subscribes to signals as they happen.
+   *
+   * The same channel as the `onSignal` option, for a host that wants to attach
+   * later or more than once.
+   * @param listener - Called once per signal.
+   * @returns Unsubscribes.
+   */
+  onSignal(listener: (signal: FsSignal) => void): () => void {
+    return this._signals.subscribe(listener);
+  }
+
   get refusedDeletions(): readonly RefusedDeletion[] {
     return this._refusedDeletions;
   }
@@ -1481,12 +1576,133 @@ export class FsAgent {
         `${this._tag} CONFLICT on "${report.path}": kept both — the other ` +
           `version is at "${report.copyPath}"`,
       );
+      // `review`, not `required`: both versions are on disk and the folder has
+      // converged, so nothing is broken — but a file called
+      // `… (conflicted copy …)` is somebody's work waiting to be merged by
+      // hand, and that is exactly what no surface used to say out loud.
+      this._signal({
+        kind: 'conflict/merged',
+        paths: [report.path],
+        action: 'review',
+        decidedBy: 'chain',
+        copyPath: report.copyPath,
+        detail:
+          `two machines edited "${report.path}"; both versions were kept and ` +
+          `the other one is at "${report.copyPath}"`,
+      });
     }
     try {
       this._onConflict?.(reports as FsConflictReport[]);
     } catch (err) {
       // A host's listener throwing is the host's problem, not the merge's.
       this._writeSyncError('conflicts/onConflict', err);
+    }
+  }
+
+  /**
+   * Records one signal, tells subscribers, and persists the log.
+   *
+   * **Never throws.** A notification that cannot be filed must not take the
+   * operation it describes with it — the same rule the conflict log learned.
+   * Nothing about a sync depends on anybody being told.
+   * @param input - What happened; see {@link FsSignal}.
+   */
+  private _signal(input: Parameters<FsSignals['add']>[0]): void {
+    this._restoreSignals();
+    this._signals.add(input);
+    this._persistSignals();
+  }
+
+  /**
+   * Reports what joining a network did to this folder.
+   *
+   * **The case a person is most likely to ask about**, and it had no channel at
+   * all: a machine rejoining with files the network has since deleted, or with
+   * its own edits of paths that moved on — a restored backup, a laptop back
+   * from a fortnight away. Nothing is lost either way, because the files are
+   * moved aside rather than removed. But a folder that quietly grows a
+   * `.fsagent-recovered/` directory is unexplainable from outside the machine,
+   * and a line in that machine's console is not an answer.
+   *
+   * Extracted from the join body so it can be tested without standing up a
+   * chain, a db and a peer — the emission is a separate concern from deciding
+   * what to emit about.
+   * @param recovered - Paths moved aside because the history removed them.
+   * @param conflicted - Paths edited here while away and changed elsewhere.
+   */
+  private _signalJoinOutcome(
+    recovered: readonly string[],
+    conflicted: readonly string[],
+  ): void {
+    if (recovered.length > 0) {
+      this._signal({
+        kind: 'join/recovered',
+        paths: recovered,
+        action: 'review',
+        decidedBy: 'chain',
+        detail:
+          `${recovered.length} file(s) this machine still held had been ` +
+          `deleted by the network, so they were moved into ${RECOVERED_DIR}/ ` +
+          `rather than deleted`,
+      });
+    }
+    if (conflicted.length > 0) {
+      this._signal({
+        kind: 'join/conflicted',
+        paths: conflicted,
+        action: 'review',
+        decidedBy: 'chain',
+        detail:
+          `${conflicted.length} file(s) were edited on this machine while it ` +
+          `was away and also changed on the network; both versions were kept`,
+      });
+    }
+  }
+
+  /**
+   * Records a standing condition at most once per agent.
+   * @param key - What is being reported once.
+   * @param input - What happened.
+   */
+  private _signalOnce(
+    key: string,
+    input: Parameters<FsSignals['add']>[0],
+  ): void {
+    this._restoreSignals();
+    if (this._signals.addOnce(key, input) !== undefined) {
+      this._persistSignals();
+    }
+  }
+
+  /**
+   * Reads {@link SIGNAL_LOG_FILE} back, once.
+   *
+   * Lazily rather than in the constructor, which does no I/O: a host may
+   * construct an agent for a folder that is created later, and a signal log is
+   * never worth failing a construction over.
+   */
+  private _restoreSignals(): void {
+    if (this._signalsRestored) return;
+    this._signalsRestored = true;
+    try {
+      const file = join(this._rootPath, SIGNAL_LOG_FILE);
+      if (!existsSync(file)) return;
+      this._signals.restore(JSON.parse(readFileSync(file, 'utf-8')));
+    } catch (err) {
+      this._writeSyncError('signals/restore', err);
+    }
+  }
+
+  /** Writes the signal log, best effort. */
+  private _persistSignals(): void {
+    try {
+      writeFileSync(
+        join(this._rootPath, SIGNAL_LOG_FILE),
+        JSON.stringify(this._signals.persisted(), null, 1),
+        'utf-8',
+      );
+    } catch (err) {
+      this._writeSyncError('signals/persist', err);
     }
   }
 
@@ -1996,6 +2212,21 @@ export class FsAgent {
     // becomes acceptable. Reporting it first would hide a problem somebody
     // can actually act on behind one they cannot.
     if (this._restoreImpossible.length > 0) {
+      // `required`, and the only other signal that earns it. A lock clears and
+      // a blob arrives later, so neither of those needs a person. A name this
+      // filesystem rejects never becomes acceptable: the file will not appear
+      // on this machine until somebody renames it somewhere else. Signalled
+      // BEFORE the throw, because the throw is what the caller sees and this is
+      // what a UI can show.
+      this._signal({
+        kind: 'path/unwritable',
+        paths: [...this._restoreImpossible],
+        action: 'required',
+        detail:
+          `${this._restoreImpossible.length} path(s) cannot be written on ` +
+          `this machine — too long, a reserved name, or otherwise rejected by ` +
+          `the filesystem. They will not arrive until they are renamed.`,
+      });
       throw new UnwritablePathError([...this._restoreImpossible].sort());
     }
   }
@@ -4405,6 +4636,7 @@ export class FsAgent {
           `${plan.conflict.length} edited while away as conflict copies`,
       );
     }
+    this._signalJoinOutcome(plan.recover, plan.conflict);
     console.log(
       `${this._tag} joining onto head=${entry.head.slice(0, 8)}…: ` +
         `writing ${plan.write.length}, keeping ${plan.announce.length} of ` +
@@ -5027,13 +5259,49 @@ export class FsAgent {
     // tombstones, so the peer acts on them in its own round. Naming it in the
     // plan is what makes the omission deliberate rather than forgotten.
     if (plan.conflict.length > 0) {
-      // NAMED, not resolved. Both sides edited the same file, which no
-      // additive step can settle — the ordinary conflict resolver owns it.
+      // NAMED, not resolved by this step. Both sides edited the same file; the
+      // ordinary conflict resolver owns keeping the loser's bytes.
       console.warn(
         `${this._tag} bucket-sync: ${plan.conflict.length} path` +
           `${plan.conflict.length === 1 ? '' : 's'} edited on both sides: ` +
           `${plan.conflict.slice(0, 3).join(', ')}`,
       );
+      // SPLIT BY HOW IT WAS DECIDED, which is the whole reason the verdict
+      // travels. A path settled from the chain is a fact; one settled on the
+      // content hash converges and is otherwise arbitrary, and only the second
+      // is worth putting in front of a person. Reported in two signals rather
+      // than one per path, because a round can name hundreds and a caller
+      // wants the shape before the detail.
+      const byVerdict = new Map<FsSignalDecidedBy, string[]>();
+      for (const path of plan.conflict) {
+        // OPTIONAL CHAINING ON A FIELD THE TYPE SAYS IS REQUIRED, deliberately.
+        // `reconcile` always fills it, but this method is reachable with a plan
+        // built somewhere else — a test, a host driving the apply, a plan that
+        // crossed a version boundary — and indexing an absent map throws where
+        // the worst honest outcome is "nobody said how this was decided".
+        // Falling back to `'hash'` rather than `'chain'` because claiming a
+        // chain verdict nobody established is the one wrong answer here.
+        const verdict: FsSignalDecidedBy =
+          plan.conflictDecidedBy?.[path] ?? 'hash';
+        const list = byVerdict.get(verdict);
+        if (list === undefined) byVerdict.set(verdict, [path]);
+        else list.push(path);
+      }
+      for (const [verdict, paths] of byVerdict) {
+        this._signal({
+          kind: verdict === 'chain' ? 'conflict/merged' : 'conflict/arbitrary',
+          paths,
+          action: 'review',
+          decidedBy: verdict,
+          detail:
+            verdict === 'chain'
+              ? `${paths.length} path(s) edited on both sides; the newer edit ` +
+                `kept the path`
+              : `${paths.length} path(s) edited on both sides with nothing to ` +
+                `say which edit came last, so the winner was chosen ` +
+                `${verdict === 'claim' ? 'by who claims the path' : 'arbitrarily'}`,
+        });
+      }
     }
   }
 
@@ -5133,6 +5401,21 @@ export class FsAgent {
     while (this._refusedDeletions.length > REFUSED_DELETION_LOG_MAX) {
       this._refusedDeletions.shift();
     }
+    // The ONLY `required` signal the agent produces, and it has to be: nothing
+    // in this package will ever resolve it. The deletion does not arrive, the
+    // folders stay split, and no further message closes the gap — a person has
+    // to decide whether the deletion was real. `guard`, because nothing chose
+    // between two versions here; a rule declined to act at all.
+    this._signal({
+      kind: 'deletion/refused',
+      paths,
+      action: 'required',
+      decidedBy: 'guard',
+      detail:
+        `${route} would have removed ${wouldRemove} of ${held} files, so ` +
+        `nothing was deleted. If the deletion is real it has to be applied ` +
+        `deliberately.`,
+    });
   }
 
   /**
@@ -5779,6 +6062,36 @@ export class FsAgent {
             'nothing reconciles them)',
         ),
       );
+      // ONCE per agent, not per sync. This is a standing fact about how the
+      // host wired the transport, so repeating it every cycle would bury every
+      // signal that describes an actual event. It is `review` rather than
+      // `required` because the folder still syncs — it just keeps less than it
+      // could, and only whoever configured it can change that.
+      this._signalOnce('config/causalOrdering', {
+        kind: 'config/degraded',
+        paths: [],
+        action: 'review',
+        detail:
+          'syncConfig.causalOrdering is not true, so the wire carries no ' +
+          'ancestry and conflicting edits to one file are never merged. ' +
+          'Turn causalOrdering on.',
+      });
+    }
+    if (!this._resolveConflicts) {
+      // The other half of the same question, and the more serious one: with no
+      // resolver the losing version of a same-file conflict is not kept at all.
+      // A hub is meant to run this way — it relays and must not arbitrate — so
+      // this says what the configuration costs rather than calling it wrong.
+      this._signalOnce('config/resolveConflicts', {
+        kind: 'config/degraded',
+        paths: [],
+        action: 'review',
+        detail:
+          'resolveConflicts is off, so no resolver is constructed and the ' +
+          'losing version of a same-file conflict is not kept. Correct for a ' +
+          'hub, which relays without arbitrating; on a client it means one ' +
+          "person's edit can be overwritten without a copy.",
+      });
     }
 
     // Before any announcement can arrive: a node that only receives still has
@@ -6899,6 +7212,24 @@ export class FsAgent {
         (pendingRef !== null && pendingRef !== hubRef) ||
         processing ||
         this._remoteApplyInFlight,
+      // A divergence nothing can repair without losing work.
+      //
+      // Keyed on the PAIR of refs, which is the lesson the content-agreement
+      // memo cost: keying on the hub's ref alone reports the same deadlock
+      // again every time this node moves, and keying on ours alone reports it
+      // again every time the hub does. The pair changes only when the situation
+      // does.
+      onBlocked: (hubRef, localRef) =>
+        this._signalOnce(`blocked\u0000${hubRef}\u0000${localRef}`, {
+          kind: 'repair/blocked',
+          paths: [],
+          action: 'review',
+          detail:
+            `this machine and the network disagree and the history cannot say ` +
+            `which is ahead, so no repair is safe to run. It is retried as ` +
+            `more history arrives; if it persists, the two folders have to be ` +
+            `reconciled by hand.`,
+        }),
       // Does that ref describe the folder this node already has?
       //
       // A state beacon carries a ref and nothing else, and unlike a ref event

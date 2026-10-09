@@ -388,6 +388,16 @@ export interface AntiEntropyDeps {
    */
   busy: (hubRef: string) => boolean;
   /**
+   * Told when a divergence was found that cannot be repaired.
+   *
+   * Optional, so a caller that only wants repairs is unaffected. It fires on
+   * every retry — the decision is re-asked on each announcement — so whoever
+   * listens has to deduplicate; the agent keys on the pair of refs, because
+   * keying on one side reports the same deadlock again every time the other
+   * moves.
+   */
+  onBlocked?: (hubRef: string, localRef: string) => void;
+  /**
    * Starts a repair.
    * @param action - What to do.
    * @param hubRef - The state the hub announced.
@@ -782,7 +792,10 @@ export class FsAntiEntropy {
     // arrived. It is counted out of `repairs` because nothing was repaired,
     // and it is visible in `lastRepair.action` because a node stuck this way
     // must be diagnosable.
-    if (decision === 'blocked') return;
+    if (decision === 'blocked') {
+      this._deps.onBlocked?.(hubRef, view.currentRef as string);
+      return;
+    }
 
     this._repairs++;
     this._deps.repair(decision, hubRef, [...hubPredecessors], this._attempts);
