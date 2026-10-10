@@ -62,11 +62,9 @@ a silent hang and an unbounded list is tomorrow's memory ceiling.
 | why a node does not echo itself | [Bounce-Back Prevention](#bounce-back-prevention) |
 | how a lost message heals | [Anti-Entropy](#anti-entropy-srcfs-anti-entropyts) |
 | why two folders agree on one ref | [One Folder, One Ref](#one-folder-one-ref--the-canonical-child-order) |
-| how a divergence is repaired without replacing a folder | [Additive Reconciliation](#additive-reconciliation-fs-manifestts--fs-bucket-syncts) |
 | why a node sometimes gives no verdict about itself | [A Verdict Is Only About This Folder](#a-verdict-is-only-about-this-folder-while-the-head-names-it) |
 | how a deletion travels | [A Delete Travels as a Fact](#a-delete-travels-as-a-fact-collectremovals--planremovals) |
-| what a host application is told, and when a person must act | [One Channel For Everything](#one-channel-for-everything-that-happened-srcfs-signalsts) |
-| why a big deletion is refused, and how to find out | [Refused Deletions Are Reported](#refused-deletions-are-reported-not-only-logged-fsagentrefuseddeletions) |
+| what a host application is told, when a person must act, and why a big deletion is refused | [One Channel For Everything](#one-channel-for-everything-that-happened-srcfs-signalsts) |
 | what a restart remembers | [Tombstone Log](#tombstone-log-_pendingdeletes--fsagent-statejson) |
 | why an older edit cannot beat a newer one | [Ordering Every Difference](#ordering-every-difference-by-when-it-happened-manifestentryeditedat) |
 | the history itself | [Edit Chain](#edit-chain-srcfs-edit-chaints) |
@@ -1005,13 +1003,11 @@ assertion in `test/mesh/fs-mesh.spec.ts`, measured **8 of 8** under
 
 ## One Channel For Everything That Happened (`src/fs-signals.ts`)
 
-The agent knew more than it said. A same-file merge reported itself through
-`onConflict`, a mass-delete refusal through `refusedDeletions`, and **everything
-else that touched a user's folder went to `console.warn`** — a bucket round
-settling two edits, a joining machine moving files into `.fsagent-recovered/`, a
-path the filesystem rejected, a configuration that keeps less than it could. A
-host cannot grep a log on a machine it is not running on, and *"why is my file
-called (conflicted copy …)"* is a question it has to answer.
+Everything that touches a user's folder is reported here, and only here: a
+same-file merge, a refused deletion, a joining machine moving files into
+`.fsagent-recovered/`, a path the filesystem rejected. A host cannot grep a log
+on a machine it is not running on, and *"why is my file called (conflicted copy
+…)"* is a question it has to answer.
 
 ### Three facts, and the third is the new one
 
@@ -1082,48 +1078,13 @@ A `kind` this build has never heard of is **kept**: an unknown kind is still a
 true record of something that happened, and dropping it would make a downgrade
 lose history it could have shown.
 
-### What stayed
-
-`onConflict`, `refusedDeletions`, `.fsagent-conflicts.json` and
-`.sync-errors.log` are unchanged and still fire. The signal channel is additive,
-the 0.1.0 tests that pin those surfaces are still in the suite, and a host
-written against 0.1.0 keeps working — see
-[README.api.md § Migrating from 0.1.0](README.api.md#migrating-from-010).
+`.sync-errors.log` stays the keyed record of internal failures — exceptions,
+which are not signals.
 
 **Tested by** `test/fs-signals.spec.ts` (the sink, without a filesystem) and
 `test/fs-agent-signals.spec.ts` (one case per producer, asserting the fields
 rather than that something was emitted — a signal with the right kind and the
 wrong `action` is worse than none, because it gets filtered into silence).
-
-## Refused Deletions Are Reported, Not Only Logged (`FsAgent.refusedDeletions`)
-
-The mass-delete guard refuses any incoming deletion that would remove most of a
-folder, on three routes — an incoming whole tree, a bucket round's drop list,
-and a peer's stated removals. It refuses on **every** node, so a user who
-deletes 10 000 files on purpose ends up with one machine short of them and the
-rest unchanged, and no further message closes that gap.
-
-The guard is right anyway, because the two cases are indistinguishable from
-inside this package: a machine that was wiped telling the fleet to wipe, and a
-person deleting a project. Both arrive as "most of the folder is gone". The
-guard exists because the first one happened — a peer that had been emptied
-produced a round dropping **39 of 40** files, and before the floors covered
-that shape, 39 files were deleted on every node with no refusal logged at all.
-
-What changed is that the refusal is now **readable**. One place
-(`_refuseDeletion`) reports it three ways, so they cannot drift apart as the
-three copies had:
-
-| where | what it carries |
-| --- | --- |
-| the log | `MASS DELETE REFUSED on <folder>: <route> would remove N of M files.` |
-| `.sync-errors.log` | the key `restore/`, `bucketSync/` or `removals/massDeleteGuard` |
-| the API | `FsAgent.refusedDeletions` — `{ atMs, route, wouldRemove, held, paths }` |
-
-A UI cannot grep a log on a machine it is not running on, and *"why did my
-deletion not arrive"* is exactly the question it has to answer. Fixing it
-properly is a product decision — an approval path — and until that exists the
-refusal is the correct behaviour and the gap is a missing dialog.
 
 ## Tombstone Log (`_pendingDeletes` + `.fsagent-state.json`)
 
@@ -1492,10 +1453,11 @@ machine genuinely made.
 
 ### Telling somebody
 
-`onConflict` fires with the reports as they are resolved, for a UI that is
-running now. `.fsagent-conflicts.json` records them, bounded, for one that
-starts later. Both, not either — a conflict nobody hears about is the thing this
-exists to prevent, so it does not depend on anyone having subscribed.
+Each resolved conflict is one `conflict/*` signal naming the path and where the
+other version went: delivered to `onSignal` for a UI that is running now, and
+kept in `.fsagent-signals.json` for one that starts later. A refused deletion is
+a `deletion/refused` signal marked `required` — nothing in this package will
+ever resolve it, so a person has to.
 
 ## Joining a Network (`planJoin`)
 

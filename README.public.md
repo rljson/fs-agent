@@ -114,8 +114,9 @@ const agent = new FsAgent('./my-project', new BsMem(), {
   // a conflicting edit is never merged.
   resolveConflicts: true,
 
-  // Told, not discovered: where a conflict is reported to a user.
-  onConflict: (reports) => console.warn('conflict', reports),
+  // Told, not discovered: everything a person might care about, from a
+  // conflict to a refused deletion.
+  onSignal: (signal) => console.warn(signal.kind, signal.paths),
 
   // So a restart does not re-read and re-hash the whole folder.
   scanCachePath: '.cache/fs-agent-scan.json',
@@ -224,7 +225,6 @@ costs.
 | option | default | what it does |
 | --- | --- | --- |
 | `resolveConflicts` | `false` on the constructor, **`true` via `fromClient`** | Reconciles two edits to one file, keeping the loser as a renamed copy. Off, a conflicting edit is never merged — the resolver is not even constructed. The constructor keeps the primitive default because a hub may relay without arbitrating |
-| `onConflict` | — | Called with the conflict reports. Without it a conflict is resolved and nobody is told |
 | `joinWaitMs` | `1500` | How long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
 | `antiEntropy` | `DEFAULT_ANTI_ENTROPY` | The periodic comparison that heals a lost announcement. A machine that is behind **asks**, rather than waiting to be told |
 | `syncConfig` | **`causalOrdering` and `includeClientIdentity` default to `true` via `fromClient`** | Forwarded to every `Connector` the agent builds. Without `causalOrdering` the wire carries no predecessor refs, so no conflicting edit can be merged — the agent warns once, loudly |
@@ -370,11 +370,8 @@ in [README.api.md § Signals](README.api.md#signals--what-happened-to-the-folder
 | --- | --- |
 | `agent.stageTimings` | milliseconds per stage of the **last** cycle — scan, hash, store, announce, fetch, write, re-derive. A total says a run was slow; this says where |
 | `agent.antiEntropyStatus` | whether this machine agrees with the hub, and what it last did about it |
-| `agent.refusedDeletions` | deletions the mass-delete guard **refused**, newest last — `{ atMs, route, wouldRemove, held, paths }`. Read this to answer "why did my deletion not arrive": the guard refuses on every machine, so a deliberate mass deletion stalls the whole fleet and the only other trace is a line in each machine's log. Bounded at `REFUSED_DELETION_LOG_MAX`, in memory, and it refills on the next announcement |
 | `agent.scanner.onChange(cb)` | every filesystem event the scanner accepted |
-| `onConflict` | same-file conflicts, as they are resolved. Still supported; `onSignal` above is the superset |
-| `SYNC_ERROR_FILE` | `.sync-errors.log` in the folder: a keyed, append-only record of every refusal and failure — a locked file, an unfetchable blob, an impossible path, a refused mass deletion |
-| `.fsagent-conflicts.json` | resolved conflicts, bounded |
+| `SYNC_ERROR_FILE` | `.sync-errors.log` in the folder: a keyed, append-only record of internal failures — a locked file, an unfetchable blob, an impossible path. A refused mass deletion is a signal, not an error |
 | `.fsagent-signals.json` | every signal, bounded, plus the per-kind totals that are not |
 | `.fsagent-recovered/` | files a join kept but deliberately did not announce |
 | `.fsagent-state.json` | what this machine remembers across restarts: the state it was last at, the paths it deleted, and **when each path was last edited**. The edit times are what let a peer's tombstone be ordered against the write it claims to supersede — a machine that has forgotten them sends no time, and the comparison has one operand |
@@ -427,7 +424,8 @@ rewriting a whole catalogue.
 - **split a large file into blocks.** A file transfers whole, so the transport's
   message limit is the per-file ceiling;
 - **let you approve a mass deletion.** One that looks like a loss is refused
-  and reported through `agent.refusedDeletions`; there is no override yet;
+  and reported as a `deletion/refused` signal marked `required`; there is no
+  override yet;
 - **collect garbage.** Every superseded version stays on every machine;
 - **promise a latency.** Nothing in the suite asserts an arrival deadline, so
   nothing here should be read as one;
@@ -463,7 +461,7 @@ rewriting a whole catalogue.
 merged. Set it on the `Connector`.
 
 **A conflict happened and nobody was told.** `resolveConflicts` defaults to
-`false`. Set it `true` and pass `onConflict`.
+`false`. Set it `true` and read `agent.signals` (or pass `onSignal`).
 
 **An ignore pattern does nothing.** With no `*`, `?` or `/` it is a *prefix*,
 not a glob: `exe` ignores files starting with `exe`, while `*.exe` is what
@@ -517,7 +515,7 @@ would select two different consistency models.
 
 **A deliberate mass deletion does not arrive.** Deleting most of a folder is
 refused on every machine, and nothing asks the user — see "what it does not do"
-above. Read `agent.refusedDeletions` to find out it happened: the guard cannot
+above. Read `agent.signalsNeedingAction` to find out it happened: the guard cannot
 tell a person deleting a project from a machine that was wiped telling the fleet
 to wipe, and the second one is why the guard exists.
 

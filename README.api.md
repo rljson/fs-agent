@@ -66,7 +66,6 @@ and what each one costs — this table is the shape, that one is the advice.
 | field | type | |
 | --- | --- | --- |
 | `resolveConflicts` | `boolean` | reconcile two edits of one file, keeping the loser as a renamed copy. Off, the resolver is not even constructed |
-| `onConflict` | `(reports) => void` | called as conflicts are resolved; without it they are resolved silently |
 | `joinWaitMs` | `number` | how long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
 | `antiEntropy` | `AntiEntropyOptions` | the periodic comparison that heals a lost announcement |
 | `syncConfig` | `SyncConfig` | forwarded to every `Connector`. Without `causalOrdering` the wire carries no predecessors and no conflicting edit can be merged |
@@ -171,58 +170,14 @@ several agents can own one and feed it from each `onSignal`. It holds no
 filesystem state, so the agent writes the file and this stays testable without
 one.
 
-### Migrating from 0.1.0
-
-Nothing is removed and nothing changes behaviour — `onConflict`,
-`refusedDeletions`, `.fsagent-conflicts.json` and `.sync-errors.log` all work
-exactly as before, and the tests that pin them are still in the suite. The
-signal channel is a superset:
-
-| if you read | you can now read | and you additionally get |
-| --- | --- | --- |
-| `onConflict` | `onSignal` / `signals` | bucket-round conflicts, join outcomes, refusals, unwritable paths, configuration problems |
-| `refusedDeletions` | `signalsNeedingAction` | the same refusals plus anything else a person must act on, in one list |
-| `.sync-errors.log` (parsing) | `signals` | a typed record instead of text, with `action` and `decidedBy` |
-
-A minimal host needs one subscription and one list:
-
-```ts
-const agent = await FsAgent.fromClient(folder, 'fileTree', client, socket, {
-  onSignal: (signal) => inbox.push(signal),
-});
-
-// …and on start, for anything that happened while the UI was down:
-for (const signal of agent.signalsNeedingAction) inbox.push(signal);
-```
-
-`ReconcilePlan` gains `conflictDecidedBy` (a `path → verdict` map). `conflict`
-keeps its shape, so a caller reading it is unaffected.
-
 ## Observability
 
 | member | type | |
 | --- | --- | --- |
 | `agent.antiEntropyStatus` | `AntiEntropyStatus \| null` | whether this machine agrees with the hub, since when, and what it last did |
-| `agent.refusedDeletions` | `readonly RefusedDeletion[]` | deletions the mass-delete guard refused, newest last |
 | `agent.stageTimings` | `Record<string, number>` | milliseconds per stage of the **last** cycle. A total says a run was slow; this says where |
 | `agent.scanner.onChange(cb)` | `() => void` | every filesystem event the scanner accepted |
-| `SYNC_ERROR_FILE` | `'.sync-errors.log'` | keyed, append-only record of every refusal and failure |
-| `REFUSED_DELETION_LOG_MAX` | `20` | how many refusals `refusedDeletions` keeps |
-
-### `interface RefusedDeletion`
-
-```ts
-{ atMs: number;
-  route: 'restore' | 'removals';
-  wouldRemove: number;
-  held: number;
-  paths: readonly string[]; }
-```
-
-The guard refuses on **every** machine, so a deliberate mass deletion stalls the
-whole fleet and the only other trace is a line in each machine's log — which a
-UI on another machine cannot read. `route` matches the sync-error key. `paths`
-holds the first ten, which is enough to name the folder and ask the user.
+| `SYNC_ERROR_FILE` | `'.sync-errors.log'` | keyed, append-only record of internal failures (a refusal is a signal, not an error) |
 
 ### `interface AntiEntropyStatus`
 
