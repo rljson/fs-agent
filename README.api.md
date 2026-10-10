@@ -212,6 +212,7 @@ new FsEditChain(db: Db, treeKey: string)
 | `oldestEntryForTreeRef(treeRef)` | `Promise<FsChainEntry \| undefined>` | the other end of that ambiguity |
 | `refreshHead()` | `Promise<string \| undefined>` | re-read the tip from the table |
 | `classify(ourHead, theirHead)` | `Promise<Reachability>` | `behind` · `ahead` · `fork` · `incomplete` |
+| `relate(ours, theirs, maxWalk?)` | `Promise<{ verdict, base? }>` | as `classify`, plus `same`, and for a `fork` the `base` to merge against: a common ancestor no other common ancestor descends from, the smallest ref when there are several. A descent found is proof even where another part of the history cannot be read |
 | `lastEditOf(head, path, maxWalk?)` | `Promise<FsChainEntry \| undefined>` | the newest Edit mentioning a path, in `changed` **or** `removed`. Nearest to the head wins; ties break on `timeId` |
 | `collectRemovals(...)` | `Promise<…>` | the removals stated between two points |
 

@@ -466,6 +466,90 @@ export class FsEditChain {
   }
 
   /**
+   * How two heads stand, and for a fork the ancestor to merge against.
+   *
+   * `same` — the one head. `behind` — theirs descends from ours. `ahead` —
+   * ours descends from theirs. A descent found is proof, whatever else in
+   * either history cannot be read. `fork` — neither descends from the other:
+   * `base` is a common ancestor no other common ancestor descends from, the
+   * smallest ref of them when there are several, so every node merging the
+   * same two heads merges against the same base. `undefined` when the two
+   * share no history within the walk. `incomplete` — no descent was found and
+   * an entry could not be read, so a fork cannot be told from a lag.
+   *
+   * A walk that exhausts `maxWalk` with everything readable answers `fork`,
+   * as {@link classify} does: less precise than the truth, never destructive.
+   * @param ours - This node's head.
+   * @param theirs - The head that arrived.
+   * @param maxWalk - Give up past this many entries per side.
+   * @returns The relation, and the merge base of a fork.
+   */
+  async relate(
+    ours: string,
+    theirs: string,
+    maxWalk = DEFAULT_MAX_WALK,
+  ): Promise<
+    | { verdict: 'same' | 'behind' | 'ahead' | 'incomplete' }
+    | { verdict: 'fork'; base: string | undefined }
+  > {
+    if (ours === theirs) return { verdict: 'same' };
+    const fromTheirs = await this._parentsOf(theirs, maxWalk);
+    if (fromTheirs.parents.has(ours)) return { verdict: 'behind' };
+    const fromOurs = await this._parentsOf(ours, maxWalk);
+    if (fromOurs.parents.has(theirs)) return { verdict: 'ahead' };
+    if (fromTheirs.holed || fromOurs.holed) return { verdict: 'incomplete' };
+
+    const common = [...fromOurs.parents.keys()].filter((ref) =>
+      fromTheirs.parents.has(ref),
+    );
+    // Every ancestor of a common ancestor is common too, so a ref met on the
+    // way down from one has been dealt with on the way down from any other.
+    const dominated = new Set<string>();
+    for (const ref of common) {
+      const stack = [...(fromOurs.parents.get(ref) as string[])];
+      while (stack.length > 0) {
+        const below = stack.pop() as string;
+        if (dominated.has(below)) continue;
+        dominated.add(below);
+        stack.push(...(fromOurs.parents.get(below) ?? []));
+      }
+    }
+    const best = common.filter((ref) => !dominated.has(ref)).sort();
+    return { verdict: 'fork', base: best[0] };
+  }
+
+  /**
+   * The `previous` of every entry reachable from `head`, by generation.
+   * @param head - Where to start.
+   * @param maxWalk - Give up past this many entries.
+   * @returns Each entry read, mapped to its parents, and whether an entry
+   *   could not be read.
+   */
+  private async _parentsOf(
+    head: string,
+    maxWalk: number,
+  ): Promise<{ parents: Map<string, string[]>; holed: boolean }> {
+    const parents = new Map<string, string[]>();
+    let holed = false;
+    let frontier = [head];
+    while (frontier.length > 0 && parents.size < maxWalk) {
+      const next: string[] = [];
+      for (const ref of new Set(frontier)) {
+        if (parents.has(ref)) continue;
+        const entry = await this.entry(ref);
+        if (!entry) {
+          holed = true;
+          continue;
+        }
+        parents.set(ref, entry.previous);
+        next.push(...entry.previous);
+      }
+      frontier = next;
+    }
+    return { parents, holed };
+  }
+
+  /**
    * Every entry reachable from `head`, itself included.
    *
    * `holed` — an entry could not be RESOLVED. The caller must conclude
