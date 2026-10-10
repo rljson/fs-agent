@@ -409,11 +409,6 @@ export const buildFsMesh = async (opts: {
   treeKey?: string;
   antiEntropy?: AntiEntropyOptions;
   seed?: (folders: Record<string, string>) => Promise<void>;
-  /**
-   * Answer a divergence with an ADDITIVE bucket-sync round instead of
-   * replacing a folder. `FsAgentOptions.bucketSync` on every node.
-   */
-  bucketSync?: boolean;
 
   /**
    * `FsAgentOptions.joinWaitMs` on every node.
@@ -560,11 +555,6 @@ export const buildFsMesh = async (opts: {
       },
       antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
       timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
-      // Undefined, not `false`. Passing `false` here overrode the agent's own
-      // default and silently measured the OLD model: T4 ran at 3 of 8 while
-      // the identical scenario passed 8 of 8 elsewhere, for no reason but
-      // this line.
-      bucketSync: opts.bucketSync,
       // ZERO unless a test asks. A mesh is built from scratch, so every node
       // in it IS the origin of its own history and has nothing to join — the
       // wait could only expire. The scenario that needs it is a node arriving

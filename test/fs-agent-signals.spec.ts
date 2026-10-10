@@ -310,9 +310,9 @@ describe('FsAgent — the signal channel', () => {
 
     it('still fills `refusedDeletions`, which 0.1.0 published', () => {
       const agent = anAgent();
-      refuse(agent, 'bucketSync', 39, 40, ['x.txt']);
+      refuse(agent, 'removals', 39, 40, ['x.txt']);
       expect(agent.refusedDeletions).toHaveLength(1);
-      expect(agent.refusedDeletions[0].route).toBe('bucketSync');
+      expect(agent.refusedDeletions[0].route).toBe('removals');
       expect(agent.signals).toHaveLength(1);
     });
 
@@ -324,132 +324,6 @@ describe('FsAgent — the signal channel', () => {
       expect(agent.signalTotals['deletion/refused']).toBe(30);
     });
   });
-
-  // ...........................................................................
-  describe('a bucket round settling two edits', () => {
-    // THE MOST COMMON CONFLICT ROUTE, and it had no channel at all before this.
-    // `bucketSync` is on by default, so this is what a contended folder
-    // actually produces — and it was a `console.warn` on the machine.
-    /**
-     * Drives the apply step with a plan, as a round would.
-     * @param agent - The agent.
-     * @param conflict - The conflicting paths.
-     * @param decidedBy - How each was settled.
-     */
-    const applyPlan = async (
-      agent: FsAgent,
-      conflict: string[],
-      decidedBy: Record<string, 'chain' | 'claim' | 'hash'>,
-    ): Promise<void> =>
-      (
-        agent as unknown as {
-          _applyReconcilePlan(
-            plan: unknown,
-            db: unknown,
-            treeKey: string,
-          ): Promise<void>;
-        }
-      )._applyReconcilePlan(
-        {
-          fetch: [],
-          drop: [],
-          redelete: [],
-          conflict,
-          conflictDecidedBy: decidedBy,
-        },
-        undefined,
-        'fsTree',
-      );
-
-    it('calls a chain verdict a merge', async () => {
-      const agent = anAgent();
-      await applyPlan(agent, ['a.txt'], { 'a.txt': 'chain' });
-
-      const [signal] = agent.signals;
-      expect(signal.kind).toBe('conflict/merged');
-      expect(signal.decidedBy).toBe('chain');
-      expect(signal.detail).toContain('the newer edit kept the path');
-    });
-
-    it('calls a HASH verdict arbitrary, which is the point of the field', async () => {
-      // Converged, and otherwise unrelated to who edited last. A caller that
-      // can see this can ask a person; one that cannot has to trust a coin
-      // flip — and two defects hid in exactly that blind spot.
-      const agent = anAgent();
-      await applyPlan(agent, ['a.txt'], { 'a.txt': 'hash' });
-
-      const [signal] = agent.signals;
-      expect(signal.kind).toBe('conflict/arbitrary');
-      expect(signal.decidedBy).toBe('hash');
-      expect(signal.detail).toContain('arbitrarily');
-    });
-
-    it('names the claim rule as its own, weaker verdict', async () => {
-      const agent = anAgent();
-      await applyPlan(agent, ['a.txt'], { 'a.txt': 'claim' });
-
-      const [signal] = agent.signals;
-      expect(signal.kind).toBe('conflict/arbitrary');
-      expect(signal.decidedBy).toBe('claim');
-      expect(signal.detail).toContain('by who claims the path');
-    });
-
-    it('groups a round by verdict rather than one signal per path', async () => {
-      // A round can name hundreds of paths. A caller wants the shape before the
-      // detail, and 200 signals for one round would evict everything else.
-      const agent = anAgent();
-      await applyPlan(agent, ['a.txt', 'b.txt', 'c.txt'], {
-        'a.txt': 'chain',
-        'b.txt': 'chain',
-        'c.txt': 'hash',
-      });
-
-      expect(agent.signals).toHaveLength(2);
-      const merged = agent.signals.find((s) => s.kind === 'conflict/merged');
-      const arbitrary = agent.signals.find(
-        (s) => s.kind === 'conflict/arbitrary',
-      );
-      expect(merged?.paths).toEqual(['a.txt', 'b.txt']);
-      expect(arbitrary?.paths).toEqual(['c.txt']);
-    });
-
-    it('survives a plan with NO verdict map at all', async () => {
-      // Reachable with a plan built somewhere other than `reconcile` — a test,
-      // a host driving the apply, a plan that crossed a version boundary.
-      // Indexing an absent map threw, which took the whole round with it.
-      const agent = anAgent();
-      await (
-        agent as unknown as {
-          _applyReconcilePlan(
-            plan: unknown,
-            db: unknown,
-            treeKey: string,
-          ): Promise<void>;
-        }
-      )._applyReconcilePlan(
-        { fetch: [], drop: [], redelete: [], conflict: ['a.txt'] },
-        undefined,
-        'fsTree',
-      );
-      expect(agent.signals[0].decidedBy).toBe('hash');
-    });
-
-    it('treats a path with no verdict as arbitrary', async () => {
-      // An older peer, or a plan built by something that does not fill the map.
-      // Assuming `chain` there would claim a fact nobody established.
-      const agent = anAgent();
-      await applyPlan(agent, ['a.txt'], {});
-      expect(agent.signals[0].kind).toBe('conflict/arbitrary');
-      expect(agent.signals[0].decidedBy).toBe('hash');
-    });
-
-    it('says nothing when a round settled nothing', async () => {
-      const agent = anAgent();
-      await applyPlan(agent, [], {});
-      expect(agent.signals).toEqual([]);
-    });
-  });
-
   // ...........................................................................
   describe('joining a network', () => {
     /**

@@ -811,37 +811,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
       expect(await classify(agent, 'theirTreeRef')).toBe('behind');
       expect(asked).toEqual(['headFromTheAnnouncement']);
     });
-
-    it('records a bucket round\'s agreement only against a hub ref', async () => {
-      // A round can finish after the announcement that prompted it has been
-      // superseded, or before any beacon has arrived. An agreement names both
-      // sides, so with nothing to name on the hub's side there is nothing to
-      // record — and recording it against `undefined` would mark every future
-      // announcement as agreed.
-      const told: string[] = [];
-      (agent as unknown as { _antiEntropy: unknown })._antiEntropy = {
-        status: { hubRef: undefined },
-        agreedOn: (r: string) => told.push(r),
-      };
-      (
-        agent as unknown as { _bucketRoundAgreed: () => void }
-      )._bucketRoundAgreed();
-      expect(told, 'an agreement was recorded with nothing to agree with').toEqual(
-        [],
-      );
-
-      (agent as unknown as { _antiEntropy: unknown })._antiEntropy = {
-        status: { hubRef: 'theHubsRef' },
-        agreedOn: (r: string) => told.push(r),
-      };
-      (
-        agent as unknown as { _bucketRoundAgreed: () => void }
-      )._bucketRoundAgreed();
-      expect(told, 'a proven agreement was not recorded').toEqual([
-        'theHubsRef',
-      ]);
-    });
-
     it('gives no verdict when the walk itself fails', async () => {
       // The chain is BEST EFFORT everywhere, and a walk that throws is not a
       // verdict. `incomplete` keeps a failed read from being mistaken for a
@@ -1041,143 +1010,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
       await expect(second).resolves.toBeUndefined();
     });
   });
-
-  // ...........................................................................
-  describe('the bucket fetch and a path this node deleted', () => {
-    // THIS PAIR IS ONE RULE SEEN FROM BOTH SIDES, and the first half used to
-    // assert the opposite.
-    //
-    // It read "does not fetch back a path this node has tombstoned", on the
-    // reasoning that the peer was simply behind and had not heard the deletion
-    // yet. That is true in one of the two cases and `reconcile` separates them
-    // before this method is reached: while OUR tombstone is the newer edit the
-    // path goes to `redelete`, and it reaches `fetch` only when the peer's write
-    // is provably newer than our deletion. Honouring the tombstone there left
-    // the deleting node permanently short of a file every peer held, still
-    // re-advertising a tombstone the fleet had moved past — measured on Linux at
-    // 6 runs in 8 of the churn fuzzer's seed 2.
-    it('fetches a path it tombstoned when the peer wrote it later', async () => {
-      const target = join(dir, 'deleted-here.txt');
-      const pending = priv<Set<string>>(agent, '_pendingDeletes');
-      pending.add(target);
-
-      const db = await aDb();
-      const bs = priv<{ setBlob(c: Buffer): Promise<{ blobId: string }> }>(
-        agent,
-        '_bs',
-      );
-      const { blobId } = await bs.setBlob(Buffer.from('written later'));
-
-      await callOnAgent(
-        agent,
-        '_applyReconcilePlan',
-        {
-          fetch: [['deleted-here.txt', blobId]],
-          drop: [],
-          redelete: [],
-          conflict: [],
-        },
-        db,
-        'fsTree',
-      );
-
-      expect(
-        existsSync(target),
-        'the peer’s newer write was refused by a tombstone that had lost',
-      ).toBe(true);
-      expect(
-        pending.has(target),
-        'the stale tombstone survived, so the next round would undo the fetch',
-      ).toBe(false);
-    });
-
-    it('names a lifted tombstone in the singular and the plural', async () => {
-      // The wording, both ways, because a count stitched into a sentence is the
-      // one thing a reader of the log sees and the one thing no behavioural
-      // assertion touches.
-      const db = await aDb();
-      const bs = priv<{ setBlob(c: Buffer): Promise<{ blobId: string }> }>(
-        agent,
-        '_bs',
-      );
-      const pending = priv<Set<string>>(agent, '_pendingDeletes');
-      const logs: string[] = [];
-      const spy = vi.spyOn(console, 'log').mockImplementation((...args) => {
-        logs.push(args.join(' '));
-      });
-      try {
-        const one = await bs.setBlob(Buffer.from('one'));
-        const two = await bs.setBlob(Buffer.from('two'));
-
-        pending.add(join(dir, 'lift-one.txt'));
-        await callOnAgent(
-          agent,
-          '_applyReconcilePlan',
-          {
-            fetch: [['lift-one.txt', one.blobId]],
-            drop: [],
-            redelete: [],
-            conflict: [],
-          },
-          db,
-          'fsTree',
-        );
-
-        pending.add(join(dir, 'lift-two.txt'));
-        pending.add(join(dir, 'lift-three.txt'));
-        await callOnAgent(
-          agent,
-          '_applyReconcilePlan',
-          {
-            fetch: [
-              ['lift-two.txt', two.blobId],
-              ['lift-three.txt', one.blobId],
-            ],
-            drop: [],
-            redelete: [],
-            conflict: [],
-          },
-          db,
-          'fsTree',
-        );
-      } finally {
-        spy.mockRestore();
-      }
-      const said = logs.join('\n');
-      expect(said).toContain('lifted 1 stale tombstone a peer');
-      expect(said).toContain('lifted 2 stale tombstones a peer');
-    });
-
-    it('keeps the tombstone where the plan says `redelete`', async () => {
-      // The other half. Our deletion is the newer edit, so `reconcile` asks us
-      // to re-assert it rather than to fetch — and re-asserting is exactly what
-      // our manifest already does, which is why there is nothing to do here but
-      // leave the file absent and the tombstone standing.
-      const target = join(dir, 'deleted-here.txt');
-      const pending = priv<Set<string>>(agent, '_pendingDeletes');
-      pending.add(target);
-
-      const db = await aDb();
-      await callOnAgent(
-        agent,
-        '_applyReconcilePlan',
-        {
-          fetch: [],
-          drop: [],
-          redelete: ['deleted-here.txt'],
-          conflict: [],
-        },
-        db,
-        'fsTree',
-      );
-
-      expect(existsSync(target), 'a redelete resurrected the file').toBe(false);
-      expect(
-        pending.has(target),
-        'the tombstone was dropped although it had won',
-      ).toBe(true);
-    });
-  });
   // ...........................................................................
   describe('the things a node says out loud when it cannot act', () => {
     // Every one of these used to be silent, and silence is the defect: a node
@@ -1250,26 +1082,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
         'deletions were parked on an ancestry that could not be walked',
       ).toBe(0);
     });
-
-    it('records a blob it cannot fetch without losing the whole round', async () => {
-      // One unreachable blob is worth one missing file, never the whole
-      // bucket round — the same rule the restore path learned the hard way.
-      const db = await aDb();
-      await callOnAgent(
-        agent,
-        '_applyReconcilePlan',
-        {
-          fetch: [['wanted.txt', 'aBlobNobodyHas']],
-          drop: [],
-          redelete: [],
-          conflict: [],
-        },
-        db,
-        'fsTree',
-      );
-      expect(syncErrors(dir)).toContain('bucketSync/fetch/wanted.txt');
-    });
-
     it('judging an announcement that cannot be resolved answers nothing', async () => {
       (
         agent as unknown as {
@@ -1559,16 +1371,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
   });
   // ...........................................................................
   describe('the fallbacks a folder with no scan yet relies on', () => {
-    it('a manifest of a folder nobody has scanned is empty, not a crash', async () => {
-      // `_manifest` is what the bucket protocol advertises. Asked before the
-      // first scan it has no tree to read, and an empty manifest is the
-      // truthful answer — this node is advertising that it holds nothing yet.
-      const manifest = (
-        agent as unknown as { _manifest: () => ReadonlyMap<string, string> }
-      )._manifest();
-      expect(manifest.size).toBe(0);
-    });
-
     it('announces a bare tree ref only when nothing can name the state', async () => {
       // THE OLD CLAIM HERE WAS WRONG, and it was the comment that made it look
       // settled: "for any other state there is no head to mark it with". There
@@ -1646,44 +1448,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
         'newer local work was deleted on a peer\'s authority',
       ).toBe(true);
     });
-
-    it('refuses a bucket round that would drop most of what the node holds', async () => {
-      // The ratio half of the guard, reached by a plan rather than by a
-      // stated removal: enough files to pass the floor, and a drop list that
-      // takes most of them.
-      for (let i = 0; i < 120; i++) {
-        await writeFile(join(dir, `f${i}.txt`), `content ${i}`);
-      }
-      await agent.extract();
-
-      const db = await aDb();
-      const errors: string[] = [];
-      const err = console.error;
-      console.error = (...a: unknown[]) => errors.push(a.join(' '));
-      try {
-        await callOnAgent(
-          agent,
-          '_applyReconcilePlan',
-          {
-            fetch: [],
-            drop: Array.from({ length: 110 }, (_, i) => `f${i}.txt`),
-            redelete: [],
-            conflict: [],
-          },
-          db,
-          'fsTree',
-        );
-      } finally {
-        console.error = err;
-      }
-
-      expect(errors.join('\n')).toMatch(/REFUSED|refused/);
-      expect(
-        existsSync(join(dir, 'f0.txt')),
-        'a bucket round emptied the folder',
-      ).toBe(true);
-    }, 60_000);
-
     it('falls back to the entry\'s own timeId when the walk carries none', async () => {
       // The parked removals are ordered by the timeId of the edit that made
       // them. A walk that reaches the root without one leaves the entry's own
@@ -1952,8 +1716,7 @@ describe('FsAgent — degradation when a dependency fails', () => {
   // The states the 100% branch gate asked for, and nothing else reaches.
   //
   // Each of these is a decision the agent makes on a shape no scenario in the
-  // suite happens to produce — a hub message arriving with bucket sync off, an
-  // announcement with no sender metadata, a ref heard while a join is still
+  // suite happens to produce — an announcement with no sender metadata, a ref heard while a join is still
   // pending. They are not exotic: each is one configuration switch or one
   // timing away from being the normal case in the field.
   //
@@ -1997,35 +1760,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
       if (!captured) throw new Error('the agent registered no callback');
       return { fire: captured, stop };
     };
-
-    it('drops a bucket-sync message when bucket sync is off', async () => {
-      // `~BQ~` and friends are a control protocol, and a build with the
-      // protocol switched off still RECEIVES them: every peer on the LAN
-      // speaks it by default. Answering would be wrong and crashing would be
-      // worse, so the message is dropped — and dropped SILENTLY, because a
-      // peer using a feature this node has turned off is not an error.
-      const db = await aDb();
-      // ITS OWN FOLDER: `dir` already holds the suite agent, whose own sync
-      // errors would answer this assertion for it.
-      const own = await mkdtemp(join(tmpdir(), 'fs-agent-nobucket-'));
-      const quiet = new FsAgent(own, undefined, {
-        ...ORIGIN_FIXTURE,
-        bucketSync: false,
-      });
-      const { fire, stop } = await listening(quiet, db);
-      try {
-        await expect(fire('~BQ~{"r":1,"d":[]}')).resolves.toBeUndefined();
-        expect(
-          syncErrors(own),
-          'a peer speaking an off feature was recorded as a failure',
-        ).not.toContain('bucket');
-      } finally {
-        stop();
-        quiet.dispose();
-        await rm(own, { recursive: true, force: true });
-      }
-    }, 30_000);
-
     it('leaves an unresolvable head to the anti-entropy, and says so', async () => {
       // Resolving a `~H~` head is a READ, and a read may have to travel to a
       // peer that cannot answer. Bounded, because an unbounded one is a silent
@@ -2326,67 +2060,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
         callOnAgent(agent, '_applyIncomingRemovals', 'r3'),
       ).resolves.toBeUndefined();
     });
-
-    it('names a bucket-sync conflict in the singular and the plural', async () => {
-      // "1 paths edited on both sides" in a support log is how a reader stops
-      // trusting the log, which is why both forms exist — and why both have to
-      // be measured. Whichever one a run happens not to produce is an uncovered
-      // branch: this read 100% on macOS and failed Linux CI at 99.92%, the last
-      // branch in the package.
-      const db = await aDb();
-      const warned: string[] = [];
-      const spy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation((...a: unknown[]) => {
-          warned.push(a.map(String).join(' '));
-        });
-      try {
-        for (const conflict of [['a.txt'], ['a.txt', 'b.txt']]) {
-          await callOnAgent(
-            agent,
-            '_applyReconcilePlan',
-            { fetch: [], drop: [], redelete: [], conflict },
-            db,
-            'fsTree',
-          );
-        }
-      } finally {
-        spy.mockRestore();
-      }
-      expect(
-        warned.filter((w) => w.includes('1 path edited on both sides')),
-        'one conflict was reported in the plural',
-      ).toHaveLength(1);
-      expect(
-        warned.filter((w) => w.includes('2 paths edited on both sides')),
-        'two conflicts were reported in the singular',
-      ).toHaveLength(1);
-    }, 30_000);
-
-    it('refuses a mass deletion against a folder it has not scanned', async () => {
-      // `held` is read from the scan, and an unscanned folder reports ZERO
-      // held. The guard divides by it, so this is the shape that either
-      // refuses everything or divides by zero depending on one `Math.max` —
-      // and no scenario reaches it, because every scenario scans first.
-      const db = await aDb();
-      const drop = Array.from({ length: 150 }, (_, i) => `gone-${i}.txt`);
-      await callOnAgent(
-        agent,
-        '_applyReconcilePlan',
-        { fetch: [], drop, redelete: [], conflict: [] },
-        db,
-        'fsTree',
-      );
-      expect(
-        syncErrors(dir),
-        'a 150-file deletion against an unscanned folder was carried out',
-      ).toContain('bucketSync/massDeleteGuard');
-      expect(
-        priv<Set<string>>(agent, '_pendingDeletes').size,
-        'a refused deletion still tombstoned the paths',
-      ).toBe(0);
-    });
-
     it('treats a revision with no recorded predecessors as a root', async () => {
       // The ancestry walk follows `previous` links. A revision whose row names
       // none — a lineage root, or one whose parent row never arrived — ends the
@@ -2416,15 +2089,10 @@ describe('FsAgent — degradation when a dependency fails', () => {
   });
 
   // ...........................................................................
-  // What a repair does when the bucket round is not available to answer it.
-  //
-  // The repair callback the anti-entropy holds is the last thing between a
-  // detected divergence and a whole-folder apply. With `bucketSync` on — the
-  // shipping default — it hands every divergence to the bucket round and
-  // returns, so the two decisions BELOW that point are never reached by any
-  // scenario in this suite. They are the ones that decide whether a repair may
-  // prune, and that is not a decision to leave unmeasured.
-  describe('the repair callback, with the bucket round switched off', () => {
+  // What a repair does. The repair callback the anti-entropy holds is the last
+  // thing between a detected divergence and a whole-folder apply, and the two
+  // decisions below decide whether a repair may prune.
+  describe('the repair callback', () => {
     /** The repair the agent registered with its anti-entropy. */
     const repairOf = (
       a: FsAgent,
@@ -2456,10 +2124,7 @@ describe('FsAgent — degradation when a dependency fails', () => {
     }> => {
       const db = await aDb();
       const own = await mkdtemp(join(tmpdir(), 'fs-agent-norepair-'));
-      const a = new FsAgent(own, undefined, {
-        ...ORIGIN_FIXTURE,
-        bucketSync: false,
-      });
+      const a = new FsAgent(own, undefined, ORIGIN_FIXTURE);
       const connector = new Connector(
         db,
         Route.fromFlat('/fsTree'),
@@ -2496,10 +2161,6 @@ describe('FsAgent — degradation when a dependency fails', () => {
         } finally {
           spy.mockRestore();
         }
-        expect(
-          lines.filter((l) => l.includes('bucket-sync round')),
-          'a build with bucket sync off answered a divergence with one',
-        ).toEqual([]);
         expect(
           syncErrors(own),
           'the repair failed rather than scheduling an apply',

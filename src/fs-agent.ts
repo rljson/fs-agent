@@ -44,22 +44,14 @@ import {
   FsSignals,
   SIGNAL_LOG_FILE,
   type FsSignal,
-  type FsSignalDecidedBy,
-} from './fs-signals.ts';
+  } from './fs-signals.ts';
 import {
-  FsBucketSync,
-  isBucketSync,
-  type BucketSyncHost,
-} from './fs-bucket-sync.ts';
-import {
-  ALL_GONE_MIN_FILES,
   compareTimeId,
   FsEditChain,
   planJoin,
   planRemovals,
   type FsChainEntry,
 } from './fs-edit-chain.ts';
-import { TOMBSTONE_BLOB, type ReconcilePlan } from './fs-manifest.ts';
 import { FsScanner, FsTree } from './fs-scanner.ts';
 
 import { stateBeaconEvent } from '@rljson/db';
@@ -75,22 +67,6 @@ import type { FsChange, FsNodeMeta } from './fs-scanner.ts';
  * Options for FsAgent operations
  */
 export interface FsAgentOptions {
-  /**
-   * Reconcile a divergence ADDITIVELY instead of replacing a folder.
-   *
-   * With this on, a divergence the anti-entropy would have answered with
-   * `pull` or `merge` runs a bucket-sync round instead: the two sides compare
-   * manifests and each fetches what it is missing. Nothing is replaced, so
-   * neither side's work can be discarded — the property that makes the two
-   * measured data losses impossible rather than rarer.
-   *
-   * **Default off.** It replaces the repair model rather than correcting it,
-   * and `src/fs-agent.ts` records that this class of change "has been reverted
-   * four times for being shipped on reasoning". On in the mesh, where the
-   * additive outcome is asserted; off everywhere else until an integration run
-   * says otherwise.
-   */
-  bucketSync?: boolean;
   /** Ignore patterns for scanning */
   ignore?: string[];
   /** Maximum depth for directory traversal */
@@ -206,8 +182,7 @@ export interface FsAgentOptions {
    * seconds, which is the class of change this package has reverted four times
    * for being shipped on reasoning. It is proven at the mesh tier
    * (`fs-mesh-matrix.spec.ts`, `J4+J5`) and belongs on after an integration
-   * run, in the same way `bucketSync` did — see `README.architecture.md`,
-   * "Joining a Network".
+   * run — see `README.architecture.md`, "Joining a Network".
    */
   joinWaitMs?: number;
 
@@ -568,11 +543,11 @@ export interface RefusedDeletion {
   /**
    * Which rule refused it, matching the sync-error key.
    *
-   * `restore` is an incoming whole tree, `bucketSync` an additive round's drop
-   * list, `removals` a peer's stated removals. All three share the floors; a
-   * client showing this does not need to care which, but a support case does.
+   * `restore` is an incoming whole tree, `removals` a peer's stated removals.
+   * Both share the floors; a client showing this does not need to care which,
+   * but a support case does.
    */
-  readonly route: 'restore' | 'bucketSync' | 'removals';
+  readonly route: 'restore' | 'removals';
   /** How many paths would have been deleted. */
   readonly wouldRemove: number;
   /** How many this folder holds, which is what the ratio is taken against. */
@@ -1187,13 +1162,6 @@ export class FsAgent {
 
   /** Client-only: resolve DAG-branch conflicts into merge revisions. */
   private _resolveConflicts: boolean;
-
-
-  /** See {@link FsAgentOptions.bucketSync}. */
-  private _bucketSyncOn: boolean;
-
-  /** The bucket-sync conversation, when {@link _bucketSyncOn}. */
-  private _bucketSync?: FsBucketSync;
   /**
    * Ancestry head: the content ref of the revision currently representing the
    * filesystem state. New local revisions descend from it; received revisions
@@ -1209,11 +1177,6 @@ export class FsAgent {
     this._resolveConflicts = options.resolveConflicts ?? false;
     this._onConflict = options.onConflict;
     if (options.onSignal) this._signals.subscribe(options.onSignal);
-    // Bucket sync is on unless a caller turns it off. It used to default to
-    // "on unless this build speaks the old wire format", and there is no old
-    // wire format any more — nothing is in production, so nothing has to be
-    // spoken to in a dialect it predates.
-    this._bucketSyncOn = options.bucketSync ?? true;
     this._antiEntropyOptions = options.antiEntropy;
     this._joinWaitMs = options.joinWaitMs ?? DEFAULT_JOIN_WAIT_MS;
     this._tag =
@@ -5036,276 +4999,6 @@ export class FsAgent {
   }
 
   /**
-   * Builds the bucket-sync host and the conversation that drives it.
-   *
-   * The host is the only thing that may touch the folder: the protocol decides
-   * what to say and what a reply means and cannot delete anything itself,
-   * which is what keeps the destructive half where the mass-delete guard can
-   * see it.
-   * @param connector - The transport.
-   * @param db - The route's database, for fetching what the plan asks for.
-   * @param treeKey - The trees table key.
-   * @returns The conversation.
-   */
-  private _makeBucketSync(
-    connector: Connector,
-    db: Db,
-    treeKey: string,
-  ): FsBucketSync {
-    const host: BucketSyncHost = {
-      manifest: () => this._manifest(),
-      // The chain's answer to "who changed this file", for the paths this node
-      // changed. Only a real local edit sets a claim — receiving a path does
-      // not — so a node can never claim bytes it merely holds.
-      claimed: () => new Set(this._localPathTimeIds.keys()),
-      // WHEN, beside WHO. The claim says this node edited the path; this says
-      // when the newest edit of it was minted, by anybody. `reconcile` needs
-      // the second to order a tombstone against a write — see
-      // `ManifestEntry.editedAt`.
-      editTimes: () => this._pathEditTimes,
-      send: (ref) => {
-        // Cleared first, because `Connector` dedups by ref on both sides and a
-        // round is only unique by its id — the clear makes a RE-sent message
-        // deliverable too, which a retry needs.
-        connector.invalidateSent?.(ref);
-        connector.send(ref);
-      },
-      ready: () =>
-        // A node mid-cold-start or mid-apply has a partial manifest, and
-        // advertising one makes a peer see differences that are not there.
-        //
-        // **A PENDING JOIN IS MID-COLD-START, and this gate is where that has
-        // to be said.** A folder with files and no history has established
-        // nothing; its manifest describes files that may be new work or a
-        // stale copy, and nothing can tell which until the chain has been
-        // consulted. Worse, the round is a THIRD way the folder changes: a
-        // peer's tombstone makes the delete-wins half drop a path, and it did
-        // — measured as the joiner's stale copy being dropped by a bucket
-        // round between the reconcile's scan and its rename, so the rename
-        // found nothing to move and the file was destroyed rather than set
-        // aside, with "set aside 1 file" still in the log.
-        this._scanner.tree !== null &&
-        !this._remoteApplyInFlight &&
-        this._joinPending === undefined,
-      apply: (plan) => this._applyReconcilePlan(plan, db, treeKey),
-      agreed: () => this._bucketRoundAgreed(),
-      log: (message) => console.log(message),
-    };
-    return new FsBucketSync(host);
-  }
-
-  /**
-   * This folder's manifest: `path → blobId`, tombstones included.
-   *
-   * A tombstoned path is carried at {@link TOMBSTONE_BLOB}, so a deletion
-   * travels through the ordinary comparison instead of as an absence — the
-   * ambiguity the whole plan exists to remove. A path that is both tombstoned
-   * and live is LIVE: the user created it again, and a stale tombstone must
-   * not advertise it as gone.
-   * @returns The manifest.
-   */
-  private _manifest(): ReadonlyMap<string, string> {
-    const tree = this._scanner.tree;
-    const live = tree ? this._getFileContentMap(tree) : new Map<string, string>();
-    const out = new Map<string, string>();
-    for (const absolute of this._pendingDeletes) {
-      out.set(relative(this._rootPath, absolute).split(sep).join('/'), TOMBSTONE_BLOB);
-    }
-    // Live entries LAST, so a path that was deleted and created again
-    // overwrites its own tombstone rather than being advertised as gone.
-    for (const [path, blobId] of live) out.set(path, blobId);
-    return out;
-  }
-
-  /**
-   * Performs what a bucket-sync round concluded.
-   *
-   * **Additive, except for the drops, and those are bounded.** `fetch` only
-   * ever writes a path this node does not hold, so nothing it does can
-   * destroy work. `drop` is the delete-wins direction and goes through the
-   * same mass-delete reasoning an ordinary prune does.
-   * @param plan - What to do.
-   * @param db - Unused today; kept so a fetch can reach the route's store when
-   *   a blob is not already local.
-   * @param treeKey - Likewise.
-   */
-  private async _applyReconcilePlan(
-    plan: ReconcilePlan,
-    db: Db,
-    treeKey: string,
-  ): Promise<void> {
-    void db;
-    void treeKey;
-
-    // ---- additive half ----
-    const lifted: string[] = [];
-    for (const [path, blobId] of plan.fetch) {
-      const target = join(this._rootPath, ...path.split('/'));
-      // A TOMBSTONE OF OURS IN `fetch` HAS ALREADY LOST, so it is lifted here
-      // rather than allowed to veto the fetch.
-      //
-      // This used to `continue`, on the reasoning that "a path this node
-      // deliberately deleted is not fetched back — the peer has not heard about
-      // the deletion yet; it will, and our manifest already says so". The
-      // premise is true only while OUR tombstone is the newer edit, and in that
-      // case `reconcile` puts the path in `redelete`, never in `fetch`. Every
-      // path reaching this line is one `reconcile` has ordered the other way:
-      // their write is newer than our deletion, so our tombstone is stale.
-      //
-      // `_manifest()` advertises every pending delete as a tombstone, so a path
-      // in `_pendingDeletes` is always `oursIsTombstone` in the comparison and
-      // cannot arrive here by the "never heard of it" route. A peer that sends no
-      // `editedAt` cannot get here either — `olderThan` is false when either side
-      // is silent, which sends the path to `redelete`.
-      //
-      // Skipping it instead was a stable, permanent split: the deleting node
-      // never took the file back and went on re-advertising its tombstone, while
-      // every peer went on holding the newer content. Measured on Linux, 6 runs
-      // in 8 of the churn fuzzer's seed 2 — one node short of `sub/three.txt`
-      // for the whole 120-second budget, every other path and every conflicted
-      // copy identical. It is the same lift `_applyIncomingRemovals` performs
-      // when a peer re-creates a path, applied on the route that had none.
-      if (this._pendingDeletes.delete(target)) {
-        lifted.push(path);
-        this._persistTombstones();
-      }
-      try {
-        await this._adapter.blobToFile(
-          { name: path, blobId, size: 0, mtime: Date.now(), path: target },
-          target,
-        );
-      } catch (err) {
-        // One unreachable blob is worth one missing file, never the whole
-        // round — the same rule the restore path learned the hard way.
-        this._writeSyncError(`bucketSync/fetch/${path}`, err);
-      }
-    }
-    // Said once per round rather than per path, and said at all because a node
-    // taking back a file it deleted is exactly the event somebody will want to
-    // account for later.
-    if (lifted.length > 0) {
-      console.log(
-        `${this._tag} lifted ${lifted.length} stale tombstone` +
-          `${lifted.length === 1 ? '' : 's'} a peer has since written: ` +
-          `${lifted.slice(0, 3).join(', ')}`,
-      );
-    }
-
-    // ---- destructive half, bounded ----
-    //
-    // THE ORDERING LIVES IN `reconcile`, NOT HERE. A one-sided rule was built
-    // first and measured: refuse a drop whenever this node's own chain has a
-    // newer write for the path. It fixed `I7b` and broke three deletion
-    // deliveries — *delivers a deletion a peer never received*, *does not undo
-    // a peer deletion it missed*, and the churn fuzzer — because a node that
-    // has never HEARD a deletion has exactly the same local history as one
-    // whose write superseded it. Its own chain cannot tell the two apart.
-    //
-    // What separates them is WHEN the tombstone was minted, and that is a fact
-    // only its author holds. So it travels: `ManifestEntry.editedAt`, filled
-    // from the chain, compared by `reconcile` on both sides. The decision is
-    // made where both nodes reach the same verdict, which is also the only
-    // place it can be made correctly.
-    if (plan.drop.length > 0) {
-      const held = this._scanner.tree
-        ? this._getFileContentMap(this._scanner.tree).size
-        : 0;
-      // THE SAME TWO RULES AS `planRemovals`, because this is the same
-      // decision reached by a different route — and the floor's gap was open
-      // here too. Emptying the folder is refused whatever the count: 40 drops
-      // against 40 held files is a ratio of 1.0 and still under the floor,
-      // which is how a wiped peer took every other node's copy with it
-      // (`a small folder survives a wiped peer too`).
-      //
-      // "ALMOST ALL" IS ALSO A LOSS, and reading the rule as "exactly all"
-      // left the hole one file wide. Measured under full-suite load: a peer
-      // that had been emptied produced a round dropping **39 of 40**, so
-      // `drop >= held` was false and `39 > MASS_DELETE_MIN_FILES` was false
-      // too — both floors missed it and 39 files were deleted with no refusal
-      // logged at all. The node was left holding one file out of forty while
-      // `planRemovals` on the very same node correctly refused "40 of 40".
-      //
-      // What the folder would be LEFT with is the honest measure, and the
-      // paths the same round FETCHES count towards it — otherwise renaming a
-      // directory, which drops every old name and fetches every new one, reads
-      // as a wipe. A rename leaves the folder the same size; a wipe does not.
-      const wouldLeave = held - plan.drop.length + plan.fetch.length;
-      const wouldEmpty =
-        held > ALL_GONE_MIN_FILES && wouldLeave <= ALL_GONE_MIN_FILES;
-      const tooMany =
-        wouldEmpty ||
-        (plan.drop.length > MASS_DELETE_MIN_FILES &&
-          plan.drop.length / Math.max(held, 1) > MASS_DELETE_MAX_RATIO);
-      if (tooMany) {
-        this._refuseDeletion('bucketSync', plan.drop.length, held, plan.drop);
-      } else {
-        for (const path of plan.drop) {
-          const target = join(this._rootPath, ...path.split('/'));
-          try {
-            await rm(target, { force: true });
-            // Tombstoned as well as removed, so a third node pushing the file
-            // in the window before this node announces cannot put it back.
-            this._pendingDeletes.add(target);
-          } catch (err) {
-            /* v8 ignore next -- @preserve a file we cannot remove is retried */
-            this._writeSyncError(`bucketSync/drop/${path}`, err);
-          }
-        }
-        this._persistTombstones();
-      }
-    }
-
-    // `redelete` needs no action here: our manifest already advertises those
-    // tombstones, so the peer acts on them in its own round. Naming it in the
-    // plan is what makes the omission deliberate rather than forgotten.
-    if (plan.conflict.length > 0) {
-      // NAMED, not resolved by this step. Both sides edited the same file; the
-      // ordinary conflict resolver owns keeping the loser's bytes.
-      console.warn(
-        `${this._tag} bucket-sync: ${plan.conflict.length} path` +
-          `${plan.conflict.length === 1 ? '' : 's'} edited on both sides: ` +
-          `${plan.conflict.slice(0, 3).join(', ')}`,
-      );
-      // SPLIT BY HOW IT WAS DECIDED, which is the whole reason the verdict
-      // travels. A path settled from the chain is a fact; one settled on the
-      // content hash converges and is otherwise arbitrary, and only the second
-      // is worth putting in front of a person. Reported in two signals rather
-      // than one per path, because a round can name hundreds and a caller
-      // wants the shape before the detail.
-      const byVerdict = new Map<FsSignalDecidedBy, string[]>();
-      for (const path of plan.conflict) {
-        // OPTIONAL CHAINING ON A FIELD THE TYPE SAYS IS REQUIRED, deliberately.
-        // `reconcile` always fills it, but this method is reachable with a plan
-        // built somewhere else — a test, a host driving the apply, a plan that
-        // crossed a version boundary — and indexing an absent map throws where
-        // the worst honest outcome is "nobody said how this was decided".
-        // Falling back to `'hash'` rather than `'chain'` because claiming a
-        // chain verdict nobody established is the one wrong answer here.
-        const verdict: FsSignalDecidedBy =
-          plan.conflictDecidedBy?.[path] ?? 'hash';
-        const list = byVerdict.get(verdict);
-        if (list === undefined) byVerdict.set(verdict, [path]);
-        else list.push(path);
-      }
-      for (const [verdict, paths] of byVerdict) {
-        this._signal({
-          kind: verdict === 'chain' ? 'conflict/merged' : 'conflict/arbitrary',
-          paths,
-          action: 'review',
-          decidedBy: verdict,
-          detail:
-            verdict === 'chain'
-              ? `${paths.length} path(s) edited on both sides; the newer edit ` +
-                `kept the path`
-              : `${paths.length} path(s) edited on both sides with nothing to ` +
-                `say which edit came last, so the winner was chosen ` +
-                `${verdict === 'claim' ? 'by who claims the path' : 'arbitrarily'}`,
-        });
-      }
-    }
-  }
-
-  /**
    * Records a tombstone for a deletion the watcher reported.
    *
    * Two shapes arrive here. A FILE this node announced is tombstoned directly.
@@ -5416,27 +5109,6 @@ export class FsAgent {
         `nothing was deleted. If the deletion is real it has to be applied ` +
         `deliberately.`,
     });
-  }
-
-  /**
-   * Records that a bucket round proved this folder and the hub's agree.
-   *
-   * The roots matched, so the two hold the same content whatever either calls
-   * itself. The anti-entropy is comparing REFS and cannot reach that
-   * conclusion on its own — and without being told it re-reports the same
-   * divergence on every beacon.
-   *
-   * Nothing is recorded when there is no hub ref to record it against. A round
-   * can finish after the announcement that prompted it has been superseded, or
-   * before any beacon has arrived at all, and an agreement needs both sides to
-   * name: see `FsAntiEntropy`'s agreement key.
-   *
-   * A method rather than a closure inside `_makeBucketSync` so that both
-   * answers can be measured; as a closure neither was.
-   */
-  private _bucketRoundAgreed(): void {
-    const hubRef = this._antiEntropy?.status.hubRef;
-    if (hubRef) this._antiEntropy?.agreedOn(hubRef);
   }
 
   /**
@@ -5891,11 +5563,7 @@ export class FsAgent {
         // side's files: measured, the partitioned node lost the file it had
         // created, 6 runs in 8.
         //
-        // It used to be `!this._bucketSyncOn`, which left the destructive
-        // variant alive for a build speaking the old wire format — a format
-        // that no longer exists. That is the same inference by absence as
-        // everywhere else, with the same answer:
-        // the merge contributes everything it worked out, nothing it could not
+        // The answer is the same as everywhere else: the merge contributes everything it worked out, nothing it could not
         // account for is deleted on its authority, and a real deletion comes
         // from the chain. This was the last path inside the agent that could
         // delete a file no peer had ever stated a removal for.
@@ -6097,10 +5765,6 @@ export class FsAgent {
     // Before any announcement can arrive: a node that only receives still has
     // to resolve the heads its peers announce. See `_ensureChain`.
     await this._ensureChain(db, treeKey);
-
-    if (this._bucketSyncOn && !this._bucketSync) {
-      this._bucketSync = this._makeBucketSync(connector, db, treeKey);
-    }
 
     // Start watching filesystem (if not already watching)
     await this._ensureWatching();
@@ -6982,15 +6646,6 @@ export class FsAgent {
         return Promise.resolve();
       }
 
-      // A bucket-sync message is not a state and must never reach the apply
-      // path: it is a question or an answer about manifests. Claimed here,
-      // before anything tries to fetch a tree by it.
-      if (isBucketSync(treeRef)) {
-        return this._bucketSync
-          ? this._bucketSync.receive(treeRef).then(() => undefined)
-          : Promise.resolve();
-      }
-
       const schedule = (ref: string) =>
         // A freshly-arrived ref resets the recovery budget to 0.
         scheduleProcess(
@@ -7282,22 +6937,6 @@ export class FsAgent {
           );
           return;
         }
-        // ADDITIVE RECONCILIATION, when it is switched on.
-        //
-        // `pull` replaces this folder with the hub's and `merge` applies the
-        // hub's tree under the ordinary rules — both are whole-folder, so both
-        // can discard work. A bucket round cannot: the two sides compare
-        // manifests and each fetches what it is missing. That is the property
-        // which makes the two measured data losses impossible rather than
-        // rarer, and it is why this has a switch of its own.
-        if (this._bucketSync?.start()) {
-          console.log(
-            `${this._tag} divergence answered by a bucket-sync round rather ` +
-              `than a ${action}`,
-          );
-          return;
-        }
-
         // `merge` first tries the ordinary rules, ancestry included. Only if
         // that made no progress does it drop the ancestry, which makes the
         // apply additive: nothing is pruned, both sides end up with the union,
