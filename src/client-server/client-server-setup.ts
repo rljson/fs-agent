@@ -64,7 +64,7 @@ export async function runClientServerSetup(
   // Create table schema on server
   await createSharedTreeTable(serverIo, treeKey);
 
-  const server = new Server(route, serverIo, serverBsMem);
+  const server = new Server(route, serverIo, serverBsMem, { stamp: { domain: 'test', hub: 'hub' } });
   await server.init();
 
   // Client A setup - use DirectionalSocketMock for proper client/server separation

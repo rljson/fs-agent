@@ -35,30 +35,14 @@ export {
   globToRegExp,
   type IgnoreMatcher,
 } from './fs-ignore.ts';
-export {
-  antiEntropyDecision,
-  DEFAULT_ANTI_ENTROPY,
-  FsAntiEntropy,
-  type AntiEntropyAction,
-  type AntiEntropyDecision,
-  type AntiEntropyDeps,
-  type AntiEntropyOptions,
-  type AntiEntropyStatus,
-  type AntiEntropyView,
-  type HubAnnouncement,
-  type Reachability,
-} from './fs-anti-entropy.ts';
+export type { AntiEntropyStatus } from './fs-receive.ts';
 export {
   createFsChainTables,
   FS_EDIT_ACTION,
   FsEditChain,
-  compareTimeId,
-  planRemovals,
   type FsAppendOptions,
   type FsChainEntry,
   type FsEditData,
-  type RemovalPlan,
-  type RemovalQuestion,
 } from './fs-edit-chain.ts';
 export {
   FsBlobAdapter,
@@ -67,22 +51,6 @@ export {
   type FileToBlobOptions,
 } from './fs-blob-adapter.ts';
 export { FsDbAdapter, type StoreFsTreeOptions } from './fs-db-adapter.ts';
-export {
-  compareTips,
-  conflictCopyName,
-  decideWinner,
-  DIR_MARKER,
-  findCommonAncestor,
-  formatConflictTimestamp,
-  FsConflictResolver,
-  fsTreeToContentMap,
-  threeWayMerge,
-  type BranchTip,
-  type ConflictCopy,
-  type ConflictResolverDeps,
-  type ContentMap,
-  type MergePlan,
-} from './fs-conflict-resolver.ts';
 export {
   FsScanner,
   type FsChange,

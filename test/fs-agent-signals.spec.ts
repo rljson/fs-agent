@@ -33,7 +33,6 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
-import type { FsConflictReport } from '../src/fs-conflict-resolver.ts';
 import {
   SIGNAL_LOG_FILE,
   type FsSignal,
@@ -49,14 +48,6 @@ const emitOnce = (agent: FsAgent, key: string, input: FsSignalInput): void =>
   (
     agent as unknown as { _signalOnce(k: string, i: FsSignalInput): void }
   )._signalOnce(key, input);
-
-/** Reaches the private conflict recorder the resolver drives. */
-const record = (agent: FsAgent, reports: FsConflictReport[]): void =>
-  (
-    agent as unknown as {
-      _recordConflicts(r: readonly FsConflictReport[]): void;
-    }
-  )._recordConflicts(reports);
 
 /** Reaches the private refusal, which three routes share. */
 const refuse = (
@@ -229,43 +220,6 @@ describe('FsAgent — the signal channel', () => {
       expect(agent.signals).toHaveLength(1);
     });
   });
-
-  // ...........................................................................
-  describe('a same-file conflict', () => {
-    it('is reported as reviewable, with the copy and the chain’s verdict', () => {
-      const agent = anAgent();
-      record(agent, [
-        {
-          path: 'doc.txt',
-          copyPath: 'doc (conflicted copy 2026-10-01 120000).txt',
-          winnerRef: 'w',
-          loserRef: 'l',
-          loserAt: 1,
-          resolvedAt: 2,
-        },
-      ]);
-
-      const [signal] = agent.signals;
-      expect(signal.kind).toBe('conflict/merged');
-      // `review`, never `required`: both versions are on disk and the folder
-      // converged. Nothing is broken — but a `(conflicted copy …)` file is
-      // somebody's work waiting to be merged by hand.
-      expect(signal.action).toBe('review');
-      expect(signal.decidedBy).toBe('chain');
-      expect(signal.paths).toEqual(['doc.txt']);
-      expect(signal.copyPath).toBe('doc (conflicted copy 2026-10-01 120000).txt');
-      expect(signal.detail).toContain('both versions were kept');
-    });
-    it('reports one signal per path', () => {
-      const agent = anAgent();
-      record(agent, [
-        { path: 'a.txt', copyPath: 'a2', winnerRef: 'w', loserRef: 'l', loserAt: 1, resolvedAt: 2 },
-        { path: 'b.txt', copyPath: 'b2', winnerRef: 'w', loserRef: 'l', loserAt: 1, resolvedAt: 2 },
-      ]);
-      expect(agent.signals.map((s) => s.paths[0])).toEqual(['a.txt', 'b.txt']);
-    });
-  });
-
   // ...........................................................................
   describe('a refused deletion', () => {
     it('is the one thing marked as needing a person', () => {

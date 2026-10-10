@@ -26,13 +26,14 @@ import { createTreesTableCfg } from '@rljson/rljson';
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { compareTimeId, FsEditChain } from '../src/fs-edit-chain.ts';
+import { FsEditChain } from '../src/fs-edit-chain.ts';
+import { linearChain, type LinearChain } from './linear-chain.ts';
 
 const TREE = 'fileTree';
 
 describe('FsEditChain.collectRemovals', () => {
   let db: Db;
-  let chain: FsEditChain;
+  let chain: LinearChain;
 
   beforeEach(async () => {
     const io = new IoMem();
@@ -40,7 +41,7 @@ describe('FsEditChain.collectRemovals', () => {
     await io.isReady();
     db = new Db(io);
     await db.core.createTableWithInsertHistory(createTreesTableCfg(TREE));
-    chain = new FsEditChain(db, TREE);
+    chain = linearChain(new FsEditChain(db, TREE));
     await chain.init();
   });
 
@@ -102,29 +103,7 @@ describe('FsEditChain.collectRemovals', () => {
     const walk = await chain.collectRemovals(head.head, known.head);
     expect(walk.complete).toBe(true);
     expect(walk.removed).toEqual(['news.txt']);
-    expect(walk.timeId).toBe(head.timeId);
   });
-
-  // ...........................................................................
-  it('reports the greatest timeId it walked', async () => {
-    const root = await chain.append({ treeRef: 'T0' });
-    const middle = await chain.append({ treeRef: 'T1', removed: ['x.txt'] });
-    const head = await chain.append({ treeRef: 'T2' });
-
-    const walk = await chain.collectRemovals(head.head, root.head);
-
-    // COMPUTED, not assumed to be the last one appended. A `timeId` is
-    // `<millis>:<nanoid>`, so three entries minted inside one millisecond are
-    // ordered by a random tail — and asserting append order here failed on the
-    // first run. The order is total and identical on every node, which is the
-    // property the receiver needs; "later in wall-clock time" is not on offer.
-    const walked = [middle, head].filter((e) => e.treeRef !== root.treeRef);
-    const greatest = walked
-      .map((e) => e.timeId)
-      .sort((a, b) => (compareTimeId(a, b) < 0 ? 1 : -1))[0];
-    expect(walk.timeId).toBe(greatest);
-  });
-
   // ...........................................................................
   // T6 — an unresolvable ancestor.
   // ...........................................................................
@@ -278,6 +257,44 @@ describe('FsEditChain.collectRemovals', () => {
   });
 
   // ...........................................................................
+  it('stops at our lineage even where that lineage is longer than the budget', async () => {
+    // A bounded walk of our OWN history still says where we have been — just
+    // not all of it — so it is used as it is rather than treated as unknown.
+    const root = await chain.append({ treeRef: 'T0' });
+    let ours = root;
+    for (let i = 1; i <= 4; i++) {
+      ours = await chain.append({ treeRef: `T${i}`, changed: [`f${i}.txt`] });
+    }
+    const peer = await chain.append({
+      treeRef: 'P',
+      removed: ['gone.txt'],
+      previous: [ours.head],
+    });
+
+    const walk = await chain.collectRemovals(peer.head, ours.head, 2);
+    expect(walk.removed).toEqual(['gone.txt']);
+  });
+
+  it('walks our lineage through a parent it already reached another way', async () => {
+    // `merge` names `root` twice — once directly, once through `side` — so
+    // a pass ends with a frontier whose every member has been walked.
+    const root = await chain.append({ treeRef: 'R' });
+    const side = await chain.append({ treeRef: 'S', previous: [root.head] });
+    const merge = await chain.append({
+      treeRef: 'M',
+      previous: [side.head, root.head],
+    });
+    const peer = await chain.append({
+      treeRef: 'P',
+      removed: ['x.txt'],
+      previous: [merge.head],
+    });
+
+    const walk = await chain.collectRemovals(peer.head, merge.head);
+    expect(walk).toEqual({ removed: ['x.txt'], changed: [], complete: true });
+  });
+
+  // ...........................................................................
   it('concludes NOTHING when our own lineage is unreadable', async () => {
     // Our own history holed is not a licence to walk past it: the entry that
     // would have stopped the walk may be inside the part we cannot read, and
@@ -329,14 +346,11 @@ describe('FsEditChain.collectRemovals', () => {
   });
 
   // ...........................................................................
-  // The other half of the delta, which is what lifts a tombstone.
+  // The other half of the delta.
   // ...........................................................................
   it('states what was CHANGED, not only what was removed', async () => {
-    // A receiver tombstones every path it deletes, including the ones a peer
-    // told it to delete, and that tombstone refuses the path if anyone writes
-    // it again. The watcher lifts one on a LOCAL re-creation; a peer's
-    // re-creation can only arrive through the restore the tombstone refuses.
-    // So the peer has to say it.
+    // A path deleted and created again inside the walked range is a change,
+    // not a removal — and only the second half of the delta can say so.
     const ours = await chain.append({ treeRef: 'T0', changed: ['seed.txt'] });
     await chain.append({ treeRef: 'T1', removed: ['cycle.txt'] });
     const head = await chain.append({
@@ -375,9 +389,9 @@ describe('FsEditChain.collectRemovals', () => {
       // count for it.
       await chain.append({ treeRef: 'T0', changed: ['doc.txt'] });
       const real = await chain.append({ treeRef: 'T1', changed: ['doc.txt'] });
-      await chain.append({ treeRef: 'T2', changed: ['unrelated.txt'] });
+      const tip = await chain.append({ treeRef: 'T2', changed: ['unrelated.txt'] });
 
-      const found = await chain.lastEditOf(chain.head as string, 'doc.txt');
+      const found = await chain.lastEditOf(tip.head, 'doc.txt');
       expect(found?.head).toBe(real.head);
       expect(found?.timeId).toBe(real.timeId);
     });
@@ -388,15 +402,13 @@ describe('FsEditChain.collectRemovals', () => {
       await chain.append({ treeRef: 'T0', changed: ['doc.txt'] });
       const gone = await chain.append({ treeRef: 'T1', removed: ['doc.txt'] });
 
-      const found = await chain.lastEditOf(chain.head as string, 'doc.txt');
+      const found = await chain.lastEditOf(gone.head, 'doc.txt');
       expect(found?.head).toBe(gone.head);
     });
 
     it('says nothing when the lineage never named the path', async () => {
-      await chain.append({ treeRef: 'T0', changed: ['other.txt'] });
-      expect(
-        await chain.lastEditOf(chain.head as string, 'doc.txt'),
-      ).toBeUndefined();
+      const tip = await chain.append({ treeRef: 'T0', changed: ['other.txt'] });
+      expect(await chain.lastEditOf(tip.head, 'doc.txt')).toBeUndefined();
     });
 
     it('says nothing when the walk cannot be read to the end', async () => {
@@ -459,8 +471,9 @@ describe('FsEditChain.collectRemovals', () => {
         previous: [left.head, right.head],
       });
 
-      const greater =
-        compareTimeId(left.timeId, right.timeId) > 0 ? left : right;
+      const greater = [left, right].find(
+        (entry) => entry.timeId === [left.timeId, right.timeId].sort().pop(),
+      );
       const found = await chain.lastEditOf(merge.head, 'doc.txt');
       expect(found?.head).toBe(greater.head);
     });
@@ -492,120 +505,6 @@ describe('FsEditChain.collectRemovals', () => {
         last = await chain.append({ treeRef: `T${i}`, changed: ['other.txt'] });
       }
       expect(await chain.lastEditOf(last.head, 'doc.txt', 3)).toBeUndefined();
-    });
-  });
-
-  // ...........................................................................
-  describe('entryForTreeRef — the migration bridge', () => {
-    it('finds the entry that produced a tree ref', async () => {
-      // A build predating the `~H~` announcement sends a plain tree ref, and
-      // its ancestry is still reachable: `dataRef` is the field, and finding a
-      // row BY a field is a query rather than a content read. Measured across
-      // a real relay in `fs-chain-crosses-the-wire.spec.ts`.
-      const written = await chain.append({
-        treeRef: 'T1',
-        removed: ['gone.txt'],
-      });
-      const found = await chain.entryForTreeRef('T1');
-      expect(found?.head).toBe(written.head);
-      expect(found?.removed).toEqual(['gone.txt']);
-    });
-
-    it('picks the NEWEST entry when content recurs', async () => {
-      // §2.1 in one assertion, and the reason this is the fallback rather than
-      // the primary: a folder that returns to earlier content produces a
-      // SECOND entry with the same `dataRef`. The newest is the one whose
-      // ancestry describes how the folder got here NOW.
-      const first = await chain.append({ treeRef: 'C1', changed: ['a.txt'] });
-      await chain.append({ treeRef: 'C0', removed: ['a.txt'] });
-      const again = await chain.append({ treeRef: 'C1', changed: ['a.txt'] });
-
-      const found = await chain.entryForTreeRef('C1');
-      expect([first.head, again.head]).toContain(found?.head);
-      // Whichever `timeId` is greater — computed, because two entries minted
-      // in one millisecond are ordered by a random tail.
-      const greater =
-        compareTimeId(again.timeId, first.timeId) > 0 ? again : first;
-      expect(found?.head).toBe(greater.head);
-    });
-
-    it('picks the newest whichever ORDER the rows come back in', async () => {
-      // HAND-WRITTEN timeIds, and both directions, because the comparison is
-      // otherwise exercised by whichever way the random `timeId` tails fell.
-      // Coverage that depends on luck is how a gate reads 98% and 99% on
-      // identical runs.
-      const refOf = (result: unknown): string =>
-        (result as Array<Record<string, string>>)[0][`${TREE}EditHistoryRef`];
-      const row = async (stamp: string): Promise<string> =>
-        refOf(
-          await db.addEditHistory(TREE, {
-            timeId: stamp,
-            multiEditRef: `m-${stamp}`,
-            dataRef: 'SHARED',
-            previous: [],
-            _hash: '',
-          } as never),
-        );
-
-      // Ascending then descending, so the loop both replaces and keeps.
-      await row('1:aaa');
-      const winner = await row('9:zzz');
-      await row('5:mmm');
-
-      const rows = await db.getEditHistories(TREE, { dataRef: 'SHARED' });
-      expect(rows.length).toBe(3);
-      // The entry itself is unresolvable (its multiEdit is a stub), so this
-      // asserts the SELECTION rather than the reconstruction — which is the
-      // part with the branch in it.
-      expect(await chain.entryForTreeRef('SHARED')).toBeUndefined();
-      expect(winner).toBeTruthy();
-    });
-
-    it('picks the OLDEST whichever order the rows come back in', async () => {
-      // The mirror of the test above, and the same reason: the comparison is
-      // otherwise exercised by whichever way the random `timeId` tails fell,
-      // which is coverage by luck.
-      //
-      // `oldestEntryForTreeRef` is how a fleet agrees on ONE name for one
-      // state — see `FsEditChain.append`'s root rule — so picking the wrong
-      // row means two nodes disagree about their own shared history.
-      const refOf = (result: unknown): string =>
-        (result as Array<Record<string, string>>)[0][`${TREE}EditHistoryRef`];
-      const row = async (stamp: string): Promise<string> =>
-        refOf(
-          await db.addEditHistory(TREE, {
-            timeId: stamp,
-            multiEditRef: `m-${stamp}`,
-            dataRef: 'SHARED',
-            previous: [],
-            _hash: '',
-          } as never),
-        );
-
-      // Descending then ascending, so the loop both replaces and KEEPS.
-      await row('9:zzz');
-      const winner = await row('1:aaa');
-      await row('5:mmm');
-
-      const rows = await db.getEditHistories(TREE, { dataRef: 'SHARED' });
-      expect(rows.length).toBe(3);
-      // The entry itself is unresolvable (its multiEdit is a stub), so this
-      // asserts the SELECTION rather than the reconstruction — which is the
-      // part with the branch in it.
-      expect(await chain.oldestEntryForTreeRef('SHARED')).toBeUndefined();
-      expect(winner).toBeTruthy();
-    });
-
-    it('answers undefined when no entry produced the content', async () => {
-      // The empty arm of the oldest-entry lookup, which is reached whenever a
-      // node hears about content whose history has not replicated to it yet.
-      await chain.append({ treeRef: 'KNOWN' });
-      expect(await chain.oldestEntryForTreeRef('NEVER-STORED')).toBeUndefined();
-    });
-
-    it('answers undefined for a tree ref no entry produced', async () => {
-      await chain.append({ treeRef: 'T1' });
-      expect(await chain.entryForTreeRef('never-stored')).toBeUndefined();
     });
   });
 });

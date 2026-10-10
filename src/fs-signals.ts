@@ -28,13 +28,11 @@
 // shipped the second one.
 //
 // WHY `decidedBy` IS NOT A DETAIL
-// A conflict settled from the edit chain is a fact about what happened. One
-// settled by comparing content hashes converges and is otherwise arbitrary —
-// the winner has nothing to do with who edited last. Two defects in exactly
-// that distinction shipped this quarter, both of which converged on the
-// superseded version about half the time they arose, and neither was visible
-// from outside. A caller that can see `decidedBy: 'hash'` can ask a person;
-// one that cannot has to trust a coin flip.
+// A conflict settled from the edit chain is a fact about what happened; one
+// settled by the hub's stamps is the order in which the fleet heard two
+// versions, which is all anybody can know about two concurrent edits. Neither
+// compares two machines' clocks. A caller that can see which one decided can
+// tell a person what the decision means.
 //
 // BOUNDED, BUT NOTHING IS SILENTLY FORGOTTEN
 // The list is capped. Counters per kind are not, so a folder that produced two
@@ -44,19 +42,15 @@
 
 /** What a {@link FsSignal} is about. */
 export type FsSignalKind =
-  /** Both versions of a same-file conflict were kept; see `copyPath`. */
-  | 'conflict/merged'
   /**
-   * Both versions were kept, and which one keeps the path was decided
-   * arbitrarily — nothing could say who edited last. Converged, but a person
-   * may want to look.
+   * Two machines changed one file at once, or one deleted what the other
+   * edited. Nothing was lost: both versions were kept (see `copyPath`), or the
+   * edit was. Which version keeps the path follows the order the fleet heard
+   * them in — which is not who edited last, so a person may want to look.
    */
   | 'conflict/arbitrary'
-  /**
-   * One version won and the other was NOT kept. Only reachable with
-   * `resolveConflicts` off, where no resolver is constructed.
-   */
-  | 'conflict/overwritten'
+  /** A directory and a file at one path: both kept, a person decides. */
+  | 'collision/type'
   /** A deletion was refused by the mass-delete guard and will not arrive. */
   | 'deletion/refused'
   /** A joining machine moved files the history had removed out of the way. */
@@ -66,28 +60,14 @@ export type FsSignalKind =
   /** A divergence was found that cannot be repaired without losing work. */
   | 'repair/blocked'
   /** A path could not be written: locked, impossible, or the disk is full. */
-  | 'path/unwritable'
-  /**
-   * The agent is running in a configuration that keeps less than it could —
-   * reported once per agent, not per event.
-   */
-  | 'config/degraded';
+  | 'path/unwritable';
 
-/**
- * Who or what chose the outcome.
- *
- * Ordered by how much it is worth trusting, which is also the order the code
- * tries them in.
- */
+/** Who or what chose the outcome. */
 export type FsSignalDecidedBy =
   /** The edit chain: a fact about which edit came after which. */
   | 'chain'
-  /** A wall-clock timestamp. Correct unless a machine's clock is wrong. */
-  | 'clock'
-  /** Whose history claims the path. Weaker than the chain, stronger than a hash. */
-  | 'claim'
-  /** The content hash. Identical on every node and otherwise arbitrary. */
-  | 'hash'
+  /** Decided by the hub's stamps: which version reached the fleet later. */
+  | 'stamp'
   /** A guard refused, so nothing was chosen. */
   | 'guard';
 

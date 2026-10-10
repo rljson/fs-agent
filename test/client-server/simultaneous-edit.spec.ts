@@ -100,6 +100,7 @@ describe.each([
     server = new Server(route, serverIo, sharedBs, {
       syncConfig: SYNC,
       stateBeaconMs: 500,
+      stamp: { domain: 'test', hub: 'hub' },
     });
     await server.init();
 
@@ -115,7 +116,7 @@ describe.each([
       const agent = new FsAgent(folder, sharedBs, {
       ...ORIGIN_FIXTURE,
         resolveConflicts: merge,
-        timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
+        timeouts: { debounceMs: 100},
         // On by default; two seconds rather than the shipped ten so five
         // rounds fit in a test. The mechanism is the same — what is being
         // measured is whether the repair happens, not how long it waits.

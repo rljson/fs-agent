@@ -38,7 +38,7 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { CHAIN_HEAD_PREFIX } from '../../src/fs-agent.ts';
+import { FsEditChain } from '../../src/fs-edit-chain.ts';
 import {
   buildFsMesh,
   whyNot,
@@ -283,12 +283,8 @@ describe('invariants over the route, not the destination', () => {
   // tests the combinations nobody did, which is where the last four defects in
   // this package came from.
   // ...........................................................................
-  // Seeds 2 and 3 are SKIPPED in 0.2.0 step 5.1, not deleted: without bucket
-  // sync neither converges within its window, and the receive path that has to
-  // converge them on its own is 5.2. Un-skipped there.
   for (const seed of [1, 2, 3]) {
-    const fuzz = seed === 1 ? it : it.skip;
-    fuzz(`converges under random churn and partitions (seed ${seed})`, async () => {
+    it(`converges under random churn and partitions (seed ${seed})`, async () => {
       // A tiny deterministic generator, so the run is reproducible without a
       // dependency and the seed in the test name is the whole repro.
       let state = seed * 2654435761;
@@ -630,8 +626,9 @@ describe('invariants over the route, not the destination', () => {
   // The chain is the mechanism of consistency, and a receiver can only consult
   // it about a state whose announcement names a head. A bare tree ref is not a
   // smaller version of the same thing — it is a state the chain cannot be asked
-  // about at all, so the receiver falls through to content heuristics. Those
-  // heuristics looked load-bearing for a long time; this is why.
+  // about at all. In 0.2.0 an announcement IS a chain entry's ref, with no
+  // prefix to mark it, so the check is the strong one: every ref a node put on
+  // the wire is an entry in that node's own chain.
   //
   // Two producers put refs on this wire, and only one is visible from inside
   // `FsAgent`:
@@ -693,12 +690,14 @@ describe('invariants over the route, not the destination', () => {
     const offenders: string[] = [];
     let heads = 0;
     for (const name of ['A', 'B', 'C']) {
-      for (const ref of mesh.node(name).announced) {
-        if (ref.startsWith(CHAIN_HEAD_PREFIX)) {
+      const node = mesh.node(name);
+      const chain = new FsEditChain(node.db, mesh.treeKey);
+      for (const ref of node.announced) {
+        if (await chain.entry(ref)) {
           heads++;
           continue;
         }
-        offenders.push(`${name} announced a bare ref: ${ref}`);
+        offenders.push(`${name} announced a ref that is no chain entry: ${ref}`);
       }
     }
 

@@ -131,13 +131,8 @@ export type FsChangeCallback = (change: FsChange) => void | Promise<void>;
  */
 export const DEFAULT_SETTLE_MS = 100;
 
-/**
- * Default for {@link FsScanOptions.settleMinBytes}.
- *
- * One megabyte: above the size anything is written in a single operation, and
- * at the order where a copy takes long enough for a scan to land inside it.
- */
-export const DEFAULT_SETTLE_MIN_BYTES = 1024 * 1024;
+/** How many of this process's own writes the scanner remembers. */
+const OWN_WRITES_MAX = 10_000;
 
 export interface FsScanOptions {
   /** Patterns to ignore (glob patterns) */
@@ -179,22 +174,6 @@ export interface FsScanOptions {
    * waiting for the five-second safety rescan.
    */
   settleMs?: number;
-  /**
-   * Below this size a file is never held back for settling.
-   *
-   * The two halves of the rule cost different things. Asking "did it change
-   * since this scan began" is free and catches a write that lands while the
-   * scan runs. Asking "has it been quiet for a moment" catches a writer whose
-   * gaps are wider than one scan — and costs every file that much latency.
-   *
-   * So the second half is spent only where the hazard is, which the register
-   * names: *"eine große Datei wird 0,3 Sekunden nach dem ersten Byte gelesen
-   * und als vollständiger Stand an alle verteilt"*. A document somebody saves
-   * is written in one go and propagates as fast as it ever did; a
-   * multi-megabyte copy waits a moment longer, and the alternative for it is
-   * being published truncated.
-   */
-  settleMinBytes?: number;
 }
 
 // .............................................................................
@@ -282,6 +261,14 @@ export class FsScanner {
 
   /** The scan pass running right now, if any. See {@link _scanAfterNow}. */
   private _activeScan: Promise<FsTree> | null = null;
+  /**
+   * Files this process wrote whole a moment ago — by an atomic rename — keyed
+   * by relative path. See {@link noteWrite}.
+   */
+  private readonly _ownWrites = new Map<
+    string,
+    { blobId: string; size: number; mtime: number }
+  >();
 
   /** The single follow-up pass everyone who arrived mid-scan is waiting on. */
   private _pendingScan: Promise<FsTree> | null = null;
@@ -295,7 +282,6 @@ export class FsScanner {
       bs: options.bs,
       scanCachePath: options.scanCachePath,
       settleMs: options.settleMs ?? DEFAULT_SETTLE_MS,
-      settleMinBytes: options.settleMinBytes ?? DEFAULT_SETTLE_MIN_BYTES,
     };
     this._ignoreMatcher = compileIgnore(this._options.ignore);
     this._bs = options.bs || new BsMem();
@@ -304,6 +290,46 @@ export class FsScanner {
 
   get tree(): FsTree | null {
     return this._tree;
+  }
+
+  /**
+   * The folder as it is now: a scan guaranteed to have STARTED after this
+   * call, sharing one pass with anyone else asking meanwhile. What a caller
+   * that acts on the folder must use — {@link tree} is the last pass, which
+   * may have run while something was still writing.
+   * @returns The tree.
+   */
+  scanFresh(): Promise<FsTree> {
+    return this._scanAfterNow();
+  }
+
+  /**
+   * Tells the scanner a file was just written whole by this process, with the
+   * given content. The next scan takes it as written — never as a copy still
+   * in progress, whatever its timestamp says. A file that changed since is
+   * read as usual.
+   *
+   * Without it, a write in the second half of the millisecond a scan starts
+   * in reads as "changed during this scan" — Node rounds an mtime to the
+   * nearest millisecond, the scan's start is truncated — and the scan reused
+   * the version BEFORE the write: measured as a receiver announcing the
+   * previous save of a file it had just applied, which reverted the writer's
+   * own copy.
+   * @param relativePath - The file, `/`-separated.
+   * @param blobId - Its content.
+   * @param size - Its size as written.
+   * @param mtime - Its mtime as written, ms.
+   */
+  noteWrite(
+    relativePath: string,
+    blobId: string,
+    size: number,
+    mtime: number,
+  ): void {
+    if (this._ownWrites.size >= OWN_WRITES_MAX) {
+      this._ownWrites.delete(this._ownWrites.keys().next().value as string);
+    }
+    this._ownWrites.set(relativePath, { blobId, size, mtime });
   }
 
   /** Whether a watcher is currently installed. */
@@ -608,6 +634,17 @@ export class FsScanner {
           // carry any timestamp it likes, and a file copied from a machine
           // running fast arrives dated ahead. None of those is a file being
           // written, so none of them may be held back.
+          // Written whole by this process a moment ago: not a copy in
+          // progress, and not to be read as the version before it.
+          const written = this._ownWrites.get(childRelPath);
+          const ownWrite =
+            written !== undefined &&
+            written.size === childStats.size &&
+            Math.abs(written.mtime - mtimeMs) < 1;
+          if (written !== undefined && !ownWrite) {
+            this._ownWrites.delete(childRelPath);
+          }
+
           const now = Date.now();
           const inTheFuture = mtimeMs > now;
           const seen = this._growing.get(childRelPath);
@@ -660,7 +697,7 @@ export class FsScanner {
             now - mtimeMs < (this._options.settleMs as number);
           const firstSight = neverRead && (touchedJustNow || seen === undefined);
 
-          if (growing || firstSight) {
+          if (!ownWrite && (growing || firstSight)) {
             this._growing.set(childRelPath, childStats.size);
           } else {
             this._growing.delete(childRelPath);
@@ -673,7 +710,16 @@ export class FsScanner {
           // is public API, and without this it returned a tree with the
           // caller's fresh files missing — twice, because the guard was lost
           // again when the predicate changed.
+          //
+          // "Changed while this scan ran" over-reaches by up to half a
+          // millisecond: Node rounds an mtime to the NEAREST millisecond and
+          // `Date.now()` truncates, so a write in the second half of the
+          // millisecond the scan started in reads as after the start even when
+          // it finished before. For a save that costs one follow-up scan. For
+          // the agent's own apply it was the version before the apply going
+          // back out as an edit — hence `ownWrite`, see `noteWrite`.
           if (
+            !ownWrite &&
             this._watcher !== null &&
             !this._paused &&
             ((mtimeMs > this._scanStartedAt && !inTheFuture) ||
@@ -694,7 +740,9 @@ export class FsScanner {
             : undefined;
 
           let blobId: string;
-          if (
+          if (ownWrite) {
+            blobId = (written as { blobId: string }).blobId;
+          } else if (
             cached &&
             cached.mtime === mtimeMs &&
             cached.size === childStats.size

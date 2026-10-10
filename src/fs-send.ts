@@ -4,15 +4,15 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { DIR_MARKER, type ContentMap } from './fs-conflict-resolver.ts';
+import { DIR_MARKER } from './fs-merge.ts';
 
 // .............................................................................
 /** What {@link planAuthoring} is asked. */
 export interface AuthoringQuestion {
   /** The folder as it was just scanned, `path → blobId`. */
-  folder: ContentMap;
+  folder: ReadonlyMap<string, string>;
   /** The folder as this node's own head describes it. */
-  head: ContentMap;
+  head: ReadonlyMap<string, string>;
   /**
    * Paths the watcher saw deleted since the head was authored. A deleted
    * directory covers everything below it.

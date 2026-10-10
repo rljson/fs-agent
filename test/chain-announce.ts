@@ -20,7 +20,6 @@
 
 import { Db } from '@rljson/db';
 
-import { CHAIN_HEAD_PREFIX } from '../src/fs-agent.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
 import type { FsTree } from '../src/fs-scanner.ts';
@@ -33,13 +32,13 @@ export interface PeerPush {
   changed?: string[];
   /** Paths it deleted to get there — the half an absence cannot state. */
   removed?: string[];
-  /** The entry this push builds on. Omitted means "the chain's own tip". */
+  /** The entry this push builds on. Omitted means a root. */
   previous?: string[];
 }
 
 /** A peer push, as it reaches a receiver. */
 export interface Announced {
-  /** What to hand to `connector.advertise` — a marked chain head. */
+  /** What to hand to `connector.advertise` — the chain head itself. */
   announcement: string;
   /** The content ref the tree was stored under. */
   treeRef: string;
@@ -66,10 +65,10 @@ export const announceAsPeer = async (
     treeRef,
     changed: push.changed,
     removed: push.removed,
-    previous: push.previous,
+    previous: push.previous ?? [],
   });
   return {
-    announcement: `${CHAIN_HEAD_PREFIX}${entry.head}`,
+    announcement: entry.head,
     treeRef,
     head: entry.head,
   };

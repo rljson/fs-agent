@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { DIR_MARKER } from '../src/fs-conflict-resolver.ts';
+import { DIR_MARKER } from '../src/fs-merge.ts';
 import { planAuthoring, type AuthoringQuestion } from '../src/fs-send.ts';
 
 const FLOORS = { minFiles: 100, maxRatio: 0.3, allGoneMinFiles: 10 };

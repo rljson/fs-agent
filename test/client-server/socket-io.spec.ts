@@ -47,7 +47,7 @@ defineProductionSyncTests(
     const serverBs = new BsMem();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
 
-    const server = new Server(route, serverIo, serverBs);
+    const server = new Server(route, serverIo, serverBs, { stamp: { domain: 'test', hub: 'hub' } });
     await server.init();
 
     socketIoServer.on('connection', async (socket) => {

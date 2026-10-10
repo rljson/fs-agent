@@ -56,7 +56,7 @@ describe('FsAgent — an agent with nothing to say does not speak', () => {
   const agentFor = (bs: BsMem) =>
     new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 1},
     });
 
   it('says nothing when the folder is empty and nothing is remembered', async () => {
@@ -68,9 +68,6 @@ describe('FsAgent — an agent with nothing to say does not speak', () => {
     await new Promise((r) => setTimeout(r, 200));
 
     expect(sent).toEqual([]);
-    expect(
-      warnSpy.mock.calls.some((c) => String(c[0]).includes('joining quietly')),
-    ).toBe(true);
 
     stop();
     agent.scanner.stopWatch();

@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter';
-import { announceAsPeer } from './chain-announce.ts';
+import { } from './chain-announce.ts';
 import { removeTree } from './setup/remove-tree';
 
 /**
@@ -890,47 +890,6 @@ describe('FsAgent', () => {
       // Should have at least 2 entries (initial + one change)
       expect(historyTable._data.length).toBeGreaterThanOrEqual(2);
     });
-
-    it('should use sendWithAck when syncConfig.requireAck is true', async () => {
-      // Setup initial file
-      await writeFile(join(testDir, 'ack-test.txt'), 'initial');
-
-      // Setup database
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
-      await db.core.createTableWithInsertHistory(treeTableCfg);
-
-      // Create connector with requireAck enabled and short timeout
-      const syncConfig: SyncConfig = { requireAck: true, ackTimeoutMs: 500 };
-      const connector = createMockConnector(db, treeKey, syncConfig);
-
-      // Simulate server ACK: listen for refs, echo matching ACK
-      const socket = connector.socket;
-      socket.on(connector.events.ref, (payload: { r: string }) => {
-        setTimeout(() => {
-          socket.emit(connector.events.ack, { r: payload.r });
-        }, 10);
-      });
-
-      // Spy on sendWithAck
-      const sendWithAckSpy = vi.spyOn(connector, 'sendWithAck');
-
-      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
-      const stopSync = await agent.syncToDb(db, connector, treeKey);
-
-      // Wait for initial sync cycle
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Verify sendWithAck was used (not plain send) for initial ref
-      expect(sendWithAckSpy).toHaveBeenCalled();
-
-      stopSync();
-      sendWithAckSpy.mockRestore();
-    });
-
     it('should stop watching when cleanup function is called', async () => {
       // Setup initial file
       await writeFile(join(testDir, 'watched2.txt'), 'initial');
@@ -1117,65 +1076,6 @@ describe('FsAgent', () => {
       // Should not throw when dispose is called with no active sync
       expect(() => agent.dispose()).not.toThrow();
     });
-
-    it('should sync from database to filesystem when tree changes', async () => {
-      // Setup database
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      const treeTableCfg: TableCfg = createTreesTableCfg(treeKey);
-      await db.core.createTableWithInsertHistory(treeTableCfg);
-
-      // Create initial file
-      await writeFile(join(testDir, 'initial.txt'), 'initial content');
-
-      // Setup agent
-      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
-
-      // Store initial state
-      await agent.storeInDb(db, treeKey);
-
-      // Start syncing FROM database
-      const connector = createMockConnector(db, treeKey);
-      const stopSyncFromDb = await agent.syncFromDb(db, connector, treeKey);
-
-      // Wait a bit
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // Create a new target directory with different content
-      const sourceDir = join(testDir, 'source');
-      await mkdir(sourceDir, { recursive: true });
-      await writeFile(join(sourceDir, 'from-db.txt'), 'db content');
-
-      // Extract and store new tree from source
-      const sourceAgent = new FsAgent(sourceDir, agent.bs, ORIGIN_FIXTURE);
-      const newTree = await sourceAgent.extract();
-      const dbAdapter = new FsDbAdapter(db, treeKey);
-      const treeRef = await dbAdapter.storeFsTree(newTree);
-
-      // Simulate incoming ref from remote peer to trigger sync
-      connector.simulateIncoming(treeRef);
-
-      // Wait for sync to complete
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Verify file was synced from DB to filesystem
-      const syncedFile = join(testDir, 'from-db.txt');
-      const exists = await stat(syncedFile)
-        .then(() => true)
-        .catch(() => false);
-      expect(exists).toBe(true);
-
-      if (exists) {
-        const content = await readFile(syncedFile, 'utf-8');
-        expect(content).toBe('db content');
-      }
-
-      // Clean up
-      stopSyncFromDb();
-    });
-
     it('should pause and resume file watching', async () => {
       // Setup initial file
       await writeFile(join(testDir, 'watch-test.txt'), 'initial');
@@ -1690,259 +1590,6 @@ describe('FsAgent', () => {
       stopSync();
       agent.scanner.stopWatch();
     });
-
-    it('re-queues an unfetchable ref for recovery, then records a sync error once the recovery budget is exhausted', async () => {
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      // Tiny budgets so the full retry + recovery cycle runs in milliseconds:
-      // 1 inner retry (exercises the retry-warn path) and 1 recovery re-queue,
-      // after which the ref is given up and a sync error recorded.
-      const agent = new FsAgent(testDir, undefined, {
-      ...ORIGIN_FIXTURE,
-        timeouts: {
-          debounceMs: 1,
-          processRefRetries: 1,
-          processRefRetryDelayMs: 1,
-          recoveryRetries: 1,
-        },
-      });
-      await agent.scanner.watch();
-      const connector = createMockConnector(db, treeKey);
-      const stopSync = await agent.syncFromDb(db, connector, treeKey);
-
-      // A ref whose tree is not in the db → every fetch fails.
-      connector.simulateIncoming('unfetchableRef');
-
-      // Let all attempts + the single recovery cycle run to exhaustion.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // It re-queued the ref for recovery rather than dropping it immediately…
-      expect(
-        warnSpy.mock.calls.some((c) => String(c[0]).includes('re-queueing')),
-      ).toBe(true);
-      // …and only after the recovery budget was spent did it record the error.
-      const errLog = join(testDir, SYNC_ERROR_FILE);
-      expect(existsSync(errLog)).toBe(true);
-      expect(readFileSync(errLog, 'utf-8')).toContain('syncFromDb/processRef');
-
-      stopSync();
-      agent.scanner.stopWatch();
-      warnSpy.mockRestore();
-      errorSpy.mockRestore();
-    });
-
-    it('invalidates the ref in the Connector once the recovery budget is exhausted so the bootstrap heartbeat can re-deliver it', async () => {
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      const agent = new FsAgent(testDir, undefined, {
-      ...ORIGIN_FIXTURE,
-        timeouts: {
-          debounceMs: 1,
-          processRefRetries: 0,
-          processRefRetryDelayMs: 1,
-          recoveryRetries: 1,
-        },
-      });
-      await agent.scanner.watch();
-      const connector = createMockConnector(db, treeKey);
-      const invalidateSpy = vi.spyOn(connector, 'invalidateReceived');
-      const stopSync = await agent.syncFromDb(db, connector, treeKey);
-
-      // A ref whose tree is not in the db → every fetch fails to exhaustion.
-      connector.simulateIncoming('unfetchableRef');
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Without invalidation the ref stays in the received-dedup set forever and
-      // the server's heartbeat (which re-advertises the latest ref) can never
-      // re-trigger the failed apply. We must hand the ref back for re-delivery.
-      expect(invalidateSpy).toHaveBeenCalledWith('unfetchableRef');
-
-      stopSync();
-      agent.scanner.stopWatch();
-      invalidateSpy.mockRestore();
-      warnSpy.mockRestore();
-      errorSpy.mockRestore();
-    });
-
-    it('hands back a ref it suppressed as its own echo, so a later return to that state is not deduped away', async () => {
-      // The sibling of the bug below, on the other gate, and it cost the same
-      // thing: lost deletions that never heal.
-      //
-      // Refs are content hashes. Delete a file and the folder returns to the
-      // state it held before that file existed — re-deriving that state's exact
-      // ref. If a peer already announced that ref once and this agent dismissed
-      // it as its own echo WITHOUT handing it back, the connector's dedup keeps
-      // it marked received. The deletion's announcement is then dropped on
-      // arrival: it never reaches the verdict, nothing is logged, nothing is
-      // applied, and no re-announcement can ever rescue it, because every one
-      // carries the identical hash.
-      //
-      // Invalidating is safe for a genuine echo too: it only means the ref is
-      // judged again if it returns. Still in that state -> suppressed again at
-      // no cost. Moved on -> it was news after all.
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-      const agent = new FsAgent(testDir, undefined, {
-      ...ORIGIN_FIXTURE,
-        timeouts: { debounceMs: 1 },
-      });
-      await agent.scanner.watch();
-      const connector = createMockConnector(db, treeKey);
-      const invalidateSpy = vi.spyOn(connector, 'invalidateReceived');
-      const stopSync = await agent.syncFromDb(db, connector, treeKey);
-
-      // The agent believes this is the last state it advertised, so the ref
-      // coming back reads as its own echo.
-      (agent as unknown as { _lastSentRef?: string })._lastSentRef = 'ownRef';
-      connector.simulateIncoming('ownRef');
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(invalidateSpy).toHaveBeenCalledWith('ownRef');
-
-      stopSync();
-      agent.scanner.stopWatch();
-      invalidateSpy.mockRestore();
-      warnSpy.mockRestore();
-    });
-
-    it('retires a ref adopted WITHOUT a restore, so the folder can be told to return to that state', async () => {
-      // A ref whose tree already matches the folder is adopted through the
-      // equivalent-content path: nothing to restore, nothing to do. It is
-      // still an adopted state, and it has to be recorded as one — because
-      // the only ref this agent ever retires from the connector's dedup sets
-      // is the one it is LEAVING. A state adopted silently is never left in
-      // the bookkeeping's eyes, so it is never retired, and it stays marked
-      // "already received" for the rest of the session.
-      //
-      // That matters because refs are content hashes: a folder that returns
-      // to an earlier state re-derives that state's exact ref. Every agent
-      // reaches its BOOTSTRAP state this way (peers that are already in sync
-      // have equivalent content by definition), so deleting a file created
-      // after bootstrap re-derives the bootstrap ref — and the advertisement
-      // was dropped as a duplicate before any agent saw it. The deletion
-      // reached no peer at all.
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-      await writeFile(join(testDir, 'seed.txt'), 'seed');
-
-      const agent = new FsAgent(testDir, undefined, ORIGIN_FIXTURE);
-      const dbAdapter = new FsDbAdapter(db, treeKey);
-
-      // refSeed describes the folder exactly as it stands → adopted without
-      // a restore when it arrives.
-      const seedOnly = await agent.extract();
-      const refSeed = await dbAdapter.storeFsTree(seedOnly);
-
-      // refBoth adds a file, so applying it is a real restore.
-      await mkdir(sourceDir, { recursive: true });
-      await writeFile(join(sourceDir, 'seed.txt'), 'seed');
-      await writeFile(join(sourceDir, 'temp.txt'), 'temporary');
-      const sourceAgent = new FsAgent(sourceDir, agent.bs, ORIGIN_FIXTURE);
-      const refBoth = await dbAdapter.storeFsTree(await sourceAgent.extract());
-
-      const connector = createMockConnector(db, treeKey);
-      const invalidateSpy = vi.spyOn(connector, 'invalidateSent');
-      const stopSync = await agent.syncFromDb(db, connector, treeKey, {
-        cleanTarget: true,
-      });
-
-      // 1. Adopted with no restore — the case that used to go unrecorded.
-      connector.simulateIncoming(refSeed);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
-      // 2. A real change. Leaving refSeed must retire it.
-      connector.simulateIncoming(refBoth);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      expect(existsSync(join(testDir, 'temp.txt'))).toBe(true);
-      expect(invalidateSpy).toHaveBeenCalledWith(refSeed);
-
-      // 3. The peer deletes the file again, returning to refSeed's exact ref.
-      //    It has to be deliverable, or the deletion is lost for good.
-      //
-      //    STATED, as a peer states it: the entry says `temp.txt` was removed,
-      //    and the state it produced is byte-for-byte refSeed again. The
-      //    announcement is still the BARE ref, because that is what this test
-      //    is about — a content hash that recurs must survive the connector's
-      //    dedup. A `~H~` head would be a fresh string every time and would
-      //    not exercise it at all.
-      await announceAsPeer(db, treeKey, {
-        tree: seedOnly,
-        removed: ['temp.txt'],
-      });
-      connector.simulateIncoming(refSeed);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      expect(existsSync(join(testDir, 'temp.txt'))).toBe(false);
-      expect(existsSync(join(testDir, 'seed.txt'))).toBe(true);
-
-      stopSync();
-      agent.scanner.stopWatch();
-      invalidateSpy.mockRestore();
-    });
-
-    it('drops an unfetchable ref immediately when recovery is disabled (recoveryRetries: 0)', async () => {
-      const io = new IoMem();
-      await io.init();
-      const db = new Db(io);
-      const treeKey = 'fsTree';
-      await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      // recoveryRetries: 0 restores the old drop-on-exhaustion behaviour.
-      const agent = new FsAgent(testDir, undefined, {
-      ...ORIGIN_FIXTURE,
-        timeouts: {
-          debounceMs: 1,
-          processRefRetries: 0,
-          processRefRetryDelayMs: 1,
-          recoveryRetries: 0,
-        },
-      });
-      await agent.scanner.watch();
-      const connector = createMockConnector(db, treeKey);
-      const stopSync = await agent.syncFromDb(db, connector, treeKey);
-
-      connector.simulateIncoming('unfetchableRef');
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // No recovery re-queue, straight to the recorded error.
-      expect(
-        warnSpy.mock.calls.some((c) => String(c[0]).includes('re-queueing')),
-      ).toBe(false);
-      const errLog = join(testDir, SYNC_ERROR_FILE);
-      expect(existsSync(errLog)).toBe(true);
-
-      stopSync();
-      agent.scanner.stopWatch();
-      warnSpy.mockRestore();
-      errorSpy.mockRestore();
-    });
-
     it('should handle scanning path that is not a directory', async () => {
       // Create a file instead of directory
       const filePath = join(testDir, 'not-a-dir');
@@ -2104,7 +1751,13 @@ describe('FsAgent', () => {
       };
 
       // Create agent
-      const agent = await FsAgent.fromClient(testDir, treeKey, client, socket);
+      const agent = await FsAgent.fromClient(
+        testDir,
+        treeKey,
+        client,
+        socket,
+        ORIGIN_FIXTURE,
+      );
 
       // Use simplified sync method
       const stopSync = await agent.syncToDbSimple();
@@ -2115,12 +1768,8 @@ describe('FsAgent', () => {
       // Stop sync
       stopSync();
 
-      // Verify tree was stored (check via db.getInsertHistory)
-      const history = await db.getInsertHistory(treeKey);
-      expect(history[`${treeKey}InsertHistory`]).toBeDefined();
-      expect(history[`${treeKey}InsertHistory`]._data.length).toBeGreaterThan(
-        0,
-      );
+      // The folder was recorded: it is the root of this node's chain.
+      expect(agent.ownHead).toBeDefined();
     });
 
     it('should use syncFromDbSimple to sync from database', async () => {
@@ -2238,7 +1887,6 @@ describe('FsAgent', () => {
       expect(agent.timeouts.fetchTree).toBe(20_000);
       expect(agent.timeouts.extract).toBe(15_000);
       expect(agent.timeouts.restore).toBe(15_000);
-      expect(agent.timeouts.syncCallback).toBe(25_000);
       expect(agent.timeouts.debounceMs).toBe(300);
     });
 
@@ -2250,7 +1898,6 @@ describe('FsAgent', () => {
           fetchTree: 2_000,
           extract: 3_000,
           restore: 4_000,
-          syncCallback: 5_000,
           debounceMs: 100,
         },
       });
@@ -2258,7 +1905,6 @@ describe('FsAgent', () => {
       expect(agent.timeouts.fetchTree).toBe(2_000);
       expect(agent.timeouts.extract).toBe(3_000);
       expect(agent.timeouts.restore).toBe(4_000);
-      expect(agent.timeouts.syncCallback).toBe(5_000);
       expect(agent.timeouts.debounceMs).toBe(100);
     });
 
@@ -2467,52 +2113,6 @@ describe('FsAgent', () => {
       expect(names).not.toContain(SYNC_ERROR_FILE);
     });
   });
-
-  describe('_withRetry', () => {
-    const withRetry = (
-      FsAgent as unknown as {
-        _withRetry: <T>(
-          fn: () => Promise<T>,
-          attempts: number,
-          baseDelayMs: number,
-          label: string,
-        ) => Promise<T>;
-      }
-    )._withRetry;
-
-    it('retries a transient failure then succeeds', async () => {
-      let calls = 0;
-      const result = await withRetry(
-        async () => {
-          calls++;
-          if (calls < 3) throw new Error('transient');
-          return 'ok';
-        },
-        5,
-        1,
-        'test',
-      );
-      expect(result).toBe('ok');
-      expect(calls).toBe(3);
-    });
-
-    it('rethrows after exhausting all attempts', async () => {
-      let calls = 0;
-      await expect(
-        withRetry(
-          async () => {
-            calls++;
-            throw new Error('permanent');
-          },
-          2,
-          1,
-          'test',
-        ),
-      ).rejects.toThrow('permanent');
-      expect(calls).toBe(2);
-    });
-  });
-
   describe('_pruneExtraneous race protection', () => {
     it('prunes pre-existing extraneous files but preserves ones that appeared during restore', async () => {
       await writeFile(join(testDir, 'old.txt'), 'o'); // existed before restore
