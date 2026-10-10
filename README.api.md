@@ -20,7 +20,6 @@ because every caller is expected to reach for them.
 | to sync a folder | [The agent](#the-agent) |
 | to know what the agent is doing | [Observability](#observability) |
 | the history itself | [The edit chain](#the-edit-chain) |
-| the repair protocol | [Bucket sync](#bucket-sync-the-wire) and [The manifest](#the-manifest-reconciliation) |
 | conflict resolution internals | [Conflicts](#conflicts) |
 | the design behind any of it | [README.architecture.md](README.architecture.md) |
 
@@ -69,7 +68,6 @@ and what each one costs — this table is the shape, that one is the advice.
 | `resolveConflicts` | `boolean` | reconcile two edits of one file, keeping the loser as a renamed copy. Off, the resolver is not even constructed |
 | `onConflict` | `(reports) => void` | called as conflicts are resolved; without it they are resolved silently |
 | `joinWaitMs` | `number` | how long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
-| `bucketSync` | `boolean` | repair a divergence by comparing manifests instead of replacing a folder |
 | `antiEntropy` | `AntiEntropyOptions` | the periodic comparison that heals a lost announcement |
 | `syncConfig` | `SyncConfig` | forwarded to every `Connector`. Without `causalOrdering` the wire carries no predecessors and no conflicting edit can be merged |
 | `clientIdentity` | `ClientIdentity` | who this machine is, on the wire |
@@ -215,7 +213,7 @@ keeps its shape, so a caller reading it is unaffected.
 
 ```ts
 { atMs: number;
-  route: 'restore' | 'bucketSync' | 'removals';
+  route: 'restore' | 'removals';
   wouldRemove: number;
   held: number;
   paths: readonly string[]; }
@@ -294,62 +292,6 @@ speak for.
 
 Idempotent. **The agent creates its own tables**, so a host one release behind
 cannot break it.
-
----
-
-## Bucket sync (the wire)
-
-`src/fs-bucket-sync.ts` — a four-message round that repairs a divergence
-additively.
-
-| | |
-| --- | --- |
-| `BQ` `BR` `BG` `BE` | the four prefixes: ask roots, reply roots, ask entries, reply entries |
-| `BUCKET_SYNC_PREFIXES` | all four |
-| `isBucketSync(ref)` | is this a control message rather than a state |
-| `encodeRoots` / `decodeRoots` | roots message |
-| `encodeWanted` / `decodeWanted` | which buckets differ |
-| `encodeEntries` / `decodeEntries` | the entries in those buckets |
-| `class FsBucketSync` | `start()`, `receive(ref)` |
-| `interface BucketSyncHost` | what the agent supplies: `manifest()`, `claimed()`, `editTimes()`, `apply(plan)`, `ready()`, `send(ref)`, `agreed()` |
-
-Bodies are JSON because a POSIX filename may contain any byte except `/` and
-NUL. A control message **names no tree**, which is why it must never reach the
-anti-entropy as if it were a state.
-
----
-
-## The manifest (reconciliation)
-
-`src/fs-manifest.ts` — what two folders compare, and what they conclude.
-
-### `type ManifestEntry`
-
-```ts
-readonly [path: string, blobId: string, claimed?: 0 | 1, editedAt?: string]
-```
-
-`claimed` says **who** edited; `editedAt` says **when** — the `timeId` of the
-newest Edit for that path, so a tombstone can be ordered against the write it
-claims to supersede. Absent means "the sender did not say", and the rules that
-predate the field decide. Neither is part of `digestOf`: bucket roots must
-depend on content alone, or a node sees differences that are not there.
-
-### `reconcile(ours, theirs, claimed?): ReconcilePlan`
-
-`{ fetch, drop, redelete, conflict }`. Both sides compute it from the same two
-inputs and reach the same verdict, which is what convergence requires.
-
-A tombstone older than our write is refused; our tombstone older than their
-write makes us fetch. Without the second half each side holds its position for
-ever.
-
-| | |
-| --- | --- |
-| `BUCKET_COUNT` · `bucketOf(path)` | how paths are divided |
-| `bucketRoots(manifest)` · `differingBuckets(a, b)` · `BucketRoots` | O(differences), not O(size) |
-| `entriesInBuckets(manifest, buckets, claimed?, editTimes?)` | the entries for an exchange |
-| `TOMBSTONE_BLOB` | a deletion travels as an **entry**, not an absence |
 
 ---
 

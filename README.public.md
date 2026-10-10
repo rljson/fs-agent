@@ -226,7 +226,6 @@ costs.
 | `resolveConflicts` | `false` on the constructor, **`true` via `fromClient`** | Reconciles two edits to one file, keeping the loser as a renamed copy. Off, a conflicting edit is never merged — the resolver is not even constructed. The constructor keeps the primitive default because a hub may relay without arbitrating |
 | `onConflict` | — | Called with the conflict reports. Without it a conflict is resolved and nobody is told |
 | `joinWaitMs` | `1500` | How long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
-| `bucketSync` | `true` | Repairs a divergence by comparing manifests and fetching only what is missing, instead of replacing a folder |
 | `antiEntropy` | `DEFAULT_ANTI_ENTROPY` | The periodic comparison that heals a lost announcement. A machine that is behind **asks**, rather than waiting to be told |
 | `syncConfig` | **`causalOrdering` and `includeClientIdentity` default to `true` via `fromClient`** | Forwarded to every `Connector` the agent builds. Without `causalOrdering` the wire carries no predecessor refs, so no conflicting edit can be merged — the agent warns once, loudly |
 | `clientIdentity` | — | Who this machine is, on the wire |
@@ -513,9 +512,8 @@ runner.
 excludes mtime and fixes a canonical child order, so the same bytes hash
 differently than in older releases. Nothing is destroyed, but the fleet reads
 divergent until every machine has re-scanned. **Upgrade machines together**:
-there is no switch for speaking an older wire format, deliberately — a build
-that cannot read a chain head cannot read the bucket protocol either, so one
-flag would select two different consistency models.
+there is no switch for speaking an older wire format, deliberately — one flag
+would select two different consistency models.
 
 **A deliberate mass deletion does not arrive.** Deleting most of a folder is
 refused on every machine, and nothing asks the user — see "what it does not do"

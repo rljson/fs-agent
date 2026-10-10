@@ -110,8 +110,7 @@ What holds it up:
 
 ### 2.3 That two people editing one file lose nothing
 
-`fs-conflict-resolver.spec.ts` (41) and `fs-manifest.spec.ts` (36) carry the
-decisions; `fs-conflict-integration.spec.ts` and `conflict-sync.spec.ts` carry
+`fs-conflict-resolver.spec.ts` (41) carries the decisions; `fs-conflict-integration.spec.ts` and `conflict-sync.spec.ts` carry
 them end to end. The guarantee is that one version wins **deterministically on
 every node**, the loser survives as a renamed conflict copy, and the conflict
 is reported rather than silently settled.
@@ -283,9 +282,6 @@ about the test changes.
 
 ### 2.10 That the wire format is what it claims to be
 
-`fs-bucket-sync.spec.ts` (29) pins the format itself — message bodies are JSON
-because a POSIX filename may contain any byte but `/` and NUL.
-
 There is no mixed-version test, because there is only one format — every node
 announces a chain head, and the fleet is upgraded together.
 
@@ -426,10 +422,8 @@ loop are counted as they run. They sum to the 988 above.
 | `fs-scanner.spec.ts` | 56 | scanning, watching, the scan cache |
 | `fs-conflict-resolver.spec.ts` | 41 | tip ordering, winners, three-way merge, copy naming |
 | `fs-anti-entropy.spec.ts` | 38 | the repair decision, by example |
-| `fs-manifest.spec.ts` | 46 | buckets, digests, reconciliation plans |
 | `fs-agent-degradation.spec.ts` | 89 | what the agent does when a dependency fails, and the shapes no scenario reaches |
 | `fs-collect-removals.spec.ts` | 31 | the removal walk |
-| `fs-bucket-sync.spec.ts` | 29 | the wire format |
 | `fs-ignore.spec.ts` | 28 | glob ignore patterns, and every legacy prefix |
 | `fs-blob-adapter.spec.ts` | 26 | file ↔ blob |
 | `fs-edit-chain.spec.ts` | 20 | the chain |
