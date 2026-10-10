@@ -1,6 +1,85 @@
 # Changelog
 
+## [0.2.0]
+
+**No compatibility with 0.1.x.** A machine on 0.2.0 and one on an older release
+cannot sync: upgrade a domain together, while it is in sync, and configure its
+hubs to stamp (`@rljson/server` `stamp: { domain, hub }`).
+
+### Removed
+
+Every mechanism that existed to tolerate, migrate from or diagnose 0.1.x, with
+its tests:
+
+- bucket sync and the manifest (`fs-bucket-sync.ts`, `fs-manifest.ts`);
+- the tombstone log, the per-path edit times and the stated-removal gate
+  (`planRemovals`, `RemovalPlan`, `RemovalQuestion`);
+- the anti-entropy module (`FsAntiEntropy`, `antiEntropyDecision`,
+  `DEFAULT_ANTI_ENTROPY` and its types) and the `antiEntropy` option;
+- the old conflict resolver (`FsConflictResolver`, `threeWayMerge`,
+  `compareTips`, `decideWinner`, `findCommonAncestor`, `conflictCopyName`,
+  `formatConflictTimestamp`, `fsTreeToContentMap` and its types) and the
+  `resolveConflicts` option — the merge always runs;
+- the `~H~` prefix and bare tree refs on the wire; `onConflict`,
+  `refusedDeletions` and `.fsagent-conflicts.json`; the `causalOrdering`
+  warning;
+- `FsEditChain.classify`, `head`, `ready`, `refreshHead`, `entryForTreeRef`,
+  `oldestEntryForTreeRef`, the `timeId` of `collectRemovals`, and the default of
+  `FsAppendOptions.previous`, which is now required;
+- the `conflict/merged`, `conflict/overwritten` and `config/degraded` signals,
+  and `'clock'`, `'claim'` and `'hash'` in `FsSignalDecidedBy`;
+- `differingPaths` in `AntiEntropyStatus`;
+- the `storageOptions` and `restoreOptions` agent options, the
+  `syncCallback`, `processRefRetries`, `processRefRetryDelayMs` and
+  `recoveryRetries` timeouts, and `FsScanOptions.settleMinBytes` — none of them
+  was read by anything.
+
+### The protocol
+
+- **The chain is the only order.** A node authors an entry per change and
+  announces its head; a receiver relates the head to its own: `behind` →
+  apply and adopt, `ahead` → announce, `fork` → merge, `incomplete` → nothing,
+  said. A deletion is applied because the head that lacks the file descends from
+  this node's own; local work is authored before any head is judged.
+- **The conflict table** (`merge3`): one side's change wins; different paths
+  and the same change merge; two versions of one file are both kept and the one
+  that reached the fleet later keeps the name; an edit beats a concurrent
+  deletion; a directory and a file at one path are both kept, the directory
+  keeps it (`collision/type`, required).
+- **The stamp.** The hub stamps what it relays; a version's stamp is the stamp
+  of the announcement that first carried it to the fleet, derived by every
+  machine from what it receives and kept in `${treeKey}EditStamps`. No machine's
+  clock is compared to another's.
+- **Guards at both ends.** A sender does not record a mass disappearance its
+  watcher did not see. A receiver keeps what an apply would lose, adopts the
+  head anyway, and records the kept files again — which refills a machine that
+  lost its folder.
+- **Healing** is the hub saying its head again on the beacon and the bootstrap.
+
+### Fixed on the way
+
+- Authoring read the watcher's last pass, which can run while an apply is still
+  writing, and announced the version before the write as a local edit — a
+  revert, on every machine. Authoring now scans afresh under the lock.
+- A partial apply — a locked file, an unreachable blob — made the node claim
+  the files that had landed. What landed is recorded, not claimed, and
+  recognised by the retry.
+- A receiver could author the version of a file before the one it had just
+  applied — reverting the writer's own copy — when the apply landed in the
+  second half of the millisecond the next scan started in (Node rounds an mtime
+  to the nearest millisecond). The scanner now takes what the agent wrote whole
+  as written (`FsScanner.noteWrite`).
+- An apply had no time bound; one waiting on a blob nobody served would have
+  kept the node from recording its own work.
+- A stamp walk that met a row it could not read yet never resumed.
+- A node whose head never reached the hub deferred the same merge for ever; it
+  now announces its head again, backing off.
+
 ## [0.1.1]
+
+> **Never published.** The signal channel below ships in 0.2.0, which then
+> removed `onConflict`, `refusedDeletions` and the conflict log after all, and
+> changed the signal kinds — see [0.2.0]. Kept as the record of the step.
 
 ### One channel for everything that happened to the folder
 

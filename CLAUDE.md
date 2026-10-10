@@ -209,28 +209,33 @@ Tests require `cross-env NODE_OPTIONS=--max-old-space-size=8192` for heap-intens
 
 ---
 
-## Anti-entropy — rules
+## The sync — rules
 
-- **The rule order in `antiEntropyDecision` is load-bearing**: origin-push,
-  then pull, then last-applied-push, then merge. Each reorder was tried and
-  each one put a deleted file back (see `README.architecture.md` →
-  *Anti-Entropy*). Change it only with a failing case in
-  `test/fs-anti-entropy.spec.ts` first.
-- **Only a state this agent authored is re-announced** (`_lastPushedRef`).
-  Set it only where the agent itself pushes a state (initial push, debounced
-  push, merge revision) — never in an apply path.
-- **Every repair goes through `processRef` / `_sendRef`.** The anti-entropy
-  must never write, prune or delete on its own.
-- **The grace period is keyed on this node's own state only.** Never add the
-  hub's state to the key: every change there would restart the wait, and a
-  node that misses every forward while another machine keeps writing would
-  never be repaired (the review's finding; `repairs a node that misses every
-  forward while another keeps writing` pins it).
-- **`heals-after-forced-divergence` must stay green** on the state beacon and
-  on the heartbeat, and its control run must stay divergent. It needs
-  `@rljson/server` ≥ 0.0.67: against 0.0.63 six cases fail (no beacon, no
-  `p`) — that is the test working, and it has to be proven against the
-  released server, not only a local link.
+- **The chain is the only order.** Never compare two machines' clocks. A
+  `timeId` breaks a tie between two entries at the same distance in
+  `lastEditOf`, and nothing else; two concurrent versions are ordered by the
+  hub's stamp (`README.architecture.md` → *The stamp*).
+- **A deletion is applied only from a `behind` head** — one that descends from
+  this node's own. Anywhere else an absence reaches the folder only through
+  `merge3`, against the base. Never prune on any other evidence.
+- **Author local work before judging any head** (`receive`'s first step), so a
+  head that never saw that work cannot overwrite it.
+- **Author from `scanner.scanFresh()`, under the lock — never from
+  `scanner.tree`.** The last watcher pass can have run while an apply was still
+  writing; authoring from it announces a revert (F9 and the no-laundering
+  regression test pin it).
+- **A receiver adopts and never authors.** A merge entry is derived from both
+  heads; what a cut-short apply wrote is recorded in `_partiallyApplied`, not
+  claimed.
+- **C3 decides only with both stamps known.** Otherwise the merge defers, the
+  node re-announces its own head with backoff (`STAMP_ASK_*`), and a second
+  wait is signalled. Every hub in a test harness is configured with `stamp`, as
+  production's must be.
+- **Guards at both ends.** The sender does not author a mass disappearance its
+  watcher did not see; the receiver keeps what an apply would lose, adopts the
+  head anyway and authors the kept files again.
+- **`heals-after-forced-divergence` must stay green** on the state beacon and on
+  the bootstrap heartbeat.
 - **`stateBeaconEvent` comes from `@rljson/db`.** Never spell it out here.
 
 ---
