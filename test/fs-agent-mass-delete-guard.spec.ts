@@ -636,10 +636,10 @@ describe('FsAgent — the mass-delete guard', () => {
             paths: readonly string[],
           ) => void;
         }
-      )._refuseDeletion('bucketSync', 150, 160, ['a.txt', 'b.txt']);
+      )._refuseDeletion('removals', 150, 160, ['a.txt', 'b.txt']);
 
       const [refusal] = agent.refusedDeletions;
-      expect(refusal.route).toBe('bucketSync');
+      expect(refusal.route).toBe('removals');
       expect(refusal.wouldRemove).toBe(150);
       expect(refusal.held).toBe(160);
       expect(

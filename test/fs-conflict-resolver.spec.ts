@@ -795,6 +795,32 @@ describe('FsConflictResolver', () => {
     expect(h.disk.get(copy as string)).toBe('vB');
   });
 
+  it('gives a path to the losing BRANCH when its edit of that path is the later one', async () => {
+    // The other direction of the case above: C wins the branch order, but B
+    // edited `doc.txt` after C did, so B keeps the path and C's version is
+    // the copy. The branch order is a verdict about branches, not about paths.
+    const h = harness({
+      refOf: { O: 'refO', B: 'refB', C: 'refC' },
+      trees: {
+        refO: { 'doc.txt': 'v0' },
+        refB: { 'doc.txt': 'vB' },
+        refC: { 'doc.txt': 'vC' },
+      },
+      rows: [row('O', []), row('B', ['O']), row('C', ['O'], 'NB-CCCC', 1000)],
+      lastEditOfPath: {
+        refB: { 'doc.txt': '9000:bbb' },
+        refC: { 'doc.txt': '1000:ccc' },
+      },
+      withOnStored: true,
+    });
+
+    await new FsConflictResolver(h.deps).resolve(conflict(['C', 'B']));
+
+    expect(h.disk.get('doc.txt')).toBe('vB');
+    const copy = [...h.disk.keys()].find((p) => p.includes('conflicted copy'));
+    expect(h.disk.get(copy as string)).toBe('vC');
+  });
+
   it('merges a fork: winner keeps the path, loser is renamed, fork collapses', async () => {
     // Ancestor O, loser B (older), winner C (newer). doc.txt conflicts.
     const h = harness({

@@ -13,7 +13,7 @@ import { Connector, Db, stateBeaconEvent } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
-import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
+import { CHAIN_HEAD_PREFIX, FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 // The anti-entropy's wiring inside the agent, driven by hand: a hub
@@ -84,6 +84,15 @@ describe('FsAgent — anti-entropy wiring', () => {
     const { agent, beacon } = await start();
     beacon({ o: 'hub', r: 'hub-state', p: ['x'] });
     expect(agent.antiEntropyStatus?.hubRef).toBe('hub-state');
+  });
+
+  // A head nobody can read is not evidence of anything: reading it as a
+  // divergence would report a disagreement the agent cannot describe.
+  it('does not hear a beacon naming a chain head it cannot read', async () => {
+    const { agent, beacon } = await start();
+    beacon({ o: 'hub', r: `${CHAIN_HEAD_PREFIX}aHeadNobodyHolds` });
+    await sleep(100);
+    expect(agent.antiEntropyStatus?.hubRef).toBeNull();
   });
 
   // A stopped sync reports nothing (review, an earlier change): a status left behind

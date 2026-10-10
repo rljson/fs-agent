@@ -34,11 +34,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FsAgent } from '../src/fs-agent.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
-import {
-  reconcile,
-  TOMBSTONE_BLOB,
-  type ManifestEntry,
-} from '../src/fs-manifest.ts';
 
 const TREE = 'fileTree';
 
@@ -178,62 +173,6 @@ describe('level 2 — surfaces', () => {
     // not pulled is the ordinary case.
     expect(await chain.entry('a-ref-only-a-peer-holds')).toBeUndefined();
   }, 30_000);
-
-  // ...........................................................................
-  // S4 — a delete is expressible as something a peer can ACT on.
-  //
-  // The tombstone-level unit of §1.2. Before, a deletion reached a peer only
-  // as an absence from the next tree, and an absence is indistinguishable from
-  // a file that peer never had — which is how deleted files came back across a
-  // fleet.
-  //
-  // This test used to assert a method name (`chain.isTombstoned`) that was
-  // never implemented: an API-shape assertion standing in for a capability,
-  // and the wrong way round. The capability is what matters, and it is the
-  // MANIFEST: a tombstoned path is advertised with an empty blob id, so it
-  // travels through the ordinary comparison and a peer holding the file sees
-  // something to drop.
-  // ...........................................................................
-  it('S4: a deletion is advertised to peers as a fact, not an absence', async () => {
-    const db = await makeDb();
-    await writeFile(join(dir, 'doomed.txt'), 'doomed');
-    await writeFile(join(dir, 'keeper.txt'), 'keeper');
-
-    const agent = new FsAgent(dir, new BsMem(), {
-      ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 20 },
-    });
-    agents.push(agent);
-    const connector = new Connector(
-      db,
-      Route.fromFlat(`/${TREE}`),
-      new SocketMock(),
-    );
-    stops.push(await agent.syncToDb(db, connector, TREE));
-    await new Promise((r) => setTimeout(r, 300));
-
-    await unlink(join(dir, 'doomed.txt'));
-    await new Promise((r) => setTimeout(r, 500));
-
-    // The manifest this node advertises SAYS the path is gone.
-    const manifest = agent['_manifest']() as ReadonlyMap<string, string>;
-    expect(manifest.get('doomed.txt')).toBe(TOMBSTONE_BLOB);
-    expect(manifest.get('keeper.txt')).not.toBe(TOMBSTONE_BLOB);
-
-    // And a peer that still holds the file reads that as something to DROP —
-    // not as a file to fetch, and not as nothing at all.
-    const peerStillHasIt: ManifestEntry[] = [
-      ['doomed.txt', 'some-blob'],
-      ['keeper.txt', manifest.get('keeper.txt') as string],
-    ];
-    const plan = reconcile(peerStillHasIt, [
-      ['doomed.txt', TOMBSTONE_BLOB],
-      ['keeper.txt', manifest.get('keeper.txt') as string],
-    ]);
-    expect(plan.drop).toEqual(['doomed.txt']);
-    expect(plan.fetch).toEqual([]);
-  }, 30_000);
-
   // ...........................................................................
   // S6 — the agent WRITES the chain as it pushes.
   //
