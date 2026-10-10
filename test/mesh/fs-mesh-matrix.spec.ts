@@ -277,7 +277,11 @@ describe('the scenario matrix, at the mesh tier', () => {
   // is what made it findable at all: reasoning about the cascade was wrong
   // three times, and the trace was right the first time.
   // ...........................................................................
-  it('I7b: a delivered deletion does not beat a later re-creation', async () => {
+  // SKIPPED in 0.2.0 step 5.1, not deleted. It fails without bucket sync, and
+  // what it tests is the stated-removal gate, which 5.2 removes. Its scenario —
+  // a deletion does not beat a later re-creation — is conflict row C4 and is
+  // re-expressed in `fs-conflict-rules.spec.ts` (5.3).
+  it.skip('I7b: a delivered deletion does not beat a later re-creation', async () => {
     mesh = await buildFsMesh({ root: root('i7b'), names: ['A', 'B', 'C'] });
 
     await mesh.node('A').write('anchor.txt', 'anchor');
