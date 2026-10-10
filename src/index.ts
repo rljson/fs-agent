@@ -51,34 +51,6 @@ export {
   type Reachability,
 } from './fs-anti-entropy.ts';
 export {
-  BE,
-  BG,
-  BQ,
-  BR,
-  BUCKET_SYNC_PREFIXES,
-  decodeEntries,
-  decodeRoots,
-  decodeWanted,
-  encodeEntries,
-  encodeRoots,
-  encodeWanted,
-  FsBucketSync,
-  isBucketSync,
-  type BucketSyncHost,
-} from './fs-bucket-sync.ts';
-export {
-  BUCKET_COUNT,
-  bucketOf,
-  bucketRoots,
-  differingBuckets,
-  entriesInBuckets,
-  reconcile,
-  TOMBSTONE_BLOB,
-  type BucketRoots,
-  type ManifestEntry,
-  type ReconcilePlan,
-} from './fs-manifest.ts';
-export {
   createFsChainTables,
   FS_EDIT_ACTION,
   FsEditChain,
