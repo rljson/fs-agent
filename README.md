@@ -20,7 +20,7 @@ decision everything else follows from.
 
 ```bash
 npm install @rljson/fs-agent
-pnpm test     # 72 files, 988 scenarios, 100 % coverage, then eslint
+pnpm test     # 63 files, 719 scenarios, 100 % coverage, then eslint
 ```
 
 ## Where to start
@@ -28,7 +28,7 @@ pnpm test     # 72 files, 988 scenarios, 100 % coverage, then eslint
 | if you are | read |
 | --- | --- |
 | **using the package** | [README.public.md](README.public.md) — install, the production configuration, every option and what it costs, troubleshooting |
-| **deciding whether to trust it** | [README.tests.md](README.tests.md) — what the 988 scenarios actually prove, and what they cannot |
+| **deciding whether to trust it** | [README.tests.md](README.tests.md) — what the 719 scenarios actually prove, and what they cannot |
 | **changing the sync** | [README.architecture.md](README.architecture.md) — the mechanism, and why each rule exists |
 | **calling the API** | [README.api.md](README.api.md) — every export, grouped by module, with what it costs |
 | **setting the repo up** | [README.contributors.md](README.contributors.md) — run, debug, build, publish |
@@ -46,8 +46,9 @@ pnpm test     # 72 files, 988 scenarios, 100 % coverage, then eslint
 
 ## Before you upgrade an existing fleet
 
-**Every tree ref changes.** Content identity now fixes a canonical child order
-and excludes file modification times. Nothing is destroyed and no data moves,
-but the fleet reads divergent until every machine has re-scanned, so upgrade
-them together. See
-[Rolling Out](README.architecture.md#rolling-out-what-a-peer-can-notice).
+**0.2.0 keeps no compatibility with older releases.** It announces chain heads
+only and orders conflicts by the hub's stamp, so a machine on 0.2.0 and one on
+an older release cannot sync. Upgrade a domain together, while it is in sync,
+and configure its hubs to stamp. See
+[Known constraints](README.public.md#known-constraints) and
+[Removed in 0.2.0](README.architecture.md#removed-in-020).
