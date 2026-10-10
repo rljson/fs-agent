@@ -8,13 +8,11 @@
 // ONE CHANNEL FOR EVERYTHING THAT HAPPENED TO SOMEBODY'S FILES.
 //
 // WHY THIS EXISTS
-// The agent knew more than it said. A same-file merge reported itself through
-// `onConflict` and a mass-delete refusal through `refusedDeletions`, and
-// everything else that touched a user's folder — a bucket round settling two
-// edits, a joining machine moving files into `.fsagent-recovered/`, a path that
-// could not be written — went to `console.warn` and nowhere a program can read.
-// A host application cannot grep a log on a machine it is not running on, and
-// *"why is my file called (conflicted copy …)"* is a question it has to answer.
+// Everything that touches a user's folder — a same-file merge, a refused
+// deletion, a joining machine moving files into `.fsagent-recovered/`, a path
+// that could not be written — is reported here, and only here. A host
+// application cannot grep a log on a machine it is not running on, and *"why
+// is my file called (conflicted copy …)"* is a question it has to answer.
 //
 // WHAT A SIGNAL IS FOR
 // Three facts, and the third is the one the other surfaces never carried:

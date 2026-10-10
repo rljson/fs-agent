@@ -113,37 +113,14 @@ export interface FsAgentOptions {
    * (the default). See `README.architecture.md`, "Conflicts".
    */
   resolveConflicts?: boolean;
-  /**
-   * Called when a same-file conflict has been resolved, with one entry per
-   * conflicting path.
-   *
-   * This is the only way to learn that it happened. Before it existed,
-   * resolving a conflict renamed a file and said nothing — the user's whole
-   * evidence was an unexplained `… (conflicted copy …)` appearing in a folder.
-   * Nothing is lost either way; what was missing is anybody being told.
-   *
-   * Not an error channel: two people editing one document at once is ordinary,
-   * both versions are kept, and the folder converges. Hosts that want it after
-   * a restart should read {@link CONFLICT_LOG_FILE}, which this agent writes
-   * regardless of whether a callback is given.
-   */
-  onConflict?: (reports: FsConflictReport[]) => void;
 
   /**
    * Told about everything that happened to this folder that a person might
-   * care about — see {@link FsSignal}.
-   *
-   * **The superset of {@link onConflict}.** That callback reports one thing: a
-   * same-file merge. This one also reports a bucket round settling two edits, a
-   * joining machine moving files aside, a deletion the guard refused, a path
-   * that could not be written, and a configuration that keeps less than it
-   * could. Each signal says which paths it touched, how the outcome was chosen,
-   * and — the part no other surface carried — whether a PERSON still has to do
-   * something.
-   *
-   * `onConflict` is unchanged and still fires, so a host written against 0.1.0
-   * keeps working. A host that wants one channel instead of several should read
-   * this and {@link signals}.
+   * care about — see {@link FsSignal}. The one output channel: a same-file
+   * merge, a joining machine moving files aside, a deletion the guard refused,
+   * a path that could not be written. Each signal says which paths it touched,
+   * how the outcome was chosen, and whether a PERSON still has to do
+   * something. {@link signals} holds the same, for a host that starts later.
    */
   onSignal?: (signal: FsSignal) => void;
   /**
@@ -299,20 +276,6 @@ export const DISCONNECT_PAUSE_MAX_MS = 30_000;
 export const SYNC_ERROR_FILE = '.sync-errors.log';
 
 /**
- * Where resolved same-file conflicts are recorded, newest last.
- *
- * Its own file rather than a line in `.fsagent-state.json`, because that file
- * is rewritten WHOLE on every deletion — appending a growing list to it would
- * make deleting the next file slower in proportion to how many conflicts the
- * folder has ever had, which is the cost {@link TOMBSTONE_LOG_MAX} exists to
- * bound.
- *
- * And JSON rather than the free text of {@link SYNC_ERROR_FILE}, because this
- * is meant to be READ by a UI, not grepped by a person.
- */
-export const CONFLICT_LOG_FILE = '.fsagent-conflicts.json';
-
-/**
  * Where a file the history had DELETED is kept when this node joins.
  *
  * **Outside the synced tree, and that is the whole point.** A recovered file
@@ -371,16 +334,6 @@ export const ANTI_ENTROPY_ASK_MS = 2_000;
  * the folder IS the origin and its contents are the first state.
  */
 export const DEFAULT_JOIN_WAIT_MS = 1_500;
-
-/**
- * How many resolved conflicts the log keeps.
- *
- * Small on purpose. This is a notification surface, not an audit trail: what a
- * user needs is "here is what recently happened to your documents", and a
- * thousand entries answer a question nobody asked while making the file
- * expensive to write.
- */
-export const CONFLICT_LOG_MAX = 200;
 
 // `ATOMIC_TMP_PREFIX` now lives in `fs-atomic-write.ts`, beside the writers
 // that use it. Re-exported so this module's surface is unchanged.
@@ -517,44 +470,6 @@ export const TOMBSTONE_LOG_MAX = 10_000;
  * back to the rules that shipped before the field existed.
  */
 export const EDIT_TIME_LOG_MAX = 50_000;
-
-/** How many refused deletions {@link FsAgent.refusedDeletions} keeps. */
-export const REFUSED_DELETION_LOG_MAX = 20;
-
-/**
- * A deletion the mass-delete guard refused to carry out.
- *
- * THE GUARD IS NOT A FAILURE, IT IS A DECISION DEFERRED — and until something
- * asks the user, the deletion simply does not happen. It is refused on every
- * node, so the fleet stays split and no message will ever fix that: the
- * refusal is the correct answer to "a wiped peer is telling everyone to wipe",
- * and it is the wrong answer to "the user deleted 10 000 files on purpose".
- * Nothing in this package can tell those apart, which is why it is surfaced
- * rather than resolved.
- *
- * Already written to the log and to the sync-error file at every site. This is
- * the same fact in a form a client can READ: a UI cannot grep a log on a
- * machine it is not running on, and "why did my deletion not arrive" is the
- * question it has to answer.
- */
-export interface RefusedDeletion {
-  /** When it was refused. */
-  readonly atMs: number;
-  /**
-   * Which rule refused it, matching the sync-error key.
-   *
-   * `restore` is an incoming whole tree, `removals` a peer's stated removals.
-   * Both share the floors; a client showing this does not need to care which,
-   * but a support case does.
-   */
-  readonly route: 'restore' | 'removals';
-  /** How many paths would have been deleted. */
-  readonly wouldRemove: number;
-  /** How many this folder holds, which is what the ratio is taken against. */
-  readonly held: number;
-  /** The first few paths, for a message a person can act on. */
-  readonly paths: readonly string[];
-}
 
 /**
  * What an agent concluded about an inbound ref.
@@ -850,9 +765,6 @@ export class FsAgent {
    */
   private readonly _pathEditTimes = new Map<string, string>();
 
-  /** See {@link FsAgent.refusedDeletions}. Bounded, newest last. */
-  private readonly _refusedDeletions: RefusedDeletion[] = [];
-
   /**
    * Records the time of an edit for each path it names, keeping the newest.
    *
@@ -1145,8 +1057,6 @@ export class FsAgent {
     { blobId: string; size: number; mtime: number }
   >();
   private _timeouts: Required<TimeoutConfig>;
-  /** Told when a same-file conflict was resolved. See `onConflict`. */
-  private readonly _onConflict?: (reports: FsConflictReport[]) => void;
 
   /**
    * Everything this folder has signalled, bounded and countable.
@@ -1175,7 +1085,6 @@ export class FsAgent {
     this._bs = bs || new BsMem();
     this._timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
     this._resolveConflicts = options.resolveConflicts ?? false;
-    this._onConflict = options.onConflict;
     if (options.onSignal) this._signals.subscribe(options.onSignal);
     this._antiEntropyOptions = options.antiEntropy;
     this._joinWaitMs = options.joinWaitMs ?? DEFAULT_JOIN_WAIT_MS;
@@ -1190,17 +1099,9 @@ export class FsAgent {
         SYNC_ERROR_FILE,
         ATOMIC_TMP_PREFIX,
         AGENT_STATE_FILE,
-        // Or the notification becomes content: every conflict would write a
-        // file inside the synced folder, which is a change, which propagates,
-        // which every peer then rewrites with its own copy of the log.
-        //
-        // ADDING A FILE HERE IS ADDING A LINE HERE. The signal log was written
-        // without this entry and ten tests across seven files went red at once
-        // — modification propagation, deletion propagation, the mass-delete
-        // guard, `differingPaths`. Not one of them mentions a log: a folder that
-        // writes a file to itself on every event never stops changing, so every
-        // assertion about what a folder contains becomes a race.
-        CONFLICT_LOG_FILE,
+        // The signal log is bookkeeping, not content: a folder that writes a
+        // file to itself on every event never stops changing. A file the agent
+        // writes inside the folder has to be listed here.
         SIGNAL_LOG_FILE,
         // And the set-aside copies, for the same reason one level up: they are
         // deliberately NOT announced, which a tree ref cannot express about a
@@ -1261,20 +1162,6 @@ export class FsAgent {
    * until now nothing reported it: this is what a diagnostics view should show.
    */
   /**
-   * Deletions the mass-delete guard refused, newest last.
-   *
-   * For a client that has to answer "why did my deletion not arrive". The
-   * guard refuses on every node, so a real mass deletion stalls the whole
-   * fleet silently as far as a UI is concerned — the only trace today is a
-   * line in each machine's log. See {@link RefusedDeletion} and
-   * `README.public.md`, "Known constraints".
-   *
-   * Bounded at {@link REFUSED_DELETION_LOG_MAX}; in memory, so a restart
-   * clears it while the folders stay split. That is a reason to show it
-   * promptly, not a reason to persist it: the refusal repeats on the next
-   * announcement, so the list refills on its own.
-   */
-  /**
    * Everything that happened to this folder that a person might care about,
    * oldest first — see {@link FsSignal}.
    *
@@ -1322,10 +1209,6 @@ export class FsAgent {
    */
   onSignal(listener: (signal: FsSignal) => void): () => void {
     return this._signals.subscribe(listener);
-  }
-
-  get refusedDeletions(): readonly RefusedDeletion[] {
-    return this._refusedDeletions;
   }
 
   get antiEntropyStatus(): AntiEntropyStatus | null {
@@ -1505,44 +1388,16 @@ export class FsAgent {
   }
 
   /**
-   * Records resolved conflicts and tells the host.
-   *
-   * Both, not either: the callback is for a UI that is running now, the file is
-   * for one that starts later. A conflict the user never hears about is the
-   * thing this exists to stop, so it does not depend on anyone having
-   * subscribed.
-   *
-   * The whole file is rewritten rather than appended, because it has to stay
-   * valid JSON and bounded. At {@link CONFLICT_LOG_MAX} entries that is a few
-   * tens of kilobytes, and conflicts are rare — unlike deletions, which is why
-   * the tombstone log made the opposite choice.
+   * Reports resolved conflicts: one signal per path, which persists for a host
+   * that starts later.
    * @param reports - What the resolver resolved, one entry per path.
    */
   private _recordConflicts(reports: readonly FsConflictReport[]): void {
-    /* v8 ignore next -- @preserve the resolver never reports an empty list */
-    if (reports.length === 0) return;
-    try {
-      const file = join(this._rootPath, CONFLICT_LOG_FILE);
-      let existing: FsConflictReport[] = [];
-      if (existsSync(file)) {
-        const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'));
-        if (Array.isArray(parsed)) existing = parsed as FsConflictReport[];
-      }
-      const kept = [...existing, ...reports].slice(-CONFLICT_LOG_MAX);
-      writeFileSync(file, JSON.stringify(kept, null, 1), 'utf-8');
-    } catch (err) {
-      // A notification that cannot be filed must not take the merge with it.
-      this._writeSyncError('conflicts/record', err);
-    }
     for (const report of reports) {
       console.warn(
         `${this._tag} CONFLICT on "${report.path}": kept both — the other ` +
           `version is at "${report.copyPath}"`,
       );
-      // `review`, not `required`: both versions are on disk and the folder has
-      // converged, so nothing is broken — but a file called
-      // `… (conflicted copy …)` is somebody's work waiting to be merged by
-      // hand, and that is exactly what no surface used to say out loud.
       this._signal({
         kind: 'conflict/merged',
         paths: [report.path],
@@ -1553,12 +1408,6 @@ export class FsAgent {
           `two machines edited "${report.path}"; both versions were kept and ` +
           `the other one is at "${report.copyPath}"`,
       });
-    }
-    try {
-      this._onConflict?.(reports as FsConflictReport[]);
-    } catch (err) {
-      // A host's listener throwing is the host's problem, not the merge's.
-      this._writeSyncError('conflicts/onConflict', err);
     }
   }
 
@@ -5053,8 +4902,8 @@ export class FsAgent {
   }
 
   /**
-   * Says, once, that a deletion was refused — in the log, the sync-error file
-   * and {@link FsAgent.refusedDeletions}.
+   * Says, once, that a deletion was refused — in the log and as one
+   * `deletion/refused` signal.
    *
    * Three call sites had three copies of this, which is how they came to say
    * three different things about the same decision. A client reading one of
@@ -5066,39 +4915,18 @@ export class FsAgent {
    * @param detail - Extra wording for the log line, where a route has some.
    */
   private _refuseDeletion(
-    route: RefusedDeletion['route'],
+    route: 'restore' | 'removals',
     wouldRemove: number,
     held: number,
     paths: readonly string[],
     detail = '',
   ): void {
-    // Loud, because the alternative to noticing this is discovering it from a
-    // user whose folder emptied.
     console.error(
       `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: ${route} ` +
         `would remove ${wouldRemove} of ${held} files. Nothing was deleted. ` +
         `If this deletion is real, it has to be applied deliberately.` +
         (detail === '' ? '' : ` ${detail}`),
     );
-    this._writeSyncError(
-      `${route}/massDeleteGuard`,
-      new Error(`refused ${wouldRemove}/${held} (${route})`),
-    );
-    this._refusedDeletions.push({
-      atMs: Date.now(),
-      route,
-      wouldRemove,
-      held,
-      paths: paths.slice(0, 10),
-    });
-    while (this._refusedDeletions.length > REFUSED_DELETION_LOG_MAX) {
-      this._refusedDeletions.shift();
-    }
-    // The ONLY `required` signal the agent produces, and it has to be: nothing
-    // in this package will ever resolve it. The deletion does not arrive, the
-    // folders stay split, and no further message closes the gap — a person has
-    // to decide whether the deletion was real. `guard`, because nothing chose
-    // between two versions here; a rule declined to act at all.
     this._signal({
       kind: 'deletion/refused',
       paths,
@@ -5647,7 +5475,6 @@ export class FsAgent {
         await announce(ref);
         return ref;
       },
-      // Resolution failures are surfaced by `_onConflict`; success is silent.
     };
   }
 
