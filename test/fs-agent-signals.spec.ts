@@ -256,31 +256,6 @@ describe('FsAgent — the signal channel', () => {
       expect(signal.copyPath).toBe('doc (conflicted copy 2026-10-01 120000).txt');
       expect(signal.detail).toContain('both versions were kept');
     });
-
-    it('still calls the 0.1.0 listener, so a host written against it works', () => {
-      // THE COMPATIBILITY GUARANTEE. `onConflict` is published API; the signal
-      // channel is additive and must not replace it.
-      const reports: FsConflictReport[] = [];
-      const signals: FsSignal[] = [];
-      const agent = anAgent({
-        onConflict: (r: FsConflictReport[]) => reports.push(...r),
-        onSignal: (s: FsSignal) => signals.push(s),
-      });
-      record(agent, [
-        {
-          path: 'doc.txt',
-          copyPath: 'copy.txt',
-          winnerRef: 'w',
-          loserRef: 'l',
-          loserAt: 1,
-          resolvedAt: 2,
-        },
-      ]);
-
-      expect(reports.map((r) => r.path)).toEqual(['doc.txt']);
-      expect(signals.map((s) => s.kind)).toEqual(['conflict/merged']);
-    });
-
     it('reports one signal per path', () => {
       const agent = anAgent();
       record(agent, [
@@ -307,20 +282,9 @@ describe('FsAgent — the signal channel', () => {
       expect(signal.detail).toContain('40 of 40');
       expect(agent.signalsNeedingAction).toHaveLength(1);
     });
-
-    it('still fills `refusedDeletions`, which 0.1.0 published', () => {
-      const agent = anAgent();
-      refuse(agent, 'removals', 39, 40, ['x.txt']);
-      expect(agent.refusedDeletions).toHaveLength(1);
-      expect(agent.refusedDeletions[0].route).toBe('removals');
-      expect(agent.signals).toHaveLength(1);
-    });
-
-    it('counts every refusal even once the list has dropped the oldest', () => {
+    it('counts every refusal', () => {
       const agent = anAgent();
       for (let i = 0; i < 30; i++) refuse(agent, 'removals', 5, 10, [`f${i}`]);
-      // `refusedDeletions` keeps 20; the signal total keeps the truth.
-      expect(agent.refusedDeletions).toHaveLength(20);
       expect(agent.signalTotals['deletion/refused']).toBe(30);
     });
   });

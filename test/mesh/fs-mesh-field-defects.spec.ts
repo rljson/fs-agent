@@ -25,7 +25,7 @@ import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { CONFLICT_LOG_FILE } from '../../src/fs-agent.ts';
+import { SIGNAL_LOG_FILE } from '../../src/fs-signals.ts';
 import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
 
 describe('field defects, reduced in process', () => {
@@ -645,7 +645,7 @@ describe('field defects, reduced in process', () => {
     // real obligation.
     const files = result.snapshot['A'];
     expect(result.snapshot['B'], 'the two folders disagree').toEqual(files);
-    const reported = mesh.conflicts.filter((c) => c.path === 'shared.txt');
+    const reported = mesh.conflicts.filter((c) => c.paths.includes('shared.txt'));
 
     if (reported.length === 0) {
       // No fork: one version won sequentially. It must still be a version
@@ -697,19 +697,23 @@ describe('field defects, reduced in process', () => {
       'the name carries nothing but a timestamp, so two losers can collide',
     ).not.toMatch(/^shared \(conflicted copy \d{4}-\d{2}-\d{2} \d{6}\)\.txt$/);
 
-    // 5. Somebody was told — in both channels, because they serve different
-    //    readers: the callback a UI that is running, the file one that starts
-    //    later.
+    // 5. Somebody was told — as a signal for a UI that is running, and in the
+    //    persisted signal log for one that starts later.
     expect(reported[0].copyPath).toBe(copyName);
-    expect(reported[0].winnerRef).not.toBe(reported[0].loserRef);
-    expect(reported[0].resolvedAt).toBeGreaterThan(0);
+    expect(reported[0].action).toBe('review');
 
-    const logged: unknown = JSON.parse(
-      await readFile(join(mesh.node('A').folder, CONFLICT_LOG_FILE), 'utf-8'),
-    );
-    expect(Array.isArray(logged)).toBe(true);
+    // Whichever node resolved it persisted it.
+    const persisted: boolean[] = [];
+    for (const name of ['A', 'B']) {
+      const raw = await readFile(
+        join(mesh.node(name).folder, SIGNAL_LOG_FILE),
+        'utf-8',
+      ).catch(() => '{"signals":[]}');
+      const log = JSON.parse(raw) as { signals: { paths: string[] }[] };
+      persisted.push(log.signals.some((s) => s.paths.includes('shared.txt')));
+    }
     expect(
-      (logged as { path: string }[]).some((e) => e.path === 'shared.txt'),
+      persisted.includes(true),
       'nothing was written where a UI could find it after a restart',
     ).toBe(true);
   }, 180_000);

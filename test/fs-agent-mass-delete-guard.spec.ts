@@ -20,7 +20,6 @@ import {
   MASS_DELETE_MIN_FILES,
   MassDeleteRefusedError,
   REFUSAL_ANSWER_COOLDOWN_MS,
-  REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
 import { SIGNAL_LOG_FILE } from '../src/fs-signals.ts';
@@ -110,11 +109,17 @@ describe('FsAgent — the mass-delete guard', () => {
     const tree = await sourceTree(bs);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
+    const agent = new FsAgent(targetDir, bs, ORIGIN_FIXTURE);
+    await agent
       .restore(tree, targetDir, { cleanTarget: true })
       .catch(() => undefined);
 
-    expect(existsSync(join(targetDir, SYNC_ERROR_FILE))).toBe(true);
+    // A refusal is a signal a person has to act on, persisted for a host that
+    // starts later — not an error.
+    expect(agent.signalsNeedingAction.map((s) => s.kind)).toEqual([
+      'deletion/refused',
+    ]);
+    expect(existsSync(join(targetDir, SIGNAL_LOG_FILE))).toBe(true);
     errSpy.mockRestore();
   });
 
@@ -616,16 +621,17 @@ describe('FsAgent — the mass-delete guard', () => {
     // deletion simply never happens, on every node, and no message will fix
     // that.
     //
-    // Until a client asks the user, the least it can do is SAY SO. The log and
-    // the sync-error file already carry it; neither is readable by a UI on
-    // another machine, and "why did my deletion not arrive" is exactly the
-    // question that UI has to answer. See `README.public.md`, "Known constraints".
+    // Until a client asks the user, the least it can do is SAY SO: a log line
+    // is not readable by a UI on another machine, and "why did my deletion not
+    // arrive" is exactly the question that UI has to answer. A refusal is a
+    // `required` signal. See `README.public.md`, "Known constraints".
     const dir = await mkdtemp(join(tmpdir(), 'fs-agent-refusals-'));
     const agent = new FsAgent(dir);
     try {
-      expect(agent.refusedDeletions, 'a fresh agent has refused nothing').toEqual(
-        [],
-      );
+      expect(
+        agent.signalsNeedingAction,
+        'a fresh agent has refused nothing',
+      ).toEqual([]);
 
       (
         agent as unknown as {
@@ -638,35 +644,15 @@ describe('FsAgent — the mass-delete guard', () => {
         }
       )._refuseDeletion('removals', 150, 160, ['a.txt', 'b.txt']);
 
-      const [refusal] = agent.refusedDeletions;
-      expect(refusal.route).toBe('removals');
-      expect(refusal.wouldRemove).toBe(150);
-      expect(refusal.held).toBe(160);
+      const [refusal] = agent.signalsNeedingAction;
+      expect(refusal.kind).toBe('deletion/refused');
+      expect(refusal.action).toBe('required');
       expect(
         refusal.paths,
         'a client has no paths to put in front of the user',
       ).toEqual(['a.txt', 'b.txt']);
-      expect(refusal.atMs).toBeGreaterThan(0);
-
-      // Bounded: a hub that keeps re-announcing the same wipe must not grow
-      // this without limit.
-      for (let i = 0; i < REFUSED_DELETION_LOG_MAX + 5; i++) {
-        (
-          agent as unknown as {
-            _refuseDeletion: (
-              r: string,
-              w: number,
-              h: number,
-              p: readonly string[],
-            ) => void;
-          }
-        )._refuseDeletion('removals', i, 100, []);
-      }
-      expect(agent.refusedDeletions.length).toBe(REFUSED_DELETION_LOG_MAX);
-      // Newest kept, oldest dropped.
-      expect(
-        agent.refusedDeletions[REFUSED_DELETION_LOG_MAX - 1].wouldRemove,
-      ).toBe(REFUSED_DELETION_LOG_MAX + 4);
+      expect(refusal.detail).toContain('150 of 160');
+      expect(agent.signalTotals['deletion/refused']).toBe(1);
     } finally {
       agent.dispose();
       await rm(dir, { recursive: true, force: true });

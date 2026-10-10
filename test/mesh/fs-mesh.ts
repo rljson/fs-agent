@@ -100,15 +100,13 @@ import { dirname, join, relative, sep } from 'path';
 import {
   AGENT_STATE_FILE,
   ATOMIC_TMP_PREFIX,
-  CONFLICT_LOG_FILE,
   FsAgent,
   RECOVERED_DIR,
   SYNC_ERROR_FILE,
 } from '../../src/fs-agent.ts';
-import { SIGNAL_LOG_FILE } from '../../src/fs-signals.ts';
+import { SIGNAL_LOG_FILE, type FsSignal } from '../../src/fs-signals.ts';
 
 import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
-import type { FsConflictReport } from '../../src/fs-conflict-resolver.ts';
 
 // .............................................................................
 /** The sync configuration a host client ships. */
@@ -146,7 +144,6 @@ const BOOKKEEPING = [
   SYNC_ERROR_FILE,
   ATOMIC_TMP_PREFIX,
   AGENT_STATE_FILE,
-  CONFLICT_LOG_FILE,
   SIGNAL_LOG_FILE,
   RECOVERED_DIR,
 ];
@@ -380,11 +377,11 @@ export interface FsMesh {
    *   snapshot and read the disagreement rather than a timeout message.
    */
   /**
-   * Every conflict any node in this mesh reported, in the order reported.
+   * Every conflict signal any node in this mesh emitted, in order.
    *
    * Live array, appended to as the mesh runs.
    */
-  readonly conflicts: readonly FsConflictReport[];
+  readonly conflicts: readonly FsSignal[];
   converged(opts?: {
     stableMs?: number;
     timeoutMs?: number;
@@ -429,7 +426,7 @@ export const buildFsMesh = async (opts: {
 }): Promise<FsMesh> => {
   const treeKey = opts.treeKey ?? 'sharedTree';
   const names = opts.names ?? ['A', 'B'];
-  const conflicts: FsConflictReport[] = [];
+  const conflicts: FsSignal[] = [];
   /** Per node, the series its timeline exposes. Filled by the poller below. */
   const series = new Map<string, Array<{ atMs: number; files: FsSnapshot }>>();
   const route = Route.fromFlat(`/${treeKey}`);
@@ -550,8 +547,8 @@ export const buildFsMesh = async (opts: {
       // Collected so a test can assert the agent SAID a conflict happened,
       // not just that a renamed file turned up. Resolving one used to be
       // silent, and silence is the defect.
-      onConflict: (reports) => {
-        conflicts.push(...reports);
+      onSignal: (signal) => {
+        if (signal.kind.startsWith('conflict/')) conflicts.push(signal);
       },
       antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
       timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
