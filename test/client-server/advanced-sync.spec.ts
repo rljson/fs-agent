@@ -60,7 +60,7 @@ async function createMultiClientSetup(
   await serverIo.init();
   const serverBs = new BsMem();
   await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-  const server = new Server(route, serverIo, serverBs);
+  const server = new Server(route, serverIo, serverBs, { stamp: { domain: 'test', hub: 'hub' } });
   await server.init();
 
   // --- Create N clients ---
@@ -484,7 +484,7 @@ describe('Advanced Sync Tests', () => {
         await serverIo1.init();
         const serverBs1 = new BsMem();
         await new Db(serverIo1).core.createTableWithInsertHistory(treeCfg);
-        const server1 = new Server(route, serverIo1, serverBs1);
+        const server1 = new Server(route, serverIo1, serverBs1, { stamp: { domain: 'test', hub: 'hub' } });
         await server1.init();
 
         // --- Client A on server1 ---
@@ -514,7 +514,7 @@ describe('Advanced Sync Tests', () => {
         await serverIo2.init();
         const serverBs2 = new BsMem();
         await new Db(serverIo2).core.createTableWithInsertHistory(treeCfg);
-        const server2 = new Server(route, serverIo2, serverBs2);
+        const server2 = new Server(route, serverIo2, serverBs2, { stamp: { domain: 'test', hub: 'hub' } });
         await server2.init();
 
         // --- Reconnect A and connect B on server2 ---
@@ -714,7 +714,7 @@ describe('Advanced Sync Tests', () => {
         await serverIo.init();
         const serverBs = new BsMem();
         await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-        const server = new Server(route, serverIo, serverBs);
+        const server = new Server(route, serverIo, serverBs, { stamp: { domain: 'test', hub: 'hub' } });
         await server.init();
 
         // Client A

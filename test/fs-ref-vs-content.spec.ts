@@ -64,13 +64,23 @@ describe('S5 — ref identity vs content identity', () => {
     return { agent, tree };
   };
 
-  /** Whether the agent considers two trees the same folder. */
-  const sameContent = (agent: FsAgent, a: FsTree, b: FsTree): boolean =>
-    (
-      agent as unknown as {
-        _treesHaveEquivalentContent: (x: FsTree, y: FsTree) => boolean;
-      }
-    )._treesHaveEquivalentContent(a, b);
+  /**
+   * Whether the agent considers two trees the same folder: the content map
+   * an apply and a merge work from, path → blob.
+   */
+  const sameContent = (agent: FsAgent, a: FsTree, b: FsTree): boolean => {
+    const map = (t: FsTree) =>
+      JSON.stringify(
+        [
+          ...(
+            agent as unknown as {
+              _getFileContentMap: (x: FsTree) => Map<string, string>;
+            }
+          )._getFileContentMap(t),
+        ].sort(),
+      );
+    return map(a) === map(b);
+  };
 
   /**
    * Every directory node's children, as the scan recorded them.

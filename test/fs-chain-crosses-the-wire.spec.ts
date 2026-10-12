@@ -34,6 +34,7 @@ import { Client, Server } from '@rljson/server';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { FsEditChain } from '../src/fs-edit-chain.ts';
+import { linearChain } from './linear-chain.ts';
 
 const TREE = 'fileTree';
 
@@ -65,7 +66,9 @@ describe('the chain crosses the wire', () => {
     // holds no bodies. So a hub one release behind does not block chain reads
     // between clients, which is one less thing for the migration to carry.
     void serverDb;
-    const server = new Server(route, serverIo, new BsMem());
+    const server = new Server(route, serverIo, new BsMem(), {
+      stamp: { domain: 'test', hub: 'hub' },
+    });
     await server.init();
 
     const clients: Client[] = [];
@@ -85,7 +88,7 @@ describe('the chain crosses the wire', () => {
       clients.push(client);
 
       const db = new Db(client.io!);
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       chains.push(chain);
     }
@@ -152,47 +155,5 @@ describe('the chain crosses the wire', () => {
     // error, and the walk has to be able to report it as a hole.
     const { b } = await twoNodes();
     expect(await b.entry('a-head-nobody-ever-wrote')).toBeUndefined();
-  }, 30_000);
-
-  // ...........................................................................
-  it('can a peer find an entry by its TREE REF, not by hash?', async () => {
-    // Settles a migration question rather than a design one, and it was
-    // rejected early on an assumption worth checking.
-    //
-    // Announcing `~H~<head>` is unintelligible to a build that predates it: an
-    // older node tries to fetch a tree by that hash and fails, so a new node's
-    // pushes are invisible to it. The whole branch therefore needs a LOCKSTEP
-    // rollout. If a peer can instead find the chain entry from the tree ref it
-    // already announces — `dataRef` is exactly that field — then the wire
-    // format never has to change and one of the two lockstep requirements
-    // disappears.
-    //
-    // A hash read is a hash read; this is a QUERY, and whether a relay serves
-    // one is not something to assume in either direction.
-    const { a, b } = await twoNodes();
-    const written = await a.append({
-      treeRef: 'T-findable',
-      removed: ['gone.txt'],
-    });
-
-    const db = b['_db'] as {
-      getEditHistories: (
-        k: string,
-        where: unknown,
-      ) => Promise<Array<Record<string, unknown>>>;
-    };
-    let rows: Array<Record<string, unknown>> = [];
-    let threw: string | undefined;
-    try {
-      rows = await db.getEditHistories(TREE, { dataRef: 'T-findable' });
-    } catch (e) {
-      threw = String(e);
-    }
-
-    // Recorded either way — the answer is what matters, not which way it went.
-    console.log(
-      `QUERY-ACROSS-RELAY rows=${rows.length} threw=${threw ?? 'no'}`,
-    );
-    expect(written.head).toBeTruthy();
   }, 30_000);
 });

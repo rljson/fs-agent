@@ -14,6 +14,7 @@ import {
   FS_EDIT_ACTION,
   FsEditChain,
 } from '../src/fs-edit-chain.ts';
+import { linearChain } from './linear-chain.ts';
 
 const TREE = 'fileTree';
 
@@ -50,42 +51,15 @@ describe('FsEditChain', () => {
       expect(await db.core.hasTable(`${TREE}EditHistory`)).toBe(true);
     });
   });
-
   // ...........................................................................
-  describe('init', () => {
-    it('starts with no head on an empty chain', async () => {
-      const chain = new FsEditChain(db, TREE);
-      expect(chain.ready).toBe(false);
-      await chain.init();
-      expect(chain.ready).toBe(true);
-      expect(chain.head).toBeUndefined();
-    });
-
-    it('continues the lineage a previous process left behind', async () => {
-      const first = new FsEditChain(db, TREE);
-      await first.init();
-      await first.append({ treeRef: 'T1' });
-      const second = await first.append({ treeRef: 'T2' });
-
-      // A fresh instance over the same store: a restart.
-      const restarted = new FsEditChain(db, TREE);
-      await restarted.init();
-      expect(restarted.head).toBe(second.head);
-
-      // And it appends onto that tip rather than starting a new root.
-      const third = await restarted.append({ treeRef: 'T3' });
-      expect(third.previous).toEqual([second.head]);
-    });
-
-    it('treats a row with no ancestry as a lineage root', async () => {
+  describe('entry', () => {
+    it('reads a row written with no ancestry as a root', async () => {
       // `MultiEditManager` writes `previous: null` rather than `[]`, so a
       // chain this agent did not author can carry either. Both mean "root",
       // and a caller walking `previous` must not have to know which wrote it.
       //
       // Written by hand all the way down, because `entry()` resolves the
-      // multiEdit and edit rows before it ever looks at `previous` — a row
-      // with a dangling `multiEditRef` answers `undefined` and would prove
-      // nothing about the ancestry spelling.
+      // multiEdit and edit rows before it ever looks at `previous`.
       await createFsChainTables(db, TREE);
       const refOf = (result: unknown, suffix: string): string =>
         (result as Array<Record<string, string>>)[0][`${TREE}${suffix}Ref`];
@@ -122,78 +96,11 @@ describe('FsEditChain', () => {
         'EditHistory',
       );
 
-      const chain = new FsEditChain(db, TREE);
-      await chain.init();
-      expect(chain.head).toBe(head);
-
-      // Read back as an EMPTY ancestry, never as `null` — a caller walking
-      // `previous` must not have to know which spelling wrote the row.
-      const root = await chain.entry(head);
+      const root = await new FsEditChain(db, TREE).entry(head);
       expect(root?.previous).toEqual([]);
-
-      const next = await chain.append({ treeRef: 'T2' });
-      expect(next.previous).toEqual([head]);
-    });
-
-    // A `timeId` is `<millis>:<nanoid>`, so two entries minted in the SAME
-    // millisecond are ordered by a RANDOM tail. "The one I appended last" is
-    // therefore not reliably the newest, and asserting it made this suite fail
-    // roughly one run in ten. Both tests below compute the expected tip from
-    // the timeIds instead of assuming append order.
-    //
-    // The arbitrariness is not a defect: the order is total and IDENTICAL on
-    // every node, which is the property convergence needs. It is only "newest"
-    // in the wall-clock sense that is unreliable, and nothing depends on that.
-    const newest = (entries: Array<{ head: string; timeId: string }>): string =>
-      [...entries].sort((a, b) => (a.timeId < b.timeId ? 1 : -1))[0].head;
-
-    it('takes the greatest timeId among tips, in either direction', async () => {
-      // HAND-WRITTEN timeIds, deliberately out of order: `2:b` arrives after
-      // the winner, so the comparison is exercised in both directions by
-      // construction rather than by whichever way the random tails fell.
-      await createFsChainTables(db, TREE);
-      const refOf = (result: unknown): string =>
-        (result as Array<Record<string, string>>)[0][`${TREE}EditHistoryRef`];
-      const tip = async (stamp: string): Promise<string> =>
-        refOf(
-          await db.addEditHistory(TREE, {
-            timeId: stamp,
-            multiEditRef: `m-${stamp}`,
-            dataRef: `T-${stamp}`,
-            previous: [],
-            _hash: '',
-          } as never),
-        );
-
-      await tip('1:a');
-      const winner = await tip('3:c');
-      await tip('2:b');
-
-      const chain = new FsEditChain(db, TREE);
-      await chain.init();
-      expect(chain.head).toBe(winner);
-    });
-
-    it('picks the newest tip when the chain has forked', async () => {
-      // Two entries built from the SAME parent — two tips, which is what the
-      // table looks like once several lineages live in it.
-      const chain = new FsEditChain(db, TREE);
-      await chain.init();
-      const root = await chain.append({ treeRef: 'T1' });
-      const tips = [
-        await chain.append({ treeRef: 'T2', previous: [root.head] }),
-        await chain.append({ treeRef: 'T3', previous: [root.head] }),
-      ];
-
-      const restarted = new FsEditChain(db, TREE);
-      await restarted.init();
-      expect(restarted.head).toBe(newest(tips));
-      // And never the root, which both tips descend from.
-      expect(restarted.head).not.toBe(root.head);
     });
   });
 
-  // ...........................................................................
   describe('append', () => {
     // .........................................................................
     // THE ROOT OF A HISTORY IS A FUNCTION OF THE CONTENT.
@@ -210,9 +117,9 @@ describe('FsEditChain', () => {
     // .........................................................................
     it('gives two nodes the SAME root entry for the same content', async () => {
       // Two chains, two independent `append` calls, one row.
-      const first = new FsEditChain(db, TREE);
+      const first = linearChain(new FsEditChain(db, TREE));
       await first.init();
-      const second = new FsEditChain(db, TREE);
+      const second = linearChain(new FsEditChain(db, TREE));
       await second.init();
 
       const a = await first.append({ treeRef: 'SEED' });
@@ -226,7 +133,7 @@ describe('FsEditChain', () => {
     });
 
     it('gives different content different roots', async () => {
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const a = await chain.append({ treeRef: 'ONE', previous: [] });
       const b = await chain.append({ treeRef: 'TWO', previous: [] });
@@ -239,7 +146,7 @@ describe('FsEditChain', () => {
       // A root is only a name for where a folder is. An entry that states a
       // change is an edit, it happened at a moment, and two nodes stating the
       // same change are two different events.
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const stated = await chain.append({
         treeRef: 'SEED',
@@ -250,7 +157,7 @@ describe('FsEditChain', () => {
     });
 
     it('records the tree ref, the changes and the removals', async () => {
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
 
       const entry = await chain.append({
@@ -265,11 +172,10 @@ describe('FsEditChain', () => {
       expect(entry.removed).toEqual(['y.txt', 'z.txt']);
       expect(entry.previous).toEqual([]);
       expect(entry.timeId).toMatch(/^\d+:/);
-      expect(chain.head).toBe(entry.head);
     });
 
     it('defaults changes and removals to empty', async () => {
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const entry = await chain.append({ treeRef: 'T1' });
       expect(entry.changed).toEqual([]);
@@ -277,7 +183,7 @@ describe('FsEditChain', () => {
     });
 
     it('chains each entry onto the one before it', async () => {
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const one = await chain.append({ treeRef: 'T1' });
       const two = await chain.append({ treeRef: 'T2' });
@@ -291,7 +197,7 @@ describe('FsEditChain', () => {
     it('accepts TWO parents, which a merge revision needs', async () => {
       // The reason the rows are written by hand: `MultiEditManager` refuses
       // more than one `previous`, and an fs merge revision has two by design.
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const ours = await chain.append({ treeRef: 'T1' });
       const theirs = await chain.append({
@@ -313,7 +219,7 @@ describe('FsEditChain', () => {
       // The whole point. A folder that returns to an earlier state re-derives
       // that state's tree ref — so the tree ref cannot say whether we moved
       // back or never left. The chain entry can.
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const there = await chain.append({
         treeRef: 'T1',
@@ -334,7 +240,7 @@ describe('FsEditChain', () => {
   // ...........................................................................
   describe('entry', () => {
     it('reads back everything it wrote', async () => {
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const written = await chain.append({
         treeRef: 'T1',
@@ -347,14 +253,14 @@ describe('FsEditChain', () => {
 
     it('answers undefined for a ref this node cannot resolve', async () => {
       // A peer's entry we have not pulled. The ordinary case, not an error.
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       await chain.append({ treeRef: 'T1' });
       expect(await chain.entry('nothing-we-hold')).toBeUndefined();
     });
 
     it('answers undefined when the multiEdit row is missing', async () => {
-      const chain = new FsEditChain(db, TREE);
+      const chain = linearChain(new FsEditChain(db, TREE));
       await chain.init();
       const written = await chain.append({ treeRef: 'T1' });
       // A hole mid-row: the history resolved, what it points at did not.

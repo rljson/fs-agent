@@ -36,6 +36,11 @@ The Server and Client classes handle all the internal complexity of:
 - Socket-based communication between client and server
 - Automatic synchronization of data between layers
 
+A hub that serves file routes **stamps** what it relays —
+`new Server(route, serverIo, serverBs, { stamp: { domain, hub } })` — because the
+stamp decides which of two versions of one file keeps its name. The examples
+below leave it out for brevity.
+
 ```typescript
 // ✅ CORRECT Pattern
 const server = new Server(route, serverIo, serverBs);
@@ -120,23 +125,10 @@ const connectorB = new Connector(clientDbB, Route.fromFlat('/sync'), socketB);
 
 When a Connector sends a message, it immediately triggers its own listeners due to EventEmitter's local echo. The Server (v0.0.4+) filters the sender from multicast, but cannot prevent local echo.
 
-**Application code must filter out self-broadcasts:**
-
-```typescript
-// In FsAgent - self-filtering example:
-private _lastSentRef?: string;
-
-// Track sent ref before broadcasting
-this._lastSentRef = ref;
-connector.send(ref);
-
-// Skip processing own messages when received
-if (treeRef === this._lastSentRef) {
-  return; // Don't process self-broadcast
-}
-```
-
-This prevents infinite loops where a client processes its own broadcast, triggers a change, broadcasts again, etc.
+**The agent needs no filter for it.** The Connector drops a payload carrying its
+own origin, and an agent that does receive its own head finds it in sync: it
+authors any local work first and then holds the head it was told. An echo never
+triggers a change.
 
 #### 5. Table Schema Setup
 

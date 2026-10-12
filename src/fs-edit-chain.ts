@@ -43,10 +43,12 @@
 // table. The fit is exact.
 //
 // WHAT USES IT
-// Nothing yet, deliberately. This is written and announced to nobody, so the
-// fleet accumulates real chains before anything depends on their shape — they
-// are the fixtures the walk needs, and a week of production ancestry is worth
-// more than any fixture we could write.
+// Everything. This was written to be read by nobody — the fleet was meant to
+// accumulate real chains before anything depended on their shape — and that
+// phase is over: the chain is the sync mechanism. A node announces this entry's
+// ref on every change, a receiver resolves it to a row and then to a tree,
+// `relate` walks `previous` to decide, and a deletion is applied because an
+// entry here STATES it. A ref that names no entry decides nothing.
 // .............................................................................
 
 import type { Db } from '@rljson/db';
@@ -70,7 +72,7 @@ export const FS_EDIT_ACTION = 'putFsTree';
  * catch-up, and left unbounded it pins a core on a long chain.
  *
  * Exhausting it is NOT the same as failing to read a row — see
- * {@link FsEditChain.classify}. Conflating the two made any node more than this
+ * {@link FsEditChain.relate}. Conflating the two made any node more than this
  * many pushes into its own history stop repairing, permanently and silently.
  */
 export const DEFAULT_MAX_WALK = 500;
@@ -99,13 +101,17 @@ export interface FsAppendOptions {
   /** Relative paths removed. Default: none. */
   removed?: readonly string[];
   /**
-   * What this entry was made from.
-   *
-   * Defaults to the current head. Passed explicitly only for a MERGE entry,
-   * which has two parents — the one shape `MultiEditManager` refuses and the
+   * The entry's `timeId`, when it has to be a function of its content: two
+   * nodes that merge the same two heads into the same tree write the same
+   * entry. Minted otherwise; a root is identified by its tree.
+   */
+  timeId?: string;
+  /**
+   * What this entry was made from: none for a root, the own head for an edit,
+   * both heads for a merge — the one shape `MultiEditManager` refuses and the
    * reason these rows are written by hand.
    */
-  previous?: readonly string[];
+  previous: readonly string[];
 }
 
 /** One entry of the chain, as read back. */
@@ -151,54 +157,27 @@ export const createFsChainTables = async (
  * The append-only chain for one folder.
  *
  * Append-only and never merged: each node keeps its own lineage, exactly as
- * mongo does. Nothing here rewrites or prunes an entry — that is WP5's job.
+ * mongo does. Nothing here rewrites or prunes an entry, and nothing collects
+ * one either — the chain grows for the life of the folder. See
+ * `README.public.md`, "Known constraints".
  */
 export class FsEditChain {
-  private _head: string | undefined;
 
   /** The last own-lineage walk, keyed by the head it was computed for. */
   private _lineageCache: { head: string; refs: ReadonlySet<string> } | undefined;
-  private _ready = false;
 
   constructor(
     private readonly _db: Db,
     private readonly _treeKey: string,
   ) {}
 
-  /** The entry this node's lineage currently ends at. */
-  get head(): string | undefined {
-    return this._head;
-  }
-
-  /** Whether {@link init} has completed. */
-  get ready(): boolean {
-    return this._ready;
-  }
-
   /**
-   * Creates the tables and continues this node's lineage where it left off.
-   *
-   * A process that came back and started a fresh root would orphan everything
-   * it wrote before, so the tip is read from the store rather than assumed
-   * absent.
+   * Creates the chain's tables if absent. Where this node stands is not the
+   * chain's business: a table several nodes write has no tip of its own, and
+   * the agent keeps its head in its state file.
    */
   async init(): Promise<void> {
     await createFsChainTables(this._db, this._treeKey);
-    this._head = await this._tip();
-    this._ready = true;
-  }
-
-  /**
-   * Re-reads the tip, for a node waiting to learn the network's state.
-   *
-   * `init` reads it once. A joining node has none of its own and is waiting
-   * for the fleet's to replicate, so it has to be able to look again — the
-   * rows arrive after the connection, not before it.
-   * @returns The tip now, or `undefined` while nothing has arrived.
-   */
-  async refreshHead(): Promise<string | undefined> {
-    this._head = await this._tip();
-    return this._head;
   }
 
   /**
@@ -209,11 +188,7 @@ export class FsEditChain {
   async append(opts: FsAppendOptions): Promise<FsChainEntry> {
     const changed = [...(opts.changed ?? [])].sort();
     const removed = [...(opts.removed ?? [])].sort();
-    const previous = opts.previous
-      ? [...opts.previous]
-      : this._head
-        ? [this._head]
-        : [];
+    const previous = [...opts.previous];
 
     const data: FsEditData = { treeRef: opts.treeRef, changed, removed };
     const edit = {
@@ -251,7 +226,7 @@ export class FsEditChain {
     // the same bytes and derive the same tree ref. With a minted `timeId` each
     // node's root is a different row, so the fleet has one lineage per node
     // from the first second — and then nothing is ever `behind` or `ahead`:
-    // `classify` finds neither head reachable from the other and answers
+    // `relate` finds neither head reachable from the other and answers
     // `fork` to every announcement there has ever been.
     //
     // Measured on `a document never goes backwards while one person edits it`,
@@ -273,7 +248,7 @@ export class FsEditChain {
     // history should do.
     const isRoot =
       previous.length === 0 && changed.length === 0 && removed.length === 0;
-    const stamp = isRoot ? `0:${opts.treeRef}` : timeId();
+    const stamp = opts.timeId ?? (isRoot ? `0:${opts.treeRef}` : timeId());
     const head = this._refOf(
       await this._db.addEditHistory(this._treeKey, {
         timeId: stamp,
@@ -303,7 +278,6 @@ export class FsEditChain {
       this._lineageCache = { head, refs };
     }
 
-    this._head = head;
     return { head, timeId: stamp, treeRef: opts.treeRef, previous, changed, removed };
   }
 
@@ -338,126 +312,87 @@ export class FsEditChain {
   }
 
   /**
-   * The newest entry that produced a given tree ref.
+   * How two heads stand, and for a fork the ancestor to merge against.
    *
-   * **The migration bridge.** A build that predates the `~H~` announcement
-   * sends a plain tree ref, and a receiver holding one cannot find its chain
-   * row by hash — `dataRef` is the field, but finding a row BY a field is a
-   * query rather than a content read. Measured across a real relay
-   * (`test/fs-chain-crosses-the-wire.spec.ts`): the query is served, so an
-   * older peer's push can still carry ancestry.
+   * `same` — the one head. `behind` — theirs descends from ours. `ahead` —
+   * ours descends from theirs. A descent found is proof, whatever else in
+   * either history cannot be read. `fork` — neither descends from the other:
+   * `base` is a common ancestor no other common ancestor descends from, the
+   * smallest ref of them when there are several, so every node merging the
+   * same two heads merges against the same base. `undefined` when the two
+   * share no history within the walk. `incomplete` — no descent was found and
+   * an entry could not be read, so a fork cannot be told from a lag.
    *
-   * **Ambiguous by nature, which is why it is the fallback and not the
-   * primary.** A tree ref is a content hash, so a folder that returns to an
-   * earlier state produces a SECOND entry with the same `dataRef` — §2.1,
-   * exactly the ambiguity the chain exists to remove. The newest by `timeId`
-   * is the right pick: it is the entry that most recently produced this
-   * content, and the one whose ancestry describes how the folder got here now.
-   *
-   * Never called on the apply path. A query is a peer read, and awaiting one
-   * before scheduling an apply is how a late joiner's bootstrap was lost.
-   * @param treeRef - The state announced.
-   * @returns The newest entry producing it, or `undefined` if none is found.
+   * A walk that exhausts `maxWalk` with everything readable answers `fork`:
+   * less precise than the truth, never destructive.
+   * @param ours - This node's head.
+   * @param theirs - The head that arrived.
+   * @param maxWalk - Give up past this many entries per side.
+   * @returns The relation, and the merge base of a fork.
    */
-  /**
-   * The OLDEST entry that produced a given tree ref.
-   *
-   * **How a fleet agrees on one name for one state.** Every node authors an
-   * entry for the state it starts in, and those states are usually identical —
-   * peers already in sync hold the same bytes, so they derive the same tree
-   * ref. Each node then sits on its own lineage root and `classify` answers
-   * `fork` to every announcement forever.
-   *
-   * The oldest entry is the one to converge on because the choice is the same
-   * for everybody who can see the rows, and because adoption that only ever
-   * moves BACKWARDS in time is monotone: it cannot oscillate as rows arrive.
-   * Whoever reached this content first described it first.
-   *
-   * The counterpart of {@link entryForTreeRef}, which answers the opposite
-   * question — *"how did this folder get here NOW"* — and therefore wants the
-   * newest.
-   * @param treeRef - The state to name.
-   * @returns The oldest entry producing it, or `undefined` if none is found.
-   */
-  async oldestEntryForTreeRef(
-    treeRef: string,
-  ): Promise<FsChainEntry | undefined> {
-    const rows = (await this._db.getEditHistories(this._treeKey, {
-      dataRef: treeRef,
-    })) as Array<EditHistory & { _hash: string }>;
-    // SORTED rather than scanned for a minimum, and the reason is coverage
-    // rather than taste. A running-minimum loop takes its "this one is older"
-    // branch only when the rows arrive in an order that has an older row after
-    // a newer one — so whether that branch is exercised depends on what the
-    // database happened to return. Measured: the same test covered it
-    // standalone and left it uncovered in the full suite, which is the 98.22
-    // %/99.11 % pattern this repository has been bitten by before.
-    //
-    // `compareTimeId` is a total order, so the first element is the oldest
-    // whatever order the rows come in, and there is no branch left to be lucky
-    // about.
-    const sorted = [...rows].sort((a, b) => compareTimeId(a.timeId, b.timeId));
-    return sorted.length > 0 ? this.entry(sorted[0]._hash) : undefined;
-  }
+  async relate(
+    ours: string,
+    theirs: string,
+    maxWalk = DEFAULT_MAX_WALK,
+  ): Promise<
+    | { verdict: 'same' | 'behind' | 'ahead' | 'incomplete' }
+    | { verdict: 'fork'; base: string | undefined }
+  > {
+    if (ours === theirs) return { verdict: 'same' };
+    const fromTheirs = await this._parentsOf(theirs, maxWalk);
+    if (fromTheirs.parents.has(ours)) return { verdict: 'behind' };
+    const fromOurs = await this._parentsOf(ours, maxWalk);
+    if (fromOurs.parents.has(theirs)) return { verdict: 'ahead' };
+    if (fromTheirs.holed || fromOurs.holed) return { verdict: 'incomplete' };
 
-  async entryForTreeRef(treeRef: string): Promise<FsChainEntry | undefined> {
-    const rows = await this._db.getEditHistories(this._treeKey, {
-      dataRef: treeRef,
-    });
-    let newest: (EditHistory & { _hash: string }) | undefined;
-    for (const row of rows as Array<EditHistory & { _hash: string }>) {
-      if (!newest || compareTimeId(row.timeId, newest.timeId) > 0) {
-        newest = row;
+    const common = [...fromOurs.parents.keys()].filter((ref) =>
+      fromTheirs.parents.has(ref),
+    );
+    // Every ancestor of a common ancestor is common too, so a ref met on the
+    // way down from one has been dealt with on the way down from any other.
+    const dominated = new Set<string>();
+    for (const ref of common) {
+      const stack = [...(fromOurs.parents.get(ref) as string[])];
+      while (stack.length > 0) {
+        const below = stack.pop() as string;
+        if (dominated.has(below)) continue;
+        dominated.add(below);
+        stack.push(...(fromOurs.parents.get(below) ?? []));
       }
     }
-    return newest ? this.entry(newest._hash) : undefined;
+    const best = common.filter((ref) => !dominated.has(ref)).sort();
+    return { verdict: 'fork', base: best[0] };
   }
 
   /**
-   * Where two heads stand relative to each other.
-   *
-   * `behind` — theirs descends from ours, so we are the one missing work.
-   * `ahead` — ours descends from theirs; they are missing ours.
-   * `fork` — neither descends from the other. Both sides have work.
-   * `incomplete` — an entry could not be RESOLVED, so nothing may be concluded.
-   *
-   * **A hole and the walk bound are not the same truncation**, and treating
-   * them alike was a latent permanent failure. A hole means an entry exists and
-   * this node cannot read it: the ref it was looking for may be inside the part
-   * it could not reach, so the honest answer is "I do not know". Exhausting the
-   * walk bound means the opposite — everything asked for WAS readable, and no
-   * relation was found within {@link DEFAULT_MAX_WALK} entries of history.
-   *
-   * Conflating them meant any node more than `DEFAULT_MAX_WALK` pushes into its
-   * own history answered `incomplete` forever, which the decision turns into
-   * `blocked`, which never repairs. A long-lived node would simply stop
-   * healing, silently. Measured on the growth run that was meant to be about
-   * storage.
-   *
-   * A bounded walk with no relation therefore answers `fork`: both sides keep
-   * their work and reconciliation is additive. Less precise than the truth and
-   * never destructive, which is the right direction to be wrong in.
-   * @param ourHead - This node's head, or `undefined` when it has none.
-   * @param theirHead - The head that arrived.
-   * @returns How the two histories stand.
+   * The `previous` of every entry reachable from `head`, by generation.
+   * @param head - Where to start.
+   * @param maxWalk - Give up past this many entries.
+   * @returns Each entry read, mapped to its parents, and whether an entry
+   *   could not be read.
    */
-  async classify(
-    ourHead: string | undefined,
-    theirHead: string,
-  ): Promise<'behind' | 'ahead' | 'fork' | 'incomplete'> {
-    if (ourHead === undefined) return 'incomplete';
-    if (ourHead === theirHead) return 'ahead';
-
-    // Is ours an ancestor of theirs? Then they moved forward from us.
-    const fromTheirs = await this._ancestorsOf(theirHead);
-    if (fromTheirs.holed) return 'incomplete';
-    if (fromTheirs.refs.has(ourHead)) return 'behind';
-
-    const fromOurs = await this._ancestorsOf(ourHead);
-    if (fromOurs.holed) return 'incomplete';
-    if (fromOurs.refs.has(theirHead)) return 'ahead';
-
-    return 'fork';
+  private async _parentsOf(
+    head: string,
+    maxWalk: number,
+  ): Promise<{ parents: Map<string, string[]>; holed: boolean }> {
+    const parents = new Map<string, string[]>();
+    let holed = false;
+    let frontier = [head];
+    while (frontier.length > 0 && parents.size < maxWalk) {
+      const next: string[] = [];
+      for (const ref of new Set(frontier)) {
+        if (parents.has(ref)) continue;
+        const entry = await this.entry(ref);
+        if (!entry) {
+          holed = true;
+          continue;
+        }
+        parents.set(ref, entry.previous);
+        next.push(...entry.previous);
+      }
+      frontier = next;
+    }
+    return { parents, holed };
   }
 
   /**
@@ -470,7 +405,7 @@ export class FsEditChain {
    *
    * `bounded` — the walk ran out of budget with everything it asked for
    * readable. A different statement, and a usable one: no relation within this
-   * many entries of history. See {@link classify}.
+   * many entries of history. See {@link relate}.
    * @param head - Where to start.
    * @param maxWalk - Give up past this many entries.
    * @returns The refs reached, whether anything was unreadable, and whether
@@ -528,7 +463,7 @@ export class FsEditChain {
     if (walk.holed) return undefined;
     // A BOUNDED walk is cached and used as it is. It means "everything asked
     // for was readable and there is more history than the budget", so what it
-    // found really is our lineage — just not all of it. See `classify`.
+    // found really is our lineage — just not all of it. See `relate`.
     this._lineageCache = { head: ourHead, refs: walk.refs };
     return walk.refs;
   }
@@ -567,20 +502,12 @@ export class FsEditChain {
     const seen = new Set<string>();
     let frontier = [head];
 
-    // NEAREST TO THE HEAD WINS, and ties within one step are broken by
-    // `timeId`. **Not the greatest `timeId` overall**, which was the first
-    // version of this and is wrong on the commonest history there is: two
-    // edits a second apart are usually minted in the same millisecond, and
-    // `compareTimeId` then breaks the tie on a RANDOM tail. So the later edit
-    // of a file could compare as older than the one it replaced — the
-    // function would name an entry its own successor had superseded.
-    //
-    // Walking back generation by generation asks the causal question instead:
-    // an entry closer to the head is one the head descends FROM, so anything
-    // deeper has been built on and cannot be the latest word. Two entries the
-    // same distance away really are concurrent — two parents of a merge — and
-    // `timeId` is the right answer for those, being a total order every node
-    // computes identically.
+    // NEAREST TO THE HEAD WINS: an entry closer to the head is one the head
+    // descends FROM, so anything deeper has been built on and cannot be the
+    // latest word. Two entries the same distance away are concurrent — the
+    // two parents of a merge — and the greater `timeId` breaks that tie. A
+    // tie-break, not an order: identical on every node, and meaning nothing
+    // about when anything happened.
     while (frontier.length > 0) {
       const wanted = frontier.filter((ref) => !seen.has(ref) && !!seen.add(ref));
       if (wanted.length === 0) break;
@@ -597,14 +524,9 @@ export class FsEditChain {
         }
         for (const previous of entry.previous) next.push(previous);
       }
-      // SORTED rather than scanned for a maximum, and for coverage rather than
-      // taste: a running maximum takes its "this one is greater" branch only
-      // when the entries arrive in one particular order, and these are ordered
-      // by a RANDOM tail whenever two were minted in the same millisecond. The
-      // branch would then be covered or not by luck — the 98 %/99 % pattern
-      // this repository has been bitten by twice.
       if (here.length > 0) {
-        return here.sort((a, b) => compareTimeId(b.timeId, a.timeId))[0];
+        const newest = here.map((entry) => entry.timeId).sort().pop();
+        return here.find((entry) => entry.timeId === newest);
       }
       frontier = next;
     }
@@ -659,17 +581,11 @@ export class FsEditChain {
    * @param maxWalk - Give up past this many entries. A walk this deep is a
    *   cold replay rather than a catch-up, and left unbounded it pins a core on
    *   a long chain.
-   * **Both halves of the net delta are returned**, and the second one is not
-   * bookkeeping. A receiver holds a TOMBSTONE for every path it has deleted,
-   * including the ones a peer told it to delete, and that tombstone refuses
-   * the path if anyone writes it again. Only a peer that STATES it created
-   * the path may lift it — a tree merely containing the path states nothing,
-   * since every tree that predates the deletion contains it too. Measured: a
-   * file created, deleted and created again at the same path never reached the
-   * second node, in three runs of three, because nothing could clear the
-   * tombstone the node had set on its peer's authority.
-   * @returns The net removals, the net changes, the newest `timeId` seen, and
-   *   whether the walk resolved completely.
+   * **Both halves of the net delta are returned**: a path deleted and created
+   * again inside the walked range is a change, not a removal, and only the
+   * second half can say so.
+   * @returns The net removals, the net changes, and whether the walk resolved
+   *   completely.
    */
   async collectRemovals(
     head: string,
@@ -678,7 +594,6 @@ export class FsEditChain {
   ): Promise<{
     removed: string[];
     changed: string[];
-    timeId?: string;
     complete: boolean;
   }> {
     const stopAt = await this._ourLineage(ourHead, maxWalk);
@@ -710,10 +625,8 @@ export class FsEditChain {
           complete = false;
           continue;
         }
-        // Exclusive: a state we already know needs no replay, its own
-        // ancestry is already accounted for in how we got there, and its
-        // `timeId` is not news — including it in the maximum below would let a
-        // removal claim to be newer than it is and weaken the recency guard.
+        // Exclusive: a state we already know needs no replay, and its own
+        // ancestry is already accounted for in how we got there.
         if (stopAt.has(ref)) continue;
         walked.push(entry);
         for (const previous of entry.previous) next.push(previous);
@@ -741,66 +654,11 @@ export class FsEditChain {
       }
     }
 
-    // The newest id among everything walked, which is what a receiver orders
-    // the removal against.
-    let timeId: string | undefined;
-    for (const entry of walked) {
-      if (compareTimeId(entry.timeId, timeId) > 0 || timeId === undefined) {
-        timeId = entry.timeId;
-      }
-    }
-
     return {
       removed: [...removed].sort(),
       changed: [...changed].sort(),
-      timeId,
       complete,
     };
-  }
-
-  /**
-   * The newest entry nothing else descends from.
-   *
-   * **A single slot, and that is a known limit.** Every node keeps its own
-   * lineage and chains are never merged, so once the walk starts pulling peers'
-   * rows (WP3) this table holds several tips and "the newest" can be somebody
-   * else's. `@rljson/mongo-agent` had exactly this bug — lost updates
-   * root-caused to a single `_lastApplied` slot rather than per-node lineages —
-   * and fixed it by tracking lineages. Nothing reads this chain yet, so the
-   * limit is not reachable; WP3 must replace it rather than build on it.
-   *
-   * "Newest" is by `timeId`, which is `<millis>:<nanoid>` — so two entries
-   * minted in the same millisecond are separated by a random tail. That order
-   * is arbitrary in wall-clock terms and IDENTICAL on every node, which is the
-   * property that matters; nothing may depend on it meaning "later in time".
-   * @returns The tip's ref, or `undefined` on an empty chain.
-   */
-  private async _tip(): Promise<string | undefined> {
-    // No optional chaining on the dump: `init` creates this table on the line
-    // before, so a missing one is not a state this code can be in, and a
-    // fallback for it would be a branch no test could ever reach.
-    const table = `${this._treeKey}EditHistory`;
-    const dump = await this._db.core.dumpTable(table);
-    const rows = dump[table]._data as Array<EditHistory & { _hash: string }>;
-    if (rows.length === 0) return undefined;
-
-    const claimed = new Set<string>();
-    for (const row of rows) {
-      for (const ref of row.previous ?? []) claimed.add(ref);
-    }
-    const tips = rows.filter((row) => !claimed.has(row._hash));
-    /* v8 ignore next -- @preserve every row claimed means a cycle, not reachable */
-    if (tips.length === 0) return undefined;
-
-    // A single pass for the greatest `timeId`, rather than a sort whose
-    // comparator is only fully exercised when the random tails happen to fall
-    // the right way. Coverage that depends on luck is how a gate reads 98% and
-    // 99% on identical runs.
-    let tip = tips[0];
-    for (const row of tips) {
-      if (row.timeId > tip.timeId) tip = row;
-    }
-    return tip._hash;
   }
 
   /**
@@ -817,233 +675,6 @@ export class FsEditChain {
     return ref;
   }
 }
-
-// .............................................................................
-/**
- * Orders two `timeId`s (`<millis>:<nanoid>`).
- *
- * Compares the millisecond part numerically and breaks ties on the random
- * suffix, so the order is TOTAL and IDENTICAL on every node — which is the
- * property that makes convergence a guarantee rather than a matter of who
- * spoke last. It is not "later in wall-clock time": two ids minted in the same
- * millisecond are separated by a random tail, and nothing may read the result
- * as a timestamp comparison.
- *
- * A missing or malformed id orders as "not comparable" (`0`), so a caller
- * cannot accidentally treat "unknown" as "older".
- *
- * Same semantics as `@rljson/mongo-agent`'s `compareTimeId`, restated here
- * rather than depended on: fs must not take a dependency on mongo-agent, which
- * already depends on fs-agent.
- * @param a - The first timeId, or `undefined`.
- * @param b - The second timeId, or `undefined`.
- * @returns `-1` if `a` is older, `1` if newer, `0` when equal or not
- *   comparable.
- */
-export const compareTimeId = (
-  a: string | undefined,
-  b: string | undefined,
-): number => {
-  if (!a || !b) return 0;
-  if (a === b) return 0;
-  const [aMillis, aTail] = a.split(':');
-  const [bMillis, bTail] = b.split(':');
-  const aNum = Number(aMillis);
-  const bNum = Number(bMillis);
-  if (Number.isNaN(aNum) || Number.isNaN(bNum)) return 0;
-  if (aNum !== bNum) return aNum < bNum ? -1 : 1;
-  return (aTail ?? '') < (bTail ?? '') ? -1 : 1;
-};
-
-// .............................................................................
-/** What {@link planRemovals} is asked. */
-export interface RemovalQuestion {
-  /** Relative paths the peer says it deleted. */
-  removed: readonly string[];
-  /** The `timeId` of the edit carrying them. */
-  timeId: string;
-  /**
-   * `path → timeId` of the newest LOCAL edit that touched each path.
-   *
-   * A path absent from this map has no local claim, and a removal for it is
-   * applied — "unknown" must never read as "older".
-   */
-  localTimeIds: ReadonlyMap<string, string>;
-  /**
-   * `path → timeId` of the last edit the CHAIN knows for that path.
-   *
-   * Consulted only where {@link localTimeIds} has nothing, which is the case
-   * that matters: a node holding a file it RECEIVED rather than authored has
-   * no claim on it — a receiver adopts and never authors, deliberately — so
-   * without this the ordering question had no answer and an old removal won
-   * by default.
-   *
-   * Optional, because the chain is best effort. Absent, the behaviour is
-   * exactly what it was: only this node's own claims can outrank a removal.
-   */
-  chainTimeIds?: ReadonlyMap<string, string>;
-  /** Relative paths this node currently holds. */
-  held: ReadonlySet<string>;
-  /**
-   * Paths this node HOLDS but has never told anyone about — local work made
-   * since its last announcement.
-   *
-   * **A removal cannot be about a file its author has never seen.** A peer's
-   * stated removal travels with the chain and is re-collected by every later
-   * walk, so it keeps arriving after it was first applied. If this node
-   * re-creates the path in the meantime, that creation has no `localTimeIds`
-   * entry yet — claims are recorded by the PUSH, which has not happened — so
-   * the recency rule above cannot see it and the removal deletes a file the
-   * user has just made.
-   *
-   * Measured as `I7b`: three nodes, a deletion everyone applied, then a
-   * different node re-creates the path. The re-created file was removed again
-   * before its author could announce it, and the fleet ended up split, with
-   * the deleter holding the file and the author who re-made it without it.
-   * Found by the random-churn fuzzer at roughly one run in eight; the named
-   * reproduction is deterministic in 33 seconds.
-   *
-   * Absent means "ask the rules below", so an omitted set changes nothing.
-   */
-  unannounced?: ReadonlySet<string>;
-  /**
-   * How many paths the SAME edit claims.
-   *
-   * It counts towards what the folder would be left with, because a rename
-   * drops every old name and claims every new one — a folder that is renamed
-   * does not shrink, and reading the removals alone makes one look like a
-   * wipe. Default 0, which is what a pure deletion is.
-   */
-  claims?: number;
-  /** Below this many removals, nothing is bounded. */
-  minFiles: number;
-  /**
-   * Above `minFiles`, the largest fraction of `held` one removal may take.
-   */
-  maxRatio: number;
-}
-
-/** What {@link planRemovals} decided about a peer's deletions. */
-export interface RemovalPlan {
-  /** Paths to delete here. */
-  apply: string[];
-  /**
-   * Paths refused because this node has NEWER work on them.
-   *
-   * A removal is a statement about a state. A node that has since re-created
-   * the path has moved past that state, and applying the removal would undo
-   * newer work on the authority of an older edit.
-   */
-  staler: string[];
-  /**
-   * Whether the whole set was refused for being too large.
-   *
-   * The mass-delete circuit breaker, applied here for the same reason
-   * `@rljson/mongo-agent` applies it to tombstone application: an explicit
-   * removal list bypasses the ancestry check by design, so it must not also
-   * bypass the bound on how much one message may destroy.
-   */
-  blocked: boolean;
-}
-
-/**
- * Which of a peer's deletions to apply here.
- *
- * **Why an explicit list is needed at all.** A tree records what a folder
- * holds, so a deletion reaches a peer only as an absence — and an absence is
- * indistinguishable from a state that merely predates the file. fs infers the
- * difference from ancestry (`senderSawMyState`), which works only while the
- * ancestor can be resolved. A partitioned node's ancestor cannot, and that is
- * the measured data loss: the deleted file comes back on the node that deleted
- * it. A removal carried in the chain is a FACT rather than an inference, and it
- * is the authorisation ancestry could not supply.
- *
- * **Which is exactly why it is bounded twice.** It deletes without asking the
- * ancestry rule, so recency and volume are the only guards left:
- *
- * - **recency**, by `timeId`. Minted once by the node that made the edit, so
- *   every node orders the same pair the same way. A removal older than this
- *   node's own newest edit to that path is refused.
- * - **volume**, by the mass-delete circuit breaker. Below
- *   `minFiles` nothing is bounded — emptying a three-file folder is an
- *   ordinary edit — and above it a removal of more than `maxRatio` of what
- *   this node holds is refused wholesale.
- * @param opts - The removal and this node's state; see
- *   {@link RemovalQuestion}.
- * @returns What to delete, what was refused as stale, and whether the whole
- *   set was blocked.
- */
-export const planRemovals = (opts: RemovalQuestion): RemovalPlan => {
-  const apply: string[] = [];
-  const staler: string[] = [];
-
-  for (const path of opts.removed) {
-    // Nothing to delete is not a refusal. It is the ordinary case: the peer
-    // and this node already agree the path is gone.
-    if (!opts.held.has(path)) continue;
-    // Local work nobody has heard of yet outranks any removal, because no
-    // removal can have been about it. See `unannounced`.
-    if (opts.unannounced?.has(path)) {
-      staler.push(path);
-      continue;
-    }
-    // WHO LAST TOUCHED THIS PATH — asked of this node's claims first, and of
-    // the CHAIN when it has none.
-    //
-    // A claim is recorded by the PUSH, and a receiver adopts without
-    // authoring: that is deliberate, because claiming an adopted path would
-    // make a peer's later removal of it look stale. The consequence is that a
-    // node holding a file it merely RECEIVED has no claim for it — so this
-    // comparison had nothing to compare and the removal applied by default.
-    //
-    // Measured: a file re-created on one node, adopted by a third, and then
-    // deleted on that third node by a removal older than the re-creation. The
-    // ordering fact existed the whole time — the re-creator's entry carries a
-    // later `timeId` than the removal — and nothing asked for it, because the
-    // only question being put was "do I claim this?".
-    //
-    // `chainTimeIds` is that question put to the history instead, which is
-    // where the answer lives. Deriving it from the local claim map alone is
-    // the same mistake as deriving a deletion from an absent file: a fact
-    // about the fleet read off one node's private state.
-    const local =
-      opts.localTimeIds.get(path) ?? opts.chainTimeIds?.get(path);
-    if (local !== undefined && compareTimeId(opts.timeId, local) < 0) {
-      staler.push(path);
-      continue;
-    }
-    apply.push(path);
-  }
-
-  // EVERYTHING GONE AT ONCE HAS ITS OWN, LOWER FLOOR.
-  //
-  // The ratio rule needs `minFiles` for the reason its own test gives:
-  // *"below the floor, 'most of the folder' is not a meaningful statement"*,
-  // and a guard that fires on ordinary small-folder work gets turned off. A
-  // folder holding one file legitimately loses it; a rename in a small folder
-  // removes every path it holds and adds them back under new names.
-  //
-  // But the floor was ALSO the only thing standing between a wiped peer and
-  // every other node's copy: 40 removals against 40 held files is a ratio of
-  // 1.0 and still under 100, so it passed unchallenged. Measured as `a small
-  // folder survives a wiped peer too` — every node emptied by one peer's loss.
-  //
-  // So the two cases get two floors. "Most of it" stays at `minFiles`,
-  // because below that the ratio says nothing. "ALL of it" gets
-  // {@link ALL_GONE_MIN_FILES}, which is low enough to catch a wipe and high
-  // enough to leave the folders where emptying is ordinary work alone.
-  const allGone =
-    opts.held.size > ALL_GONE_MIN_FILES &&
-    opts.held.size - apply.length + (opts.claims ?? 0) <= ALL_GONE_MIN_FILES;
-  const blocked =
-    allGone ||
-    (apply.length > opts.minFiles &&
-      apply.length / Math.max(opts.held.size, 1) > opts.maxRatio);
-
-  return blocked
-    ? { apply: [], staler, blocked: true }
-    : { apply, staler, blocked: false };
-};
 
 // .............................................................................
 /**
@@ -1145,14 +776,14 @@ export interface JoinPlan {
  * **The chain applies first; the filesystem only then.** A joining node used to
  * author a lineage root from whatever it happened to hold and push it as the
  * network's newest claim. That is one defect wearing two faces: every node got
- * its own lineage root, so `classify` answered `fork` to every announcement
+ * its own lineage root, so `relate` answered `fork` to every announcement
  * ever made; and a node restored from a backup pushed deleted files back to the
  * whole fleet.
  *
  * Every question here is answered against the chain. The folder is consulted
  * only for what it holds — never for what that means.
  * @param q - The head, the folder, and what the history says was removed.
- * @returns The per-path plan; every path appears in at most one bucket.
+ * @returns The per-path plan; every path appears in at most one list.
  */
 export const planJoin = (q: JoinQuestion): JoinPlan => {
   const write: string[] = [];

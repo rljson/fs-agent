@@ -98,7 +98,7 @@ describe('FsAgent — a push that parents itself', () => {
 
     const agent = new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 20},
     });
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat('/fsTree+'), socket, {
@@ -147,7 +147,7 @@ describe('FsAgent — a push that parents itself', () => {
 
     const agent = new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 20},
     });
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat('/fsTree+'), socket, {

@@ -80,7 +80,11 @@ async function main() {
 
   const logger = new ConsoleLogger();
 
-  const server = new Server(route, serverIo, serverBs, { logger });
+  const server = new Server(route, serverIo, serverBs, {
+    logger,
+    // The hub's order: which of two versions reached the fleet later.
+    stamp: { domain: 'live', hub: 'hub' },
+  });
   await server.init();
 
   // Register Socket.IO connections
@@ -141,9 +145,7 @@ async function main() {
 
   // Client A starts syncToDb and syncFromDb
   const stopAtoDb = await agentA.syncToDb(clientDbA, connectorA, treeKey);
-  const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey, {
-    cleanTarget: true,
-  });
+  const stopAfromDb = await agentA.syncFromDb(clientDbA, connectorA, treeKey);
 
   // ---------------------------------------------------------------------------
   // Client B Setup (folder B)
@@ -186,9 +188,7 @@ async function main() {
 
   // Start bidirectional sync for Client B
   const stopBtoDb = await agentB.syncToDb(clientDbB, connectorB, treeKey);
-  const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey, {
-    cleanTarget: true,
-  });
+  const stopBfromDb = await agentB.syncFromDb(clientDbB, connectorB, treeKey);
 
   console.log('\n=== Live Sync Active ===');
   console.log(`  Folder A: ${folderA}`);

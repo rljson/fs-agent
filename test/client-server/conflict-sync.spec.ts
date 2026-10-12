@@ -86,7 +86,7 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
     const serverIo = new IoMem();
     await serverIo.init();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-    server = new Server(route, serverIo, sharedBs, { syncConfig: SYNC });
+    server = new Server(route, serverIo, sharedBs, { syncConfig: SYNC, stamp: { domain: 'test', hub: 'hub' } });
     await server.init();
 
     const mkNode = async (name: string): Promise<Node> => {
@@ -100,8 +100,7 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
       // runs an FsAgent resolver).
       const agent = new FsAgent(folder, sharedBs, {
       ...ORIGIN_FIXTURE,
-        resolveConflicts: true,
-        timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
+        timeouts: { debounceMs: 100 },
       });
       return {
         localIo,
@@ -140,9 +139,10 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
     });
     expect(got).toBe(true);
 
-    // The linear history must NOT register as a fork on either side.
-    expect(await a.db.detectDagBranch(TREE)).toBeNull();
-    expect(await b.db.detectDagBranch(TREE)).toBeNull();
+    // The linear history is no fork: B adopted A's head, nothing was merged.
+    expect(b.agent.ownHead).toBe(a.agent.ownHead);
+    expect((await readdir(b.folder)).some((n) => n.includes('conflicted copy')))
+      .toBe(false);
   });
 
   it('resolves a real offline divergent edit, preserving both versions', async () => {
@@ -171,16 +171,14 @@ describe('end-to-end offline-edit conflict resolution (two clients)', () => {
     await startSync(b);
 
     // Converge: each side ends with both versions present (winner at doc.txt,
-    // loser as a Nextcloud conflict copy), and the fork collapses.
+    // loser as a conflicted copy), and the fork collapses into one head.
     const converged = await until(async () => {
       const namesA = await readdir(a.folder);
       const namesB = await readdir(b.folder);
       const hasCopy = (ns: string[]) =>
         ns.some((n) => n.includes('conflicted copy'));
-      const noFork =
-        (await a.db.detectDagBranch(TREE)) === null &&
-        (await b.db.detectDagBranch(TREE)) === null;
-      return hasCopy(namesA) && hasCopy(namesB) && noFork ? { namesA } : false;
+      const oneHead = a.agent.ownHead === b.agent.ownHead;
+      return hasCopy(namesA) && hasCopy(namesB) && oneHead ? { namesA } : false;
     }, 12000);
 
     expect(converged).toBeTruthy();

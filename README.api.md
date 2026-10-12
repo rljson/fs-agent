@@ -8,20 +8,20 @@ found in the LICENSE file in the root of this package.
 
 # @rljson/fs-agent — API reference
 
-Every symbol the package exports, grouped by the module it comes from, with what
-it is for and what it costs. **89 exports across 11 modules.**
+Every symbol the package exports, grouped by what it is for. **46 exports.**
 
-Most consumers need only the first section. The rest is the protocol, exported
-because the sync is assembled from parts that are separately testable — not
-because every caller is expected to reach for them.
+Most consumers need only the first section. The rest is exported because a host
+builds on it — a scanner to watch a folder, the chain to show a history, an
+atomic write to touch a synced folder safely — not because a caller is expected
+to reach for every part.
 
 | if you want | read |
 | --- | --- |
 | to sync a folder | [The agent](#the-agent) |
-| to know what the agent is doing | [Observability](#observability) |
+| to know what the agent did | [Signals](#signals) · [Observability](#observability) |
 | the history itself | [The edit chain](#the-edit-chain) |
-| the repair protocol | [Bucket sync](#bucket-sync-the-wire) and [The manifest](#the-manifest-reconciliation) |
-| conflict resolution internals | [Conflicts](#conflicts) |
+| to scan, store or restore a folder yourself | [Scanner and adapters](#scanner-and-adapters) |
+| to write into a synced folder | [Utilities](#utilities) |
 | the design behind any of it | [README.architecture.md](README.architecture.md) |
 
 ---
@@ -30,54 +30,49 @@ because every caller is expected to reach for them.
 
 ### `class FsAgent`
 
-One folder, one agent. Construct it, then start one or both directions.
+One folder, one agent. Construct it, then start both directions.
 
 ```ts
 new FsAgent(rootPath: string, bs?: Bs, options?: FsAgentOptions)
 ```
 
-`bs` defaults to a fresh `BsMem`, which is **local only**. For a synced folder
-pass `client.bs` — an agent with a bare `BsMem` can store its own blobs and
-never fetch a peer's, so every restore fails on its first file. Prefer
-`FsAgent.fromClient`, which wires this correctly.
+`bs` defaults to a fresh `BsMem`, which is **local only**: an agent with a bare
+`BsMem` can store its own blobs and never fetch a peer's. For a synced folder
+pass `client.bs`, or use `FsAgent.fromClient`, which wires this correctly.
 
 | member | returns | what it does |
 | --- | --- | --- |
-| `static fromClient(client, rootPath, options?)` | `Promise<FsAgent>` | the production path: takes `client.io`/`client.bs`, turns on conflict resolution and the sync config the fleet needs |
-| `syncToDb(db, connector, treeKey, storageOptions?)` | `Promise<() => void>` | **sending.** Watches the folder, appends an Edit per change, announces its head. Returns `stop()` |
-| `syncFromDb(db, connector, treeKey, restoreOptions?)` | `Promise<() => void>` | **receiving.** Resolves announcements, applies Edits, heals. Returns `stop()` |
-| `dispose()` | `void` | releases the watcher and **abandons a pending join** |
-| `extract()` | `Promise<FsTree>` | scan the folder into a tree, without storing or announcing |
-| `restore(tree, targetDir?, options?)` | `Promise<void>` | write a tree to disk. See `RestoreOptions.cleanTarget` |
-| `storeInDb(db, treeKey, options?)` | `Promise<string>` | scan and store, returning the tree ref |
-| `loadFromDb(db, treeKey, ref, targetDir?)` | `Promise<void>` | fetch a tree by ref and write it out |
-| `getTree()` | `FsTree \| null` | the last scanned tree, or `null` before the first scan |
-| `hasBlob(blobId)` | `Promise<boolean>` | is this blob available locally |
-| `getFileContent(blobId)` | `Promise<Buffer>` | the bytes behind a blob id |
+| `static fromClient(rootPath, treeKey, client, socket, options?)` | `Promise<FsAgent & …>` | the production path: takes `client.io`/`client.bs` and a `Connector` with the sync config the fleet needs; adds `syncToDbSimple()` and `syncFromDbSimple()` |
+| `syncToDb(db, connector, treeKey)` | `Promise<() => void>` | **sending.** Watches the folder, authors an entry per change, announces its head. Returns `stop()` |
+| `syncFromDb(db, connector, treeKey)` | `Promise<() => void>` | **receiving.** Hears the heads the network says and applies, adopts, announces or merges. Returns `stop()` |
+| `ownHead` | `string \| undefined` | the chain entry this folder stands on; persisted in `.fsagent-state.json` |
+| `dispose()` | `void` | releases the watcher and abandons a pending join |
+| `extract()` | `Promise<FsTree>` | scans the folder into a tree, without storing or announcing it |
+| `restore(tree, targetPath?, options?)` | `Promise<void>` | writes a tree to disk. See [`RestoreOptions`](#interface-restoreoptions) |
+| `storeInDb(db, treeKey, options?)` | `Promise<string>` | scans and stores, returning the tree ref |
+| `loadFromDb(db, treeKey, rootRef, targetPath?, options?)` | `Promise<void>` | fetches a tree by ref and writes it out |
+| `getTree()` | `FsTree \| null` | the last scanned tree |
+| `hasBlob(blobId)` · `getFileContent(blobId)` | `Promise<boolean>` · `Promise<Buffer>` | the blob store, as this agent sees it |
+| `rootPath` · `bs` · `scanner` · `adapter` · `timeouts` | | what the agent was built with |
 
-Both `syncToDb` and `syncFromDb` return a `stop()`. Calling `stop()` ends that
-direction; `dispose()` releases the agent.
+Both `sync*` methods return a `stop()`. Stopping the receive side also clears
+`antiEntropyStatus`, unless a newer receive side replaced it.
 
 ### `interface FsAgentOptions`
 
-Everything optional. See
-[README.public.md § Configuration](README.public.md#configuration) for defaults
-and what each one costs — this table is the shape, that one is the advice.
+Everything optional. [README.public.md](README.public.md#configuration) says
+what each one costs; this is the shape.
 
 | field | type | |
 | --- | --- | --- |
-| `resolveConflicts` | `boolean` | reconcile two edits of one file, keeping the loser as a renamed copy. Off, the resolver is not even constructed |
-| `onConflict` | `(reports) => void` | called as conflicts are resolved; without it they are resolved silently |
-| `joinWaitMs` | `number` | how long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
-| `bucketSync` | `boolean` | repair a divergence by comparing manifests instead of replacing a folder |
-| `antiEntropy` | `AntiEntropyOptions` | the periodic comparison that heals a lost announcement |
-| `syncConfig` | `SyncConfig` | forwarded to every `Connector`. Without `causalOrdering` the wire carries no predecessors and no conflicting edit can be merged |
-| `clientIdentity` | `ClientIdentity` | who this machine is, on the wire |
-| `timeouts` | `TimeoutConfig` | every async step is bounded; see below |
-| `logName` | `string` | tags this agent's log lines. Four agents in one process produced three identical lines with nothing saying who |
-| `ignore` | `string[]` | patterns not to sync; globs supported |
-| `followSymlinks` | `boolean` | |
-| `settleMs` / `settleMinBytes` | `number` | how long a large file must stop growing before it is hashed |
+| `joinWaitMs` | `number` | how long a folder with files and no history waits for the network's head before it becomes the origin of its own. `0` means at once |
+| `syncConfig` | `SyncConfig` | forwarded to the `Connector` `fromClient` builds. `includeClientIdentity` lets the hub tell a re-announcement from an echo |
+| `clientIdentity` | `ClientId` | who this machine is on the wire |
+| `onSignal` | `(signal: FsSignal) => void` | the [signal](#signals) channel, from the constructor |
+| `timeouts` | [`TimeoutConfig`](#interface-timeoutconfig) | every async step is bounded |
+| `logName` | `string` | tags this agent's log lines |
+| `ignore` | `string[]` | patterns not to sync; globs, see [`compileIgnore`](#compileignorepatterns) |
+| `maxDepth` · `followSymlinks` · `scanCachePath` | | forwarded to the [`FsScanner`](#class-fsscanner) |
 
 ### `interface TimeoutConfig`
 
@@ -85,16 +80,106 @@ Every field optional; defaults shown.
 
 ```ts
 { dbQuery: 10_000, fetchTree: 20_000, extract: 15_000, restore: 15_000,
-  syncCallback: 25_000, debounceMs: 300, processRefRetries: 3,
-  processRefRetryDelayMs: 5_000, recoveryRetries: 10 }
+  debounceMs: 300 }
 ```
+
+`restore` bounds every apply: the sending and receiving sides share one lock, so
+an apply that hung on a blob nobody serves would keep the folder's own work from
+being authored. `debounceMs` coalesces a burst of filesystem events into one
+edit.
 
 ### `interface RestoreOptions`
 
-`cleanTarget` deletes anything the incoming tree does not contain. **The sync
-never sets it.** Read
+`cleanTarget` deletes anything the tree does not contain. **The sync never sets
+it**: an apply deletes only what a descending head removed. Read
 [README.public.md](README.public.md#restoreoptionscleantarget--read-this-before-setting-it)
 before you do.
+
+### `SYNC_ERROR_FILE`
+
+`'.sync-errors.log'` — the keyed, append-only record of internal failures, in
+the synced folder and never synced. A refusal is a [signal](#signals), not an
+error.
+
+---
+
+## Signals
+
+**The channel a host application should read.** It reports everything a person
+might care about, through one type, and is the only surface that says whether
+somebody still has to act.
+
+| member | type | |
+| --- | --- | --- |
+| `agent.signals` | `readonly FsSignal[]` | everything signalled, oldest first; seeded from disk on first read |
+| `agent.signalsNeedingAction` | `readonly FsSignal[]` | only `action: 'required'` — the list a UI should surface |
+| `agent.signalTotals` | `Record<string, number>` | how many of each kind ever happened, dropped ones included |
+| `agent.onSignal(cb)` | `() => void` | subscribe; returns an unsubscribe |
+
+### `class FsSignals`
+
+The sink itself: bounded, countable, subscribable, and no I/O. Exported because
+a host aggregating several agents can own one and feed it from each `onSignal`.
+
+### `interface FsSignal`
+
+| field | type | |
+| --- | --- | --- |
+| `kind` | `FsSignalKind` | what happened |
+| `at` | `number` | epoch ms |
+| `paths` | `readonly string[]` | affected paths, sorted, at most `SIGNAL_PATHS_MAX` |
+| `pathCount` | `number` | how many were affected, which may exceed `paths.length` |
+| `action` | `FsSignalAction` | whether a person has to do something |
+| `decidedBy` | `FsSignalDecidedBy` | who chose the outcome |
+| `copyPath` | `string` | where the version that lost the path was kept |
+| `detail` | `string` | one sentence for a person; never a stack trace |
+
+### `type FsSignalKind`
+
+| `kind` | `action` | what it means |
+| --- | --- | --- |
+| `conflict/arbitrary` | `review` | two machines changed one file at once, or one deleted what the other edited. Both versions were kept (`copyPath`), or the edit was; which keeps the name follows the order the fleet heard them in |
+| `collision/type` | **`required`** | a directory and a file at one path: the directory keeps it, the file is at `copyPath` |
+| `deletion/refused` | **`required`** | a deletion beyond the guard's floors was not made — not authored at the sender, not applied at a receiver |
+| `join/recovered` | `review` | a joining machine moved files the history had removed into `.fsagent-recovered/` |
+| `join/conflicted` | `review` | a joining machine kept its own version of a path beside the network's |
+| `repair/blocked` | `review` | nothing could be decided — a history that cannot be read, or a stamp the hub never sent. Retried |
+| `path/unwritable` | **`required`** | a path this filesystem rejects. It will not arrive until renamed |
+
+### `type FsSignalAction`
+
+`'none' | 'review' | 'required'`. `review`: the agent dealt with it and a person
+may want to know. `required`: nothing in this package will resolve it.
+
+### `type FsSignalDecidedBy`
+
+`'chain' | 'stamp' | 'guard'` — the edit chain (which edit came after which),
+the hub's stamps (which version reached the fleet later), or a guard that
+refused, so nothing was chosen. None of them compares two machines' clocks.
+
+### `type FsSignalInput`
+
+What a producer passes before the sink stamps `at` and counts `paths`.
+
+### `type FsSignalLog`
+
+The persisted shape: `{ signals, totals }`.
+
+### `SIGNAL_LOG_FILE`
+
+`'.fsagent-signals.json'` — where the log persists, inside the synced folder.
+
+### `SIGNAL_LOG_MAX`
+
+`200` signals kept. The per-kind totals are not bounded.
+
+### `SIGNAL_PATHS_MAX`
+
+`20` paths named by one signal before it only counts them.
+
+### `SIGNAL_ONCE_MAX`
+
+`500` distinct "report once" keys remembered.
 
 ---
 
@@ -102,37 +187,20 @@ before you do.
 
 | member | type | |
 | --- | --- | --- |
-| `agent.antiEntropyStatus` | `AntiEntropyStatus \| null` | whether this machine agrees with the hub, since when, and what it last did |
-| `agent.refusedDeletions` | `readonly RefusedDeletion[]` | deletions the mass-delete guard refused, newest last |
-| `agent.stageTimings` | `Record<string, number>` | milliseconds per stage of the **last** cycle. A total says a run was slow; this says where |
+| `agent.antiEntropyStatus` | `AntiEntropyStatus \| null` | what the last head the hub said made this node do |
+| `agent.stageTimings` | `Record<string, number>` | milliseconds per stage of the last cycle: `push.scan`, `push.announce`, and the `apply.*` stages |
 | `agent.scanner.onChange(cb)` | `() => void` | every filesystem event the scanner accepted |
-| `SYNC_ERROR_FILE` | `'.sync-errors.log'` | keyed, append-only record of every refusal and failure |
-| `REFUSED_DELETION_LOG_MAX` | `20` | how many refusals `refusedDeletions` keeps |
-
-### `interface RefusedDeletion`
-
-```ts
-{ atMs: number;
-  route: 'restore' | 'bucketSync' | 'removals';
-  wouldRemove: number;
-  held: number;
-  paths: readonly string[]; }
-```
-
-The guard refuses on **every** machine, so a deliberate mass deletion stalls the
-whole fleet and the only other trace is a line in each machine's log — which a
-UI on another machine cannot read. `route` matches the sync-error key. `paths`
-holds the first ten, which is enough to name the folder and ask the user.
 
 ### `interface AntiEntropyStatus`
 
-`diverged`, `divergedSince`, `hubRef`, `localRef`, `differingPaths`, `repairs`,
-`lastRepair`.
-
-`diverged` is a **latch** — a difference has persisted long enough to repair.
-`differingPaths` is what a content comparison actually found. They can disagree,
-and the known case is in
-[README.public.md § Known constraints](README.public.md#known-constraints).
+| field | |
+| --- | --- |
+| `diverged` | whether this node's head was not the hub's after receiving it |
+| `divergedSince` | since when, epoch ms by this node's clock |
+| `hubRef` | the head the hub said last |
+| `localRef` | this node's head now |
+| `repairs` | how often the hub's head made this node act |
+| `lastRepair` | `{ action: 'pull' \| 'push' \| 'merge' \| 'blocked', at, hubRef, localRef, attempt }` — `attempt` counts how often in a row the same hub head made it act |
 
 ---
 
@@ -148,23 +216,12 @@ new FsEditChain(db: Db, treeKey: string)
 
 | member | returns | |
 | --- | --- | --- |
-| `init()` | `Promise<void>` | create the tables if absent, load the head |
-| `head` | `string \| undefined` | this node's current head |
-| `ready` | `boolean` | whether the chain can be used |
-| `append(opts)` | `Promise<FsChainEntry>` | write one Edit |
-| `entry(head)` | `Promise<FsChainEntry \| undefined>` | read an Edit by its address |
-| `entryForTreeRef(treeRef)` | `Promise<FsChainEntry \| undefined>` | the newest Edit that landed on a state. **Ambiguous by nature** — a folder returning to earlier content produces a second Edit with the same tree ref — which is why `~H~` is the primary and this is the fallback |
-| `oldestEntryForTreeRef(treeRef)` | `Promise<FsChainEntry \| undefined>` | the other end of that ambiguity |
-| `refreshHead()` | `Promise<string \| undefined>` | re-read the tip from the table |
-| `classify(ourHead, theirHead)` | `Promise<Reachability>` | `behind` · `ahead` · `fork` · `incomplete` |
-| `lastEditOf(head, path, maxWalk?)` | `Promise<FsChainEntry \| undefined>` | the newest Edit mentioning a path, in `changed` **or** `removed`. Nearest to the head wins; ties break on `timeId` |
-| `collectRemovals(...)` | `Promise<…>` | the removals stated between two points |
-
-Supporting types: `FsAppendOptions` (`{ treeRef, changed?, removed?, previous? }`
-— what `append` takes), `FsEditData` (`{ treeRef, changed, removed }` — what is
-stored inside the Edit row), `RemovalQuestion` (what `planRemovals` is asked:
-the sender's `removed`, its `timeId`, what this node holds, `localTimeIds` and
-`chainTimeIds`), and `FS_EDIT_ACTION`, the action name every Edit row carries.
+| `init()` | `Promise<void>` | creates the tables if absent |
+| `append(opts)` | `Promise<FsChainEntry>` | writes one entry |
+| `entry(head)` | `Promise<FsChainEntry \| undefined>` | reads one back; `undefined` when no peer can resolve it |
+| `relate(ours, theirs, maxWalk?)` | `Promise<{ verdict, base? }>` | `same` · `behind` · `ahead` · `fork` (with the `base` to merge against) · `incomplete` |
+| `lastEditOf(head, path, maxWalk?)` | `Promise<FsChainEntry \| undefined>` | the nearest entry that changed or removed a path |
+| `collectRemovals(head, ourHead, maxWalk?)` | `Promise<{ removed, changed, complete }>` | the net delta between a head and a state this node knows |
 
 ### `interface FsChainEntry`
 
@@ -173,140 +230,147 @@ the sender's `removed`, its `timeId`, what this node holds, `localTimeIds` and
   previous: string[]; changed: string[]; removed: string[]; }
 ```
 
-`changed` does not distinguish an addition from a modification. `removed` is
-separate because only a removal needs an author.
+### `interface FsAppendOptions`
 
-### `compareTimeId(a, b): number`
+`{ treeRef, previous, changed?, removed?, timeId? }`. `previous` is required: the
+agent says what every entry was made from. `timeId` is passed for an entry that
+must be a function of its content — a merge — and minted otherwise; a root's is
+derived from its tree.
 
-Total order over `<millis>:<nanoid>`, computed identically on every machine.
-Minted once by the author of a change, never re-stamped by a receiver.
+### `interface FsEditData`
 
-### `planRemovals(question): RemovalPlan`
+`{ treeRef, changed, removed }` — what is stored inside the edit row.
 
-Given a sender's stated removals and what this node knows, which to apply,
-which to refuse as stale, and which are a mass deletion. Takes `localTimeIds`
-and `chainTimeIds` — a path this node authored, and a path only the chain can
-speak for.
+### `FS_EDIT_ACTION`
+
+The action name every edit row carries.
 
 ### `createFsChainTables(db, treeKey)`
 
-Idempotent. **The agent creates its own tables**, so a host one release behind
-cannot break it.
+Creates the three chain tables. Idempotent, so the agent creates its own and a
+host one release behind cannot break it.
 
 ---
 
-## Bucket sync (the wire)
+## Scanner and adapters
 
-`src/fs-bucket-sync.ts` — a four-message round that repairs a divergence
-additively.
+### `class FsScanner`
 
-| | |
-| --- | --- |
-| `BQ` `BR` `BG` `BE` | the four prefixes: ask roots, reply roots, ask entries, reply entries |
-| `BUCKET_SYNC_PREFIXES` | all four |
-| `isBucketSync(ref)` | is this a control message rather than a state |
-| `encodeRoots` / `decodeRoots` | roots message |
-| `encodeWanted` / `decodeWanted` | which buckets differ |
-| `encodeEntries` / `decodeEntries` | the entries in those buckets |
-| `class FsBucketSync` | `start()`, `receive(ref)` |
-| `interface BucketSyncHost` | what the agent supplies: `manifest()`, `claimed()`, `editTimes()`, `apply(plan)`, `ready()`, `send(ref)`, `agreed()` |
+Scans and watches a folder. `scan()` reads it into an `FsTree`; `scanFresh()`
+returns a pass that started after the call, sharing one with anyone else asking
+meanwhile — what a caller that acts on the folder must use. `watch()`,
+`stopWatch()`, `pauseWatch()`, `onChange(cb)`, `knownFile(path)`.
 
-Bodies are JSON because a POSIX filename may contain any byte except `/` and
-NUL. A control message **names no tree**, which is why it must never reach the
-anti-entropy as if it were a state.
+### `interface FsScanOptions`
 
----
+`ignore`, `maxDepth`, `followSymlinks`, `scanCachePath`, `settleMs`, `bs`.
 
-## The manifest (reconciliation)
+### `interface FsTree`
 
-`src/fs-manifest.ts` — what two folders compare, and what they conclude.
+`{ rootHash, trees }` — the RLJSON tree of a folder, by node hash.
 
-### `type ManifestEntry`
+### `interface FsNodeMeta`
 
-```ts
-readonly [path: string, blobId: string, claimed?: 0 | 1, editedAt?: string]
-```
+What a tree node says about its path: `name`, `type`, `relativePath`, and for a
+file `blobId` and `size`.
 
-`claimed` says **who** edited; `editedAt` says **when** — the `timeId` of the
-newest Edit for that path, so a tombstone can be ordered against the write it
-claims to supersede. Absent means "the sender did not say", and the rules that
-predate the field decide. Neither is part of `digestOf`: bucket roots must
-depend on content alone, or a node sees differences that are not there.
+### `interface FsChange`
 
-### `reconcile(ours, theirs, claimed?): ReconcilePlan`
+`{ type, path }` — one event the scanner accepted.
 
-`{ fetch, drop, redelete, conflict }`. Both sides compute it from the same two
-inputs and reach the same verdict, which is what convergence requires.
+### `type FsChangeType`
 
-A tombstone older than our write is refused; our tombstone older than their
-write makes us fetch. Without the second half each side holds its position for
-ever.
+`'added' | 'modified' | 'deleted' | 'safety-rescan'`.
 
-| | |
-| --- | --- |
-| `BUCKET_COUNT` · `bucketOf(path)` | how paths are divided |
-| `bucketRoots(manifest)` · `differingBuckets(a, b)` · `BucketRoots` | O(differences), not O(size) |
-| `entriesInBuckets(manifest, buckets, claimed?, editTimes?)` | the entries for an exchange |
-| `TOMBSTONE_BLOB` | a deletion travels as an **entry**, not an absence |
+### `type FsChangeCallback`
 
----
+`(change: FsChange) => void | Promise<void>`.
 
-## Anti-entropy
+### `class FsBlobAdapter`
 
-`src/fs-anti-entropy.ts` — healing when no announcement arrives.
+Moves file content between the folder and a blob store: `fileToBlob` and
+`blobToFile`, streaming large files.
 
-| | |
-| --- | --- |
-| `class FsAntiEntropy` | `observe(hub)`, `agreedOn(ref)`, `status`, `dispose()` |
-| `antiEntropyDecision(hub, view, attempt?)` | `in-sync` · `unknown` · `blocked` · `pull` · `push` · `merge` |
-| `DEFAULT_ANTI_ENTROPY` | the tuning a production fleet runs |
-| `type Reachability` | `behind` · `ahead` · `fork` · `incomplete` |
-| `interface HubAnnouncement` | `{ ref, origin?, predecessors?, reachability? }` |
-| `interface AntiEntropyView` | what the agent reports about itself: `origin`, `currentRef`, `lastAppliedRef`, `lastPushedRef`, `reachability?` |
-| `interface AntiEntropyDeps` | what the agent supplies: `view()`, `busy()`, `sameContent?()`, `repair()`, `now?()`, `log?()` |
-| `type AntiEntropyAction` | `pull` · `push` · `merge` — what a repair does |
-| `type AntiEntropyDecision` | an `AntiEntropyAction`, or `in-sync` · `unknown` · `blocked` |
+### `interface FileBlobMeta`
 
-`antiEntropyDecision` switches on `reachability` **before** any heuristic, and
-`blocked` is a real answer: nothing applied, nothing latched, retried.
+What a stored blob says about the file it came from.
+
+### `interface FileToBlobOptions`
+
+How a file is read into the blob store.
+
+### `interface BlobToFileOptions`
+
+How a blob is written out; `preserveMtime`.
+
+### `class FsDbAdapter`
+
+Stores an `FsTree` in a `Db` and reads it back: `storeFsTree(tree, options?)`
+returns the tree ref.
+
+### `interface StoreFsTreeOptions`
+
+`skipNotification` — store without the `Connector` announcing the insert. The
+agent announces chain heads itself.
 
 ---
 
-## Conflicts
+## Utilities
 
-`src/fs-conflict-resolver.ts` — two people edited one file.
+**Write into a synced folder through `fs-atomic-write`, always.** `writeFile`
+truncates and then writes, so two concurrent writes of one path interleave and
+produce bytes nobody wrote — measured at 1 520 blended pairs in 2 000.
 
-| | |
-| --- | --- |
-| `class FsConflictResolver` | `resolve(conflict)` |
-| `threeWayMerge(o, ours, theirs, winnerSide, loserClientId, loserTimestamp, winnerFor?)` | the merge table. `winnerFor` is the **per-path chain verdict**, which outranks the branch order |
-| `findCommonAncestor(...)` | the `o` of the three |
-| `compareTips(...)` · `decideWinner(...)` | branch order, used only where the chain cannot speak |
-| `conflictCopyName(...)` · `formatConflictTimestamp(...)` | the losing version's name |
-| `fsTreeToContentMap(tree)` · `ContentMap` · `DIR_MARKER` | |
-| `MergePlan` · `ConflictCopy` · `BranchTip` | the plan, a renamed loser, and one side of a fork |
-| `interface ConflictResolverDeps` | what the agent supplies: the history readers, `writeFileAt`, `deleteFileAt`, `scan`, `storeMerge`, `lastEditOfPath`, and the `announce` the merge revision needs — **required**, because the merge store suppresses the connector's own broadcast |
+### `atomicWriteFile(path, content)`
 
-**The loser's bytes are never dropped** — they become a renamed copy, which is
-why either verdict is safe.
+Writes to a temporary file beside the target and renames it into place.
+
+### `atomicWriteStream(path, stream)`
+
+The same, from a stream.
+
+### `atomicTmpPath(path)`
+
+The temporary path `atomicWriteFile` uses for `path`.
+
+### `ATOMIC_TMP_PREFIX`
+
+`'.fsagent-tmp-'` — the prefix of those temporary files, which the scanner
+ignores.
+
+### `compileIgnore(patterns)`
+
+Compiles ignore patterns into a matcher once: globs (`*`, `?`, `**`, folders
+with `/`, `!` exceptions with last-match-wins), case-insensitive. A pattern with
+no glob characters keeps its old prefix meaning — `~$`, `.~lock.` and
+`ATOMIC_TMP_PREFIX` depend on it.
+
+### `globToRegExp(pattern)`
+
+One glob as a regular expression.
+
+### `interface IgnoreMatcher`
+
+`{ ignores(relativePath, isDirectory?): boolean }` — `isDirectory` when known,
+because a directory-only pattern needs it.
 
 ---
 
-## Scanner, adapters, utilities
+## Client-server
 
-| module | exports |
-| --- | --- |
-| `fs-scanner.ts` | `FsScanner`, `FsTree`, `FsNodeMeta`, `FsChange`, `FsChangeType`, `FsChangeCallback`, `FsScanOptions` |
-| `fs-blob-adapter.ts` | `FsBlobAdapter`, `FileBlobMeta`, `FileToBlobOptions`, `BlobToFileOptions` |
-| `fs-db-adapter.ts` | `FsDbAdapter`, `StoreFsTreeOptions` |
-| `fs-atomic-write.ts` | `atomicWriteFile`, `atomicWriteStream`, `atomicTmpPath`, `ATOMIC_TMP_PREFIX` |
-| `fs-ignore.ts` | `compileIgnore`, `globToRegExp`, `IgnoreMatcher` |
-| `client-server/client-server-setup.ts` | `runClientServerSetup`, `ClientServerSetupOptions`, `ClientServerSetupResult` |
+### `runClientServerSetup(options?)`
 
-**Write through `fs-atomic-write`, always.** Three copies of "write a file"
-existed and two of them corrupted content: `writeFile` truncates then writes, so
-two concurrent writes of one path interleave as truncate, truncate, write, write
-and produce bytes nobody wrote. Measured at 1520 blended pairs in 2000.
+Builds a hub and two clients over socket pairs, syncs a folder from one to the
+other, and returns where it all is — a demo of the whole loop, and a smoke test.
+
+### `interface ClientServerSetupOptions`
+
+`{ baseDir?, treeKey? }` — where the two folders go, and the tree table.
+
+### `interface ClientServerSetupResult`
+
+`{ baseDir, folderA, folderB, contentB, cleanup }` — the two folders, what
+arrived in the second, and `cleanup()`.
 
 ---
 

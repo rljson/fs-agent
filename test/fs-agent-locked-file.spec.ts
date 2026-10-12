@@ -9,9 +9,11 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
-import { Connector, Db } from '@rljson/db';
+import { Connector, Db, stateBeaconEvent } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
+import { FsEditChain } from '../src/fs-edit-chain.ts';
+import { announceAsPeer } from './chain-announce.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 // the host application holds .dbf and .PRJZ open for as long as a user has the document. One
@@ -231,11 +233,14 @@ describe('FsAgent — a file held open by another process', () => {
   });
 
   // The consequence that makes this more than a convenience. After a partial
-  // restore the folder holds the new bytes for every file EXCEPT the locked
-  // one. If the node advertises that state, peers adopt a tree carrying the
-  // OLD bytes for the locked file — one user with a document open silently
-  // reverts it for everyone.
-  it('does not advertise the half-applied state to peers', async () => {
+  // apply the folder holds the new bytes for every file EXCEPT the locked one.
+  // If the node told its peers the locked file's OLD bytes were the current
+  // state, one user with a document open would silently revert it for
+  // everyone. In 0.2.0 that cannot happen by construction: the head is not
+  // adopted, and an entry names only what changed against this node's own
+  // head — which the locked file did not — so every merge keeps the peer's
+  // version of it.
+  it('never tells its peers the locked file\'s old bytes are current', async () => {
     const io = new IoMem();
     await io.init();
     const db = new Db(io);
@@ -247,21 +252,9 @@ describe('FsAgent — a file held open by another process', () => {
     await writeFile(join(targetDir, 'open.dbf'), 'old locked');
     await writeFile(join(targetDir, 'a.txt'), 'old alpha');
 
-    const incoming = await seed(bs, {
-      'open.dbf': 'new locked',
-      'a.txt': 'new alpha',
-    });
-    const { FsDbAdapter } = await import('../src/fs-db-adapter.ts');
-    const ref = await new FsDbAdapter(db, treeKey).storeFsTree(incoming);
-
     const agent = new FsAgent(targetDir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: {
-        debounceMs: 1,
-        processRefRetries: 0,
-        processRefRetryDelayMs: 1,
-        recoveryRetries: 0,
-      },
+      timeouts: { debounceMs: 1 },
     });
     const connector = createProbeConnector(db, treeKey);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -269,20 +262,41 @@ describe('FsAgent — a file held open by another process', () => {
 
     const stopTo = await agent.syncToDb(db, connector, treeKey);
     const stopFrom = await agent.syncFromDb(db, connector, treeKey);
+    const own = agent.ownHead as string;
     connector.sent.length = 0;
 
+    // A peer that held this state changed both files.
+    const peer = await announceAsPeer(db, treeKey, {
+      tree: await seed(bs, { 'open.dbf': 'new locked', 'a.txt': 'new alpha' }),
+      changed: ['a.txt', 'open.dbf'],
+      previous: [own],
+    });
     lockedPaths.add('open.dbf');
-    connector.simulateIncoming(ref);
+    connector.simulateIncoming(peer.announcement);
     await new Promise((r) => setTimeout(r, 600));
 
     // a.txt landed…
     expect(await readFile(join(targetDir, 'a.txt'), 'utf-8')).toBe('new alpha');
-    // …open.dbf did not, and crucially the node stayed quiet rather than
-    // telling its peers that "old locked" is the current state.
+    // …open.dbf did not, the head was not adopted…
     expect(await readFile(join(targetDir, 'open.dbf'), 'utf-8')).toBe(
       'old locked',
     );
-    expect(connector.sent).toEqual([]);
+    expect(agent.ownHead).not.toBe(peer.head);
+    // …and nothing this node said claims the locked file.
+    const chain = new FsEditChain(db, treeKey);
+    for (const head of connector.sent) {
+      expect((await chain.entry(head))?.changed ?? []).not.toContain('open.dbf');
+    }
+
+    // Released, the next time the hub says the head, it applies whole.
+    lockedPaths.clear();
+    connector.socket.emit(stateBeaconEvent(connector.route.flat), {
+      r: peer.head,
+    });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await readFile(join(targetDir, 'open.dbf'), 'utf-8')).toBe(
+      'new locked',
+    );
 
     stopTo();
     stopFrom();

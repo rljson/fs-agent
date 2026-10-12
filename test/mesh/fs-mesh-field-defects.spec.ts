@@ -22,11 +22,17 @@
 // .............................................................................
 
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { CONFLICT_LOG_FILE } from '../../src/fs-agent.ts';
-import { buildFsMesh, whyNot, type FsMesh } from './fs-mesh.ts';
+import type { FsAppendOptions, FsEditChain } from '../../src/fs-edit-chain.ts';
+import { SIGNAL_LOG_FILE } from '../../src/fs-signals.ts';
+import {
+  buildFsMesh,
+  whyNot,
+  type FsMesh,
+  type FsMeshNode,
+} from './fs-mesh.ts';
 
 describe('field defects, reduced in process', () => {
   let mesh: FsMesh | undefined;
@@ -645,7 +651,7 @@ describe('field defects, reduced in process', () => {
     // real obligation.
     const files = result.snapshot['A'];
     expect(result.snapshot['B'], 'the two folders disagree').toEqual(files);
-    const reported = mesh.conflicts.filter((c) => c.path === 'shared.txt');
+    const reported = mesh.conflicts.filter((c) => c.paths.includes('shared.txt'));
 
     if (reported.length === 0) {
       // No fork: one version won sequentially. It must still be a version
@@ -680,37 +686,127 @@ describe('field defects, reduced in process', () => {
       await mesh.node('B').read('shared.txt'),
     );
 
-    // 4. The name is true: no DB operation masquerading as a machine, no
-    //    1970, and no double space where an identity would have gone.
+    // 4. The name is true: it says where the losing version reached the
+    //    fleet — the hub's stamp — and nothing a clock decided.
     expect(copyName).not.toContain('db.insertTrees');
-    expect(copyName).not.toContain('1970');
     expect(copyName).not.toContain('copy  ');
-    // An IDENTITY where there is one, and the losing CONTENT where there is
-    // not — never a bare second-granularity timestamp. Two nodes losing
-    // different content in the same second used to derive the same name, so
-    // the copies conflicted with each other and a copy of a copy appeared.
-    expect(copyName).toMatch(
-      /^shared \(conflicted copy (.+ )?\d{4}-\d{2}-\d{2} \d{6}( \S+)?\)\.txt$/,
-    );
-    expect(
-      copyName,
-      'the name carries nothing but a timestamp, so two losers can collide',
-    ).not.toMatch(/^shared \(conflicted copy \d{4}-\d{2}-\d{2} \d{6}\)\.txt$/);
+    expect(copyName).toMatch(/^shared \(conflicted copy \S+-\d+( \S+)?\)\.txt$/);
 
-    // 5. Somebody was told — in both channels, because they serve different
-    //    readers: the callback a UI that is running, the file one that starts
-    //    later.
+    // 5. Somebody was told — as a signal for a UI that is running, and in the
+    //    persisted signal log for one that starts later.
     expect(reported[0].copyPath).toBe(copyName);
-    expect(reported[0].winnerRef).not.toBe(reported[0].loserRef);
-    expect(reported[0].resolvedAt).toBeGreaterThan(0);
+    expect(reported[0].action).toBe('review');
 
-    const logged: unknown = JSON.parse(
-      await readFile(join(mesh.node('A').folder, CONFLICT_LOG_FILE), 'utf-8'),
-    );
-    expect(Array.isArray(logged)).toBe(true);
+    // Whichever node resolved it persisted it.
+    const persisted: boolean[] = [];
+    for (const name of ['A', 'B']) {
+      const raw = await readFile(
+        join(mesh.node(name).folder, SIGNAL_LOG_FILE),
+        'utf-8',
+      ).catch(() => '{"signals":[]}');
+      const log = JSON.parse(raw) as { signals: { paths: string[] }[] };
+      persisted.push(log.signals.some((s) => s.paths.includes('shared.txt')));
+    }
     expect(
-      (logged as { path: string }[]).some((e) => e.path === 'shared.txt'),
+      persisted.includes(true),
       'nothing was written where a UI could find it after a restart',
     ).toBe(true);
   }, 180_000);
+
+  // ...........................................................................
+  // F11 — deletions made on alternating nodes, one of them with a fast clock.
+  //
+  // The field report: four project folders, each with `sub/deeper/`, removed
+  // one after another from two machines in turn, one of which ran twenty
+  // seconds ahead. Deletions went missing and folders came back — because the
+  // order of edits was read from their `timeId`s, and the fast machine's
+  // edits looked newer than everything around them.
+  //
+  // In 0.2.0 nothing is ordered by a clock: a deletion applies because the
+  // entry stating it descends from what the receiver holds. So every one of
+  // the 25 files goes, on both nodes, and nothing returns afterwards.
+  // ...........................................................................
+  it('F11: deletions from alternating nodes all arrive, whatever one clock says', async () => {
+    const dirs = ['d1', 'd2', 'd3', 'd4'];
+    const files = ['a.txt', 'b.txt', 'sub/c.txt', 'sub/d.txt', 'sub/deeper/e.txt', 'sub/deeper/f.txt'];
+    const doomed = dirs.flatMap((d) => files.map((f) => `${d}/${f}`));
+    doomed.push('d4/sub/deeper/g.txt');
+    expect(doomed).toHaveLength(25);
+    // Enough stays that no step looks like an emptied folder.
+    const keep = Array.from({ length: 12 }, (_, i) => `keep-${String(i).padStart(2, '0')}.txt`);
+
+    mesh = await buildFsMesh({
+      root: root('alternating'),
+      names: ['A', 'B'],
+      recordHistory: true,
+      seed: async (folders) => {
+        for (const folder of Object.values(folders)) {
+          for (const path of [...doomed, ...keep]) {
+            await mkdir(dirname(join(folder, path)), { recursive: true });
+            await writeFile(join(folder, path), path);
+          }
+        }
+      },
+    });
+    expect((await mesh.converged({ timeoutMs: 60_000 })).converged).toBe(true);
+
+    // B's clock runs 20 s fast: every edit it appends is stamped 20 s late.
+    skewClock(mesh.node('B'), 20_000);
+
+    for (const [i, dir] of dirs.entries()) {
+      const node = mesh.node(i % 2 === 0 ? 'A' : 'B');
+      await rm(join(node.folder, dir), { recursive: true, force: true });
+      const left = (await node.files()).filter((p) => !p.startsWith(`${dir}/`));
+      for (const name of ['A', 'B']) {
+        expect(
+          await mesh.node(name).settlesOn(left, 30_000),
+          `${dir} did not leave ${name}`,
+        ).toEqual(left);
+      }
+    }
+
+    const result = await mesh.converged({ timeoutMs: 60_000, stableMs: 3_000 });
+    expect(result.converged, whyNot(result)).toBe(true);
+    for (const name of ['A', 'B']) {
+      expect(result.snapshot[name], `${name} kept a deleted file`).toEqual(keep);
+    }
+
+    // Nothing returns.
+    const settled = Date.now();
+    await sleep(F11_QUIET_MS);
+    for (const name of ['A', 'B']) {
+      const back = mesh
+        .node(name)
+        .timeline.samples.filter((s) => s.atMs >= settled)
+        .flatMap((s) => Object.keys(s.files))
+        .filter((p) => doomed.includes(p));
+      expect([...new Set(back)], `came back on ${name}`).toEqual([]);
+      expect(await mesh.node(name).files()).toEqual(keep);
+    }
+  }, 300_000);
 });
+
+/** How long F11 watches for a deleted file to come back. */
+const F11_QUIET_MS = 60_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Makes a node's clock run fast: every edit it appends is stamped `ms` late.
+ * Roots and merges keep their derived stamps — the agent sets those itself.
+ * @param node - The node.
+ * @param ms - How far ahead its clock runs.
+ */
+const skewClock = (node: FsMeshNode, ms: number): void => {
+  const chain = (node.agent as unknown as { _chain: FsEditChain })._chain;
+  const append = chain.append.bind(chain);
+  chain.append = (opts: FsAppendOptions) =>
+    append(
+      opts.timeId !== undefined || opts.previous.length === 0
+        ? opts
+        : {
+            ...opts,
+            timeId: `${Date.now() + ms}:${Math.random().toString(36).slice(2)}`,
+          },
+    );
+};
