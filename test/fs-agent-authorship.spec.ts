@@ -240,11 +240,18 @@ describe('a node claims only what it changed', () => {
 
     await writeFile(join(peerDir, 'a.txt'), 'a');
     const lagging = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
-    vi.spyOn(agent.scanner, 'scanFresh').mockResolvedValueOnce(lagging);
+    // The pass authoring reads next lags behind the disk: x.txt is there,
+    // the pass has not seen it.
+    vi.spyOn(agent.scanner, 'tree', 'get').mockReturnValueOnce(lagging);
+    const waited = vi.spyOn(
+      agent as unknown as { _authorSoon: () => void },
+      '_authorSoon',
+    );
     const head = agent.ownHead;
     await writeFile(join(dir, 'y.txt'), 'y');
     await moved(agent, head);
 
+    expect(waited, 'the lagging pass never reached the guard').toHaveBeenCalled();
     const paths = await claimed(db, agent.ownHead, new Set());
     expect(paths.removed).toEqual([]);
     expect(paths.changed).toEqual(['y.txt']);
