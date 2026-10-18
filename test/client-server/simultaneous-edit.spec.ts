@@ -152,6 +152,24 @@ describe.each([
       for (const stop of node.stops) stop();
       node.agent.scanner.stopWatch();
     }
+    // A stop ends listening, not work already under way. Let a receive that is
+    // still merging finish before its folder goes — one that logs after this
+    // file has ended fails the whole run ("Closing rpc while
+    // onUserConsoleLog was pending"). Bounded: a read waiting on a peer that
+    // is gone must not hold the hook.
+    await Promise.race([
+      Promise.all(
+        nodes.map(async (node) => {
+          const work = node.agent as unknown as {
+            _receiving?: Promise<void>;
+            _lock: Promise<void>;
+          };
+          await work._receiving;
+          await work._lock;
+        }),
+      ),
+      new Promise((r) => setTimeout(r, 5_000)),
+    ]);
     await rm(root, { recursive: true, force: true });
   });
 
