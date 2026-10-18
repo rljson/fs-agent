@@ -2319,6 +2319,42 @@ export class FsAgent {
     return this._ownHead;
   }
 
+  /** When this agent last finished something that may write to the folder. */
+  private _wroteAt = 0;
+
+  /**
+   * Runs `work`, which may write to the folder, and notes when it ended —
+   * inside the lock, so nothing queued behind it can read an older note.
+   * @param work - A receive or a join.
+   * @returns What `work` returned.
+   */
+  private async _writing<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } finally {
+      this._wroteAt = Date.now();
+    }
+  }
+
+  /**
+   * The folder for authoring a local change: a pass that began after this
+   * agent last wrote to it.
+   *
+   * A pass that overlapped an apply may have read the apply half-done, and
+   * authoring from it announced the version before the apply — a revert
+   * (F9). After a write, then, the folder is scanned afresh. Without one, the
+   * watcher's last pass already is such a pass, and scanning again only looks
+   * at a file mid-copy one more time: a copy that stalls hashed a truncated
+   * version for every extra look, two to five times as many as before.
+   * @returns The tree.
+   */
+  private async _passAfterOwnWrites(): Promise<FsTree> {
+    const last = this._scanner.tree;
+    return last && this._scanner.treeStartedAt > this._wroteAt
+      ? last
+      : this._scanner.scanFresh();
+  }
+
   /**
    * Runs `work` alone: the send and receive sides never interleave.
    * @param work - What to run.
@@ -2589,7 +2625,7 @@ export class FsAgent {
         // which can have run while an apply was still writing and would read
         // as a local edit reverting it.
         void this._exclusive(async () =>
-          this._author(await this._scanner.scanFresh()),
+          this._author(await this._passAfterOwnWrites()),
         ).catch((err) => this._writeSyncError('syncToDb', err));
       }, this._timeouts.debounceMs);
     };
@@ -2619,7 +2655,7 @@ export class FsAgent {
       timer,
       done: (head) => {
         this._endJoinWait();
-        void this._exclusive(() => this._join(head)).catch((err) =>
+        void this._exclusive(() => this._writing(() => this._join(head))).catch((err) =>
           this._writeSyncError('join', err),
         );
       },
@@ -2701,7 +2737,7 @@ export class FsAgent {
       return;
     }
     if (this._ownHead === undefined) {
-      void this._exclusive(() => this._join(head)).catch((err) =>
+      void this._exclusive(() => this._writing(() => this._join(head))).catch((err) =>
         this._writeSyncError('join', err),
       );
       return;
@@ -2743,7 +2779,7 @@ export class FsAgent {
         await this._stamping;
         const own = this._ownHead;
         const outcome = await this._exclusive(() =>
-          receive(head, this._receiveDeps()),
+          this._writing(() => receive(head, this._receiveDeps())),
         ).catch((err): ReceiveOutcome => {
           this._writeSyncError('receive', err);
           return 'blocked';

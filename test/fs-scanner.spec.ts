@@ -40,6 +40,16 @@ describe('FsScanner', () => {
       expect(meta.type).toBe('directory');
     });
 
+    it('remembers when the pass behind its tree began', async () => {
+      const scanner = new FsScanner(testDir);
+      expect(scanner.treeStartedAt, 'before the first pass').toBe(0);
+      const before = Date.now();
+      await scanner.scan();
+      const after = Date.now();
+      expect(scanner.treeStartedAt).toBeGreaterThanOrEqual(before);
+      expect(scanner.treeStartedAt).toBeLessThanOrEqual(after);
+    });
+
     it('should scan a directory with files', async () => {
       // Create test structure
       await writeFile(join(testDir, 'file1.txt'), 'content1');

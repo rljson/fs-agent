@@ -7,7 +7,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
 import { Connector, Db, stateBeaconEvent } from '@rljson/db';
@@ -236,7 +236,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   // multi-megabyte field case (F9): two receivers re-authored the partial
   // version of the file the writer had just completed, and the deletion that
   // followed came back from them as residue.
-  it('authors from the folder as it is now, never from the last watcher pass', async () => {
+  it('authors from the folder as it is now, never from a pass that began before its own write', async () => {
     const { db, connector, agent, sent, socket, bs } = await wire();
 
     await writeFile(join(dir, 'doc.txt'), 'v1');
@@ -244,6 +244,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
     await new Promise((r) => setTimeout(r, 300));
     const before = agent.scanner.tree;
+    const beforeStartedAt = agent.scanner.treeStartedAt;
 
     await writeFile(join(peerDir, 'doc.txt'), 'v2');
     const peer = await announceAsPeer(db, 'fsTree', {
@@ -265,8 +266,14 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     agent.scanner.stopWatch();
     sent.length = 0;
 
-    // The pass that ran before the write landed, and the event that follows.
-    (agent.scanner as unknown as { _tree: unknown })._tree = before;
+    // The pass that ran before the write landed — with its own start time, as
+    // the scanner keeps the two — and the event that follows.
+    const scanner = agent.scanner as unknown as {
+      _tree: unknown;
+      _treeStartedAt: number;
+    };
+    scanner._tree = before;
+    scanner._treeStartedAt = beforeStartedAt;
     await (
       agent.scanner as unknown as {
         _notifyChange(c: { type: string; path: string }): Promise<void>;
@@ -281,6 +288,32 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     stopTo();
     stopFrom();
     agent.scanner.stopWatch();
+  });
+
+  // The other half of that rule. With no write of its own since the watcher's
+  // last pass began, that pass already shows the change, and scanning again
+  // only looks at a file mid-copy one more time: a copy that stalled hashed a
+  // truncated version for every extra look — two to five times as many as
+  // when the last pass was used.
+  it('authors a local edit from the last pass when it has not written since', async () => {
+    const { db, connector, agent } = await wire();
+
+    await writeFile(join(dir, 'doc.txt'), 'v1');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const head = agent.ownHead;
+    const fresh = vi.spyOn(agent.scanner, 'scanFresh');
+
+    await writeFile(join(dir, 'doc.txt'), 'v2, a local edit');
+    for (let i = 0; i < 300 && agent.ownHead === head; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    expect(agent.ownHead, 'the edit was never authored').not.toBe(head);
+    expect(fresh).not.toHaveBeenCalled();
+
+    stopTo();
+    agent.scanner.stopWatch();
+    vi.restoreAllMocks();
   });
 
   // In 0.2.0 the ancestry is the chain's, so each announcement is an entry

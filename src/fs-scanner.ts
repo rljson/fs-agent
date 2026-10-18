@@ -232,6 +232,9 @@ export class FsScanner {
    */
   private _scanStartedAt = 0;
 
+  /** When the pass that produced {@link tree} began; 0 before the first. */
+  private _treeStartedAt = 0;
+
   /**
    * Large files whose size this scanner has seen but not yet seen settle.
    *
@@ -290,6 +293,16 @@ export class FsScanner {
 
   get tree(): FsTree | null {
     return this._tree;
+  }
+
+  /**
+   * When the pass that produced {@link tree} began — 0 before the first. A
+   * caller that wrote to the folder tells from it whether that pass could have
+   * read its write half-done.
+   * @returns Epoch ms.
+   */
+  get treeStartedAt(): number {
+    return this._treeStartedAt;
   }
 
   /**
@@ -448,6 +461,7 @@ export class FsScanner {
       rootHash: rootHashStr,
       trees,
     };
+    this._treeStartedAt = this._scanStartedAt;
 
     // A file this scan would not read has to be come back for, or it waits on
     // the five-second safety rescan — which turns a 300 ms settle window into
