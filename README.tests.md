@@ -8,8 +8,8 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**63 files, 721 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 720 must pass; one is committed inverted, and §2.11 says which and why.
+**63 files, 723 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 722 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 721 does
+This document says what the suite actually proves, because the number 723 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -222,8 +222,10 @@ only where the change was made, a receiver adopts and never authors.
 
 `fs-agent-authorship.spec.ts` (a received file, a stated deletion, a real edit
 after both, and an absence only a lagging scan reports), `fs-agent-no-laundering.spec.ts` (a node does not re-advertise
-what it adopted; a partial apply stays quiet; authoring never reads the watcher's
-last pass — the F9 revert, pinned deterministically), `fs-agent-own-echo.spec.ts`,
+what it adopted; a partial apply stays quiet; authoring never reads a pass that
+began before its own write — the F9 revert, pinned deterministically — and
+reads the watcher's last pass otherwise, so a stalled copy is not looked at
+again), `fs-agent-own-echo.spec.ts`,
 `fs-agent-self-parent.spec.ts` and `fs-agent-stale-reconnect.spec.ts` hold the
 edges, with `fs-edit-chain.spec.ts` and `fs-chain-crosses-the-wire.spec.ts`
 under them.
@@ -377,7 +379,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 721 above.
+loop are counted as they run. They sum to the 723 above.
 
 ### Mesh tier
 
@@ -410,7 +412,7 @@ loop are counted as they run. They sum to the 721 above.
 | file | n | what it covers |
 | --- | --- | --- |
 | `fs-agent.spec.ts` | 81 | the agent's surface |
-| `fs-scanner.spec.ts` | 61 | scanning, watching, the scan cache, the agent's own writes |
+| `fs-scanner.spec.ts` | 62 | scanning, watching, the scan cache, the agent's own writes |
 | `fs-agent-degradation.spec.ts` | 15 | what the agent does when a dependency fails, and the shapes no scenario reaches |
 | `fs-agent-receive-degradation.spec.ts` | 16 | receiving when a part of it fails — a tree it cannot read, a stamp or state it cannot file, a folder that moves under the apply, a join |
 | `fs-receive.spec.ts` | 11 | what a node does with a head that arrived |
@@ -424,7 +426,7 @@ loop are counted as they run. They sum to the 721 above.
 | `fs-agent-mass-delete-guard.spec.ts` | 12 | refusing a deletion that looks like a loss, and reporting it |
 | `fs-agent-anti-entropy.spec.ts` | 7 | receiving what the hub says |
 | `fs-agent-stale-reconnect.spec.ts` | 14 | a peer reconnecting with a stale tree |
-| `fs-agent-no-laundering.spec.ts` | 7 | a node does not re-advertise what it adopted |
+| `fs-agent-no-laundering.spec.ts` | 8 | a node does not re-advertise what it adopted |
 | `fs-agent-authorship.spec.ts` | 4 | a node claims only what it changed |
 | `fs-divergence-is-content.spec.ts` | 2 | a divergence is a difference in CONTENT |
 | `fs-ref-vs-content.spec.ts` | 6 | ref identity vs content identity |
