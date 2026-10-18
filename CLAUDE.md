@@ -220,10 +220,11 @@ Tests require `cross-env NODE_OPTIONS=--max-old-space-size=8192` for heap-intens
   `merge3`, against the base. Never prune on any other evidence.
 - **Author local work before judging any head** (`receive`'s first step), so a
   head that never saw that work cannot overwrite it.
-- **Author from `scanner.scanFresh()`, under the lock — never from
-  `scanner.tree`.** The last watcher pass can have run while an apply was still
-  writing; authoring from it announces a revert (F9 and the no-laundering
-  regression test pin it).
+- **Author from a pass that began after the agent's own last write**
+  (`_passAfterOwnWrites`): a fresh scan after a receive or a join, the
+  watcher's last pass otherwise. A pass that overlapped an apply announces a
+  revert (F9); scanning afresh on every change hashed a stalled copy truncated
+  two to five times as often. The no-laundering spec pins both halves.
 - **A receiver adopts and never authors.** A merge entry is derived from both
   heads; what a cut-short apply wrote is recorded in `_partiallyApplied`, not
   claimed.

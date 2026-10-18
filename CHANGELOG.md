@@ -60,7 +60,11 @@ its tests:
 
 - Authoring read the watcher's last pass, which can run while an apply is still
   writing, and announced the version before the write as a local edit — a
-  revert, on every machine. Authoring now scans afresh under the lock.
+  revert, on every machine. After a receive or a join, authoring now scans
+  afresh under the lock; otherwise it reads the watcher's last pass, which
+  then began after every write of the agent's own. Scanning afresh on every
+  change was measured to hash a copy that stalls past the settle window
+  truncated two to five times as often, so it is not done.
 - A partial apply — a locked file, an unreachable blob — made the node claim
   the files that had landed. What landed is recorded, not claimed, and
   recognised by the retry.

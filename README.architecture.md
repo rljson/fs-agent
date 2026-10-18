@@ -349,10 +349,11 @@ Reference Architecture](#pull-based-reference-architecture)).
 ### Sending: a change becomes an entry
 
 The watcher says *something happened*; nothing more. After a debounce the agent
-takes the lock, **scans afresh** (`FsScanner.scanFresh` — a pass that started
-after the request, never the watcher's last pass, which can have run while an
-apply was still writing) and asks `planAuthoring` (`fs-send.ts`) what the folder
-did since its own head:
+takes the lock, reads **a pass that began after its own last write** — the
+watcher's last pass when it did, a fresh one (`FsScanner.scanFresh`) when the
+agent has written since, because a pass that overlapped an apply can show it
+half-done — and asks `planAuthoring` (`fs-send.ts`) what the folder did since
+its own head:
 
 - **unchanged** — nothing to author;
 - **changed** — the paths written and the paths removed;
@@ -686,8 +687,11 @@ three.
 **Only while watching.** A one-shot `extract()` or `storeInDb()` has no
 follow-up scan, so deferring there does not delay a file, it drops one — and
 `extract()` is public API. And nothing the agent decides reads a pass that may
-have run while it was writing: authoring scans afresh under the lock
-(`scanFresh`), after any apply has finished.
+have run while it was writing: after an apply, authoring scans afresh under
+the lock (`scanFresh`). Without one it reads the watcher's last pass — every
+extra look at a file mid-copy is another chance to hash it truncated, and
+scanning afresh on every change hashed two to five times as many truncated
+versions of a stalled copy.
 
 **Never the agent's own writes.** What the agent writes whole — a restore, a
 merge's conflicted copy — it tells the scanner (`noteWrite`), and the next scan
