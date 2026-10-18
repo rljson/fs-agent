@@ -11,7 +11,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
-import { Connector, Db } from '@rljson/db';
+import { Connector, Db, stateBeaconEvent } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
@@ -272,6 +272,50 @@ describe('FsAgent — the mass-delete guard', () => {
 
     expect(await targetFiles()).toHaveLength(POPULATED);
   });
+  // ...........................................................................
+  it('does not record a folder that emptied without the watcher seeing it go', async () => {
+    // The sender's half of the guard. A folder that empties while not one
+    // deletion was seen — a drive that went away, a restore that wiped it —
+    // is not somebody deleting files, and recording it would delete them on
+    // every node. The watcher is stopped here, so the test means the same
+    // thing on every platform: macOS reports a recursive delete as one event
+    // for the folder, Linux as one per file.
+    await fill(targetDir, 12);
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    await db.core.createTableWithInsertHistory(createTreesTableCfg('fsTree'));
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat('/fsTree'), socket);
+    const agent = new FsAgent(targetDir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
+      timeouts: { debounceMs: 1 },
+    });
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
+    try {
+      const own = agent.ownHead as string;
+      agent.scanner.stopWatch();
+      for (const file of await targetFiles()) await rm(join(targetDir, file));
+
+      // A receive records the folder's own work before anything else.
+      socket.emit(stateBeaconEvent(connector.route.flat), { r: own });
+      for (let i = 0; i < 300 && agent.signalsNeedingAction.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const [refusal] = agent.signalsNeedingAction;
+      expect(refusal?.kind).toBe('deletion/refused');
+      expect(refusal?.detail).toContain('12 of 12 files disappeared');
+      expect(refusal?.detail).toContain('The watcher did not see them go');
+      expect(refusal?.paths).toHaveLength(12);
+      expect(agent.ownHead, 'the disappearance was recorded').toBe(own);
+    } finally {
+      stopTo();
+      stopFrom();
+    }
+  });
+
   // ...........................................................................
   it('reports each refusal where a client can read it', async () => {
     // THE REFUSAL IS A DEFERRED DECISION, AND SOMEBODY HAS TO BE ASKED.

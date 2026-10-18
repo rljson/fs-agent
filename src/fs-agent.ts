@@ -2495,12 +2495,12 @@ export class FsAgent {
     if (plan.kind === 'unchanged') return;
     if (plan.kind === 'refused') {
       this._refuseDeletion(
-        'restore',
+        'author',
         plan.disappeared.length,
         plan.held,
         plan.disappeared,
-        'The watcher did not see them go: nothing was authored, and the ' +
-          'folder keeps its last state until a person decides.',
+        'The watcher did not see them go, so the folder keeps its last ' +
+          'recorded state until a person decides.',
       );
       return;
     }
@@ -3223,27 +3223,34 @@ export class FsAgent {
    * @param detail - Extra wording for the log line, where a route has some.
    */
   private _refuseDeletion(
-    route: 'restore' | 'removals',
+    route: 'restore' | 'removals' | 'author',
     wouldRemove: number,
     held: number,
     paths: readonly string[],
     detail = '',
   ): void {
+    // What was withheld differs by side, and the signal is what a person acts
+    // on: a receiver did not delete, a sender did not record what it cannot
+    // vouch for. So the explanation goes into the signal, not only the log.
+    const what =
+      route === 'author'
+        ? `${wouldRemove} of ${held} files disappeared and were not ` +
+          `recorded, so no node deletes them.`
+        : `${route} would have removed ${wouldRemove} of ${held} files, so ` +
+          `nothing was deleted.`;
+    const said =
+      what +
+      (detail === '' ? '' : ` ${detail}`) +
+      ' If the deletion is real it has to be applied deliberately.';
     console.error(
-      `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: ${route} ` +
-        `would remove ${wouldRemove} of ${held} files. Nothing was deleted. ` +
-        `If this deletion is real, it has to be applied deliberately.` +
-        (detail === '' ? '' : ` ${detail}`),
+      `${this._tag} MASS DELETE REFUSED on ${this._rootPath}: ${said}`,
     );
     this._signal({
       kind: 'deletion/refused',
       paths,
       action: 'required',
       decidedBy: 'guard',
-      detail:
-        `${route} would have removed ${wouldRemove} of ${held} files, so ` +
-        `nothing was deleted. If the deletion is real it has to be applied ` +
-        `deliberately.`,
+      detail: said,
     });
   }
 
