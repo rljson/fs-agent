@@ -390,6 +390,38 @@ describe('FsScanner', () => {
 
       scanner.stopWatch();
     });
+
+    // Windows keeps its own handler, which reinstalls the watcher.
+    it.skipIf(process.platform === 'win32')(
+      'survives a watcher error instead of crashing the process',
+      async () => {
+        // An FSWatcher with no 'error' listener throws what it emits. On
+        // Linux, Node's recursive watcher emits ENOENT for a directory
+        // deleted while it walks it — that killed the agent in CI.
+        const scanner = new FsScanner(testDir);
+        await scanner.watch();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const watcher = (
+            scanner as unknown as {
+              _watcher: { emit(event: string, err: unknown): boolean };
+            }
+          )._watcher;
+          const vanished = Object.assign(new Error('ENOENT: scandir d2'), {
+            code: 'ENOENT',
+          });
+          expect(() => watcher.emit('error', vanished)).not.toThrow();
+          expect(warn).not.toHaveBeenCalled();
+
+          expect(() => watcher.emit('error', new Error('EACCES'))).not.toThrow();
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+          expect(scanner.isWatching).toBe(true);
+        } finally {
+          warn.mockRestore();
+          scanner.stopWatch();
+        }
+      },
+    );
   });
 
   describe('example', () => {

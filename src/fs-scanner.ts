@@ -1066,7 +1066,10 @@ export class FsScanner {
     };
     this._stopRequested = false;
     this._watcher = watch(this._rootPath, { recursive: true }, onEvent);
-    if (FsScanner._isWindows) this._watcher.on('error', onError);
+    this._watcher.on(
+      'error',
+      FsScanner._isWindows ? onError : FsScanner._onWatchError,
+    );
     /* v8 ignore stop -- @preserve */
 
     // Periodic safety net: native fs.watch drops events under burst load
@@ -1215,6 +1218,21 @@ export class FsScanner {
    * @param err - The caught value
    * @returns A message string
    */
+  /**
+   * What a watcher error does off Windows: nothing that could crash.
+   *
+   * An FSWatcher with no `'error'` listener throws what it emits, and Node's
+   * recursive watcher on Linux emits ENOENT when a directory is deleted while
+   * it walks it — the agent died of a user deleting a nested folder. There is
+   * nothing to reinstall: the watcher stays, and the safety rescan picks up
+   * whatever it missed. Anything other than a vanished directory is said.
+   * @param err - The error the watcher emitted.
+   */
+  private static _onWatchError(err: unknown): void {
+    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return;
+    console.warn(`[fs-scanner] watcher error: ${FsScanner._errMessage(err)}`);
+  }
+
   private static _errMessage(err: unknown): string {
     /* v8 ignore next -- @preserve non-Error throws are defensive */
     return err instanceof Error ? err.message : String(err);
