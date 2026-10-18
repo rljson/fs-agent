@@ -8,8 +8,8 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**63 files, 719 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 718 must pass; one is committed inverted, and §2.11 says which and why.
+**63 files, 721 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 720 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 719 does
+This document says what the suite actually proves, because the number 721 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -377,7 +377,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 719 above.
+loop are counted as they run. They sum to the 721 above.
 
 ### Mesh tier
 
@@ -410,7 +410,7 @@ loop are counted as they run. They sum to the 719 above.
 | file | n | what it covers |
 | --- | --- | --- |
 | `fs-agent.spec.ts` | 81 | the agent's surface |
-| `fs-scanner.spec.ts` | 60 | scanning, watching, the scan cache, the agent's own writes |
+| `fs-scanner.spec.ts` | 61 | scanning, watching, the scan cache, the agent's own writes |
 | `fs-agent-degradation.spec.ts` | 15 | what the agent does when a dependency fails, and the shapes no scenario reaches |
 | `fs-agent-receive-degradation.spec.ts` | 16 | receiving when a part of it fails — a tree it cannot read, a stamp or state it cannot file, a folder that moves under the apply, a join |
 | `fs-receive.spec.ts` | 11 | what a node does with a head that arrived |
@@ -421,7 +421,7 @@ loop are counted as they run. They sum to the 719 above.
 | `fs-collect-removals.spec.ts` | 26 | the removal walk, and `lastEditOf` |
 | `fs-edit-chain.spec.ts` | 16 | the chain |
 | `fs-plan-join.spec.ts` | 9 | joining, decided before anything is written |
-| `fs-agent-mass-delete-guard.spec.ts` | 11 | refusing a deletion that looks like a loss, and reporting it |
+| `fs-agent-mass-delete-guard.spec.ts` | 12 | refusing a deletion that looks like a loss, and reporting it |
 | `fs-agent-anti-entropy.spec.ts` | 7 | receiving what the hub says |
 | `fs-agent-stale-reconnect.spec.ts` | 14 | a peer reconnecting with a stale tree |
 | `fs-agent-no-laundering.spec.ts` | 7 | a node does not re-advertise what it adopted |

@@ -74,6 +74,13 @@ its tests:
 - A stamp walk that met a row it could not read yet never resumed.
 - A node whose head never reached the hub deferred the same merge for ever; it
   now announces its head again, backing off.
+- On Linux the agent died when a nested folder was deleted while its watcher
+  walked it: Node's recursive watcher emits ENOENT, and the watcher had an
+  error listener on Windows only. Every platform has one now; a vanished
+  directory is ignored and the safety rescan picks up what was missed.
+- A refused deletion's signal says why. A sender that would not record a
+  folder emptying unseen and a receiver that kept files while applying the
+  rest raised the same text, and the receiver's claimed nothing was deleted.
 
 ## [0.1.1]
 
