@@ -136,7 +136,14 @@ describe('F7 — a file is visible whatever its timestamp says', () => {
     // so this is the modify path rather than the first-sight one.
     const agent = await watching();
     await writeFile(join(dir, 'moving.txt'), 'first');
-    await sleep(600);
+    // Seen once — however long a slow runner takes to settle a first sight.
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline &&
+      (await pathsOf(agent)).join() !== 'moving.txt'
+    ) {
+      await sleep(100);
+    }
     expect(await pathsOf(agent)).toEqual(['moving.txt']);
 
     await writeFile(join(dir, 'moving.txt'), 'second-and-longer');
