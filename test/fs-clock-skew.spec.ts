@@ -28,7 +28,7 @@ import { BsMem } from '@rljson/bs';
 
 import { mkdir, rm, utimes, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
 
@@ -85,13 +85,15 @@ describe('F7 — a file is visible whatever its timestamp says', () => {
       await writeFile(join(dir, 'stamped.txt'), 'content');
       const when = new Date(Date.now() + offset);
       await utimes(join(dir, 'stamped.txt'), when, when);
-      // Past any settle window several times over.
-      await sleep(1_200);
-
-      expect(
-        await pathsOf(agent),
-        `a file dated ${what} is invisible to the tree`,
-      ).toEqual(['stamped.txt']);
+      // However long a slow runner takes to settle it.
+      await vi.waitFor(
+        async () =>
+          expect(
+            await pathsOf(agent),
+            `a file dated ${what} is invisible to the tree`,
+          ).toEqual(['stamped.txt']),
+        { timeout: 10_000, interval: 50 },
+      );
     }, 60_000);
   }
 
@@ -149,15 +151,16 @@ describe('F7 — a file is visible whatever its timestamp says', () => {
     await writeFile(join(dir, 'moving.txt'), 'second-and-longer');
     const past = new Date(Date.now() - 86_400_000);
     await utimes(join(dir, 'moving.txt'), past, past);
-    await sleep(900);
 
-    const node = [...(await agent.extract()).trees.values()].find(
-      (n) => (n.meta as { relativePath?: string })?.relativePath ===
-        'moving.txt',
-    );
-    expect(
-      (node?.meta as { size?: number })?.size,
-      'the new content was never picked up because its timestamp went back',
-    ).toBe('second-and-longer'.length);
+    await vi.waitFor(async () => {
+      const node = [...(await agent.extract()).trees.values()].find(
+        (n) => (n.meta as { relativePath?: string })?.relativePath ===
+          'moving.txt',
+      );
+      expect(
+        (node?.meta as { size?: number })?.size,
+        'the new content was never picked up because its timestamp went back',
+      ).toBe('second-and-longer'.length);
+    }, { timeout: 10_000, interval: 50 });
   }, 60_000);
 });

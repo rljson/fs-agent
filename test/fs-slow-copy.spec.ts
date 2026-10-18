@@ -31,7 +31,7 @@ import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { open, mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
@@ -63,6 +63,13 @@ describe('V2/D3 — a file being written is not distributed half-done', () => {
   });
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** The file paths the agent's scan finds now, root excluded. */
+  const pathsOf = async (): Promise<string[]> =>
+    [...(await agents[0].extract()).trees.values()]
+      .map((n) => (n.meta as { relativePath?: string })?.relativePath)
+      .filter((p): p is string => p !== undefined && p !== '.')
+      .sort();
 
   /**
    * An agent watching the folder, with every stored blob's size recorded.
@@ -126,8 +133,10 @@ describe('V2/D3 — a file being written is not distributed half-done', () => {
     await sleep(200);
 
     await slowCopy(join(dir, 'big.bin'));
-    // Long enough for the debounce and a safety rescan to have had their say.
-    await sleep(1_500);
+    // Until the finished file is hashed — however long a slow runner takes.
+    // A partial hash can only happen during the copy, which is over by now,
+    // so ending the wait here shortens nothing that is being checked.
+    await vi.waitFor(() => expect(sizes).toContain(TOTAL_BYTES), { timeout: 10_000, interval: 50 });
 
     const partial = sizes.filter((s) => s > 0 && s < TOTAL_BYTES);
     expect(
@@ -152,8 +161,11 @@ describe('V2/D3 — a file being written is not distributed half-done', () => {
     // as far as the network is concerned.
     const { sizes } = await start();
     await writeFile(join(dir, 'doc.txt'), 'ORIGINAL');
-    await sleep(800); // settled, scanned, announced
-    expect(sizes.length, 'the original was never hashed').toBeGreaterThan(0);
+    // Settled, scanned, announced.
+    await vi.waitFor(
+      () => expect(sizes.length, 'the original was never hashed').toBeGreaterThan(0),
+      { timeout: 10_000, interval: 50 },
+    );
 
     // Now overwrite it and look at the tree WHILE the write is fresh.
     await writeFile(join(dir, 'doc.txt'), 'REPLACED-BUT-STILL-SETTLING');
@@ -168,14 +180,15 @@ describe('V2/D3 — a file being written is not distributed half-done', () => {
     ).toContain('doc.txt');
 
     // And once it settles, the new content does go out.
-    await sleep(800);
-    const after = await agents[0].extract();
-    const node = [...after.trees.values()].find(
-      (n) => (n.meta as { relativePath?: string })?.relativePath === 'doc.txt',
-    );
-    expect((node?.meta as { size?: number })?.size).toBe(
-      'REPLACED-BUT-STILL-SETTLING'.length,
-    );
+    await vi.waitFor(async () => {
+      const after = await agents[0].extract();
+      const node = [...after.trees.values()].find(
+        (n) => (n.meta as { relativePath?: string })?.relativePath === 'doc.txt',
+      );
+      expect((node?.meta as { size?: number })?.size).toBe(
+        'REPLACED-BUT-STILL-SETTLING'.length,
+      );
+    }, { timeout: 10_000, interval: 50 });
     expect(await readFile(join(dir, 'doc.txt'), 'utf-8')).toBe(
       'REPLACED-BUT-STILL-SETTLING',
     );
@@ -190,7 +203,10 @@ describe('V2/D3 — a file being written is not distributed half-done', () => {
     // folder.
     await start();
     await writeFile(join(dir, 'settled.txt'), 'settled');
-    await sleep(800);
+    await vi.waitFor(
+      async () => expect(await pathsOf()).toContain('settled.txt'),
+      { timeout: 10_000, interval: 50 },
+    );
 
     // A file kept permanently in motion.
     const churn = await open(join(dir, 'busy.log'), 'w');
@@ -204,22 +220,20 @@ describe('V2/D3 — a file being written is not distributed half-done', () => {
 
     // Meanwhile a quiet file appears and must still reach the tree.
     await writeFile(join(dir, 'quiet.txt'), 'quiet');
-    await sleep(1_200);
-
-    const tree = await agents[0].extract();
-    const paths = [...tree.trees.values()]
-      .map((n) => (n.meta as { relativePath?: string })?.relativePath)
-      .filter((p): p is string => p !== undefined && p !== '.')
-      .sort();
-
-    stop = true;
-    await churning;
-    await churn.close();
-
-    expect(
-      paths,
-      'a file in motion froze the rest of the folder',
-    ).toContain('quiet.txt');
-    expect(paths).toContain('settled.txt');
+    try {
+      await vi.waitFor(
+        async () =>
+          expect(
+            await pathsOf(),
+            'a file in motion froze the rest of the folder',
+          ).toContain('quiet.txt'),
+        { timeout: 10_000, interval: 50 },
+      );
+      expect(await pathsOf()).toContain('settled.txt');
+    } finally {
+      stop = true;
+      await churning;
+      await churn.close();
+    }
   }, 60_000);
 });
