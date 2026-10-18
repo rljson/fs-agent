@@ -5,52 +5,32 @@
 // found in the LICENSE file in the root of this package.
 
 // .............................................................................
-// "Diverged" must mean the CONTENT differs, not that the fingerprints do.
+// "Diverged" must mean the CONTENT differs, not that the names do.
 //
-// There are two definitions of "the same folder" in this codebase, asked by
-// different halves of the sync:
+// A field measurement recorded what the opposite costs. After a forced 40 s
+// partition both machines held identical content (38 files, identical hashes)
+// and one reported `diverged: true` for over EIGHT MINUTES across six merge
+// repairs. Nothing was lost, and the divergence signal — which the UI's
+// "weicht ab" is built on — was permanently untrustworthy.
 //
-//   the tree ref                  a hash of the whole tree  → am I diverged?
-//   `_treesHaveEquivalentContent`  path → blobId + dirs      → is there work?
-//
-// While they can disagree, one of them is lying on every disagreement — and
-// A field measurement recorded what that costs. After a forced 40 s partition
-// both machines held identical content (38 files, identical hashes) and one
-// reported `diverged: true` for over EIGHT MINUTES across six merge repairs,
-// logging "equivalent content, skipping restore" each time. The apply path
-// correctly concluded there was nothing to transfer; the anti-entropy correctly
-// concluded the refs differed; neither was wrong, and the system deadlocked
-// against itself by design. It costs nothing in data and it makes the
-// divergence signal — which every repair decision and the UI's "weicht ab" are
-// built on — permanently untrustworthy.
-//
-// The mechanism was that the apply path had ALREADY computed the answer and
-// kept it to itself. `agreedOn` existed, and only a completed bucket round fed
-// it: declare a divergence, wait out the grace period, start a repair, run a
-// round, find the roots identical, then clear. Every place that consults the
-// content map now reports what it found.
-//
-// This is also the last structural difference from `@rljson/mongo-agent`, which
-// is stable on a real fleet: mongo's unit of convergence is the DOCUMENT, with
-// per-document hashes compared in buckets, so it never asks whether two
-// whole-collection fingerprints agree. fs has a whole-folder ref because its
-// ancestry rules need one — so it has to answer the question mongo never asks.
+// In 0.2.0 a head names a tree, and two heads can name the same content: a
+// peer's edit that ends where this folder already is. That is one state under
+// two names, and it must settle without anybody reporting a divergence. A head
+// whose content really differs must be reported until the fleet agrees.
 // .............................................................................
 
 import { BsMem } from '@rljson/bs';
 import { Connector, Db, stateBeaconEvent } from '@rljson/db';
-import { hip } from '@rljson/hash';
 import { IoMem, SocketMock } from '@rljson/io';
-import { createTreesTableCfg, Route, type Tree } from '@rljson/rljson';
+import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
+import { announceAsPeer } from './chain-announce.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
-import { FsDbAdapter } from '../src/fs-db-adapter.ts';
-import type { FsTree } from '../src/fs-scanner.ts';
 
 const TREE = 'fsTree';
 
@@ -75,8 +55,8 @@ describe('a divergence is a difference in CONTENT', () => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   /**
-   * An agent syncing the temp folder, plus a way to announce a hub state.
-   * @returns The agent, the db, and a `beacon` that announces a ref.
+   * An agent syncing the temp folder, plus a way to play the hub's beacon.
+   * @returns The agent, the db, and a `beacon` that says a head.
    */
   const start = async () => {
     const io = new IoMem();
@@ -90,15 +70,7 @@ describe('a divergence is a difference in CONTENT', () => {
     });
     const agent = new FsAgent(dir, new BsMem(), {
       ...ORIGIN_FIXTURE,
-      timeouts: {
-        debounceMs: 1,
-        processRefRetries: 0,
-        processRefRetryDelayMs: 1,
-        recoveryRetries: 0,
-      },
-      // A tiny grace period, so a divergence that IS real shows up at once
-      // rather than being hidden by a timer the test would have to outwait.
-      antiEntropy: { graceMs: 1, maxBackoffMs: 1 },
+      timeouts: { debounceMs: 1 },
     });
     agents.push(agent);
     stops.push(await agent.syncToDb(db, connector, TREE));
@@ -106,185 +78,65 @@ describe('a divergence is a difference in CONTENT', () => {
     return {
       agent,
       db,
-      beacon: (ref: string) =>
-        socket.emit(stateBeaconEvent(connector.route.flat), { r: ref }),
+      beacon: (head: string) =>
+        socket.emit(stateBeaconEvent(connector.route.flat), { r: head }),
     };
-  };
-
-  /**
-   * Stores a variant of `tree` whose file nodes carry an `mtime`, and whose
-   * ref therefore differs while its CONTENT MAP does not.
-   *
-   * This is not a contrivance: it is literally what a peer on an older build
-   * sends. mtime used to be part of a file node, and taking it out is what
-   * made a ref mean the same thing on every machine — so for the length of
-   * any rollout, one side derives a ref the other never will, for byte-
-   * identical folders.
-   * @param db - Where to store it.
-   * @param tree - The tree to vary.
-   * @returns The variant's root ref.
-   */
-  const storeOldBuildVariant = async (
-    db: Db,
-    tree: FsTree,
-  ): Promise<string> => {
-    const nodes: Tree[] = [];
-    const childRefs: string[] = [];
-    let root: Tree | undefined;
-    for (const [, node] of tree.trees) {
-      const meta = node.meta as Record<string, unknown> | undefined;
-      if (meta?.type === 'file') {
-        // The old shape, with a timestamp back in the hashed meta.
-        const nextMeta = { ...meta, mtime: 1_790_000_000_000 };
-        // `meta` carries its OWN `_hash`, so both have to go or `hip` keeps
-        // the stale one and the insert rejects the node.
-        delete (nextMeta as { _hash?: string })._hash;
-        const varied = { ...node, meta: nextMeta } as Tree;
-        delete (varied as { _hash?: string })._hash;
-        hip(varied);
-        nodes.push(varied);
-        childRefs.push(varied._hash as string);
-      } else if (meta?.relativePath === '.') {
-        root = node;
-      }
-    }
-    const rootMeta = {
-      ...((root as Tree).meta as Record<string, unknown>),
-    };
-    delete (rootMeta as { _hash?: string })._hash;
-    const newRoot = {
-      ...(root as Tree),
-      meta: rootMeta,
-      children: [...childRefs].sort(),
-    } as Tree;
-    delete (newRoot as { _hash?: string })._hash;
-    hip(newRoot);
-    nodes.push(newRoot); // root LAST, as the adapter requires
-    return await new FsDbAdapter(db, TREE).storeFsTree(
-      { rootHash: newRoot._hash as string, trees: new Map(
-        nodes.map((n) => [n._hash as string, n]),
-      ) },
-      { skipNotification: true },
-    );
   };
 
   // ...........................................................................
-  it('does not report a divergence for identical content under a different ref', async () => {
+  it('does not report a divergence for identical content under a different head', async () => {
     await writeFile(join(dir, 'a.txt'), 'a');
     const { agent, db, beacon } = await start();
-    await sleep(300);
+    const own = agent.ownHead as string;
+    const tree = await agent.extract();
 
-    // What the folder actually holds, and the same folder as an older build
-    // would hash it.
-    const mine = await agent.extract();
-    const theirs = await storeOldBuildVariant(db, mine);
-    expect(theirs, 'the variant must differ, or this test proves nothing').not.toBe(
-      mine.rootHash,
-    );
+    // A peer's edit that ends exactly where this folder already is.
+    const peer = await announceAsPeer(db, TREE, {
+      tree,
+      changed: ['a.txt'],
+      previous: [own],
+    });
+    expect(peer.head, 'the two heads must differ, or this proves nothing')
+      .not.toBe(own);
 
-    beacon(theirs);
-    await sleep(600);
+    beacon(peer.head);
+    await sleep(200);
 
-    const status = agent.antiEntropyStatus;
-    expect(status, 'the agent is not watching').not.toBeNull();
-    expect(
-      status!.diverged,
-      `reported diverged against content it already holds ` +
-        `(mine=${mine.rootHash?.slice(0, 8)}, theirs=${theirs.slice(0, 8)})`,
-    ).toBe(false);
-  }, 30_000);
+    const status = agent.antiEntropyStatus!;
+    expect(status.diverged).toBe(false);
+    expect(status.localRef).toBe(peer.head);
+  });
 
   // ...........................................................................
   it('still reports a divergence when the content really differs', async () => {
-    // The control, and the reason the test above is not just "never report
-    // anything": a signal that cannot go red is as useless as one that cannot
-    // go green.
     await writeFile(join(dir, 'a.txt'), 'a');
     const { agent, db, beacon } = await start();
+    const own = agent.ownHead as string;
+
+    // Both sides moved on from the same state, differently.
+    await writeFile(join(dir, 'mine.txt'), 'mine');
+    for (let i = 0; i < 100 && agent.ownHead === own; i++) await sleep(20);
+    expect(agent.ownHead, 'this side never authored its edit').not.toBe(own);
+    const peerDir = `${dir}-peer`;
+    await mkdir(peerDir, { recursive: true });
+    await writeFile(join(peerDir, 'a.txt'), 'a');
+    await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
+    const peerAgent = new FsAgent(peerDir, agent.bs, ORIGIN_FIXTURE);
+    const peer = await announceAsPeer(db, TREE, {
+      tree: await peerAgent.extract(),
+      changed: ['theirs.txt'],
+      previous: [own],
+    });
+    await rm(peerDir, { recursive: true, force: true });
+
+    beacon(peer.head);
     await sleep(300);
 
-    // A hub holding a file this node has never heard of. Its blob is absent
-    // too, which is what a node genuinely behind looks like.
-    const other = join(`${dir}-other`);
-    await rm(other, { recursive: true, force: true });
-    await mkdir(other, { recursive: true });
-    await writeFile(join(other, 'a.txt'), 'a');
-    await writeFile(join(other, 'only-theirs.txt'), 'theirs');
-    const theirTree = await new FsAgent(other, new BsMem(), ORIGIN_FIXTURE).extract();
-    const theirs = await new FsDbAdapter(db, TREE).storeFsTree(theirTree, {
-      skipNotification: true,
-    });
-
-    beacon(theirs);
-    await sleep(800);
-
-    expect(
-      agent.antiEntropyStatus!.diverged,
-      'a real difference in content was not reported',
-    ).toBe(true);
-    await rm(other, { recursive: true, force: true });
-  }, 30_000);
-  // ...........................................................................
-  // E1 / M7 — the status says WHICH paths differ, not that the hashes do.
-  //
-  // *"Sämtliche Protokollzeilen hängen an einem Schalter, den der
-  // Produktivbetrieb nicht setzt. Als Statusinfo bleibt: 'die Prüfsummen sind
-  // verschieden'."* And the ask: *"die Statusanzeige um die eigentliche Frage
-  // erweitern: welche Dokumente unterscheiden sich."*
-  //
-  // The comparison that decides `diverged` already works per path — it has to,
-  // or it could not decide — so the answer exists and was being thrown away.
-  // ...........................................................................
-  it('names the paths that differ, not just that something does', async () => {
-    await writeFile(join(dir, 'shared.txt'), 'same');
-    await writeFile(join(dir, 'only-mine.txt'), 'mine');
-    const { agent, db, beacon } = await start();
-    await sleep(600);
-
-    // A hub holding one file we lack, one we have with other content, and one
-    // we agree on. All three kinds, because a status that reports only
-    // additions is as misleading as none.
-    const other = `${dir}-other`;
-    await rm(other, { recursive: true, force: true });
-    await mkdir(other, { recursive: true });
-    await writeFile(join(other, 'shared.txt'), 'same');
-    await writeFile(join(other, 'differs.txt'), 'theirs');
-    await new Promise((r) => setTimeout(r, 400));
-    const theirTree = await new FsAgent(other, new BsMem(), ORIGIN_FIXTURE).extract();
-    const theirs = await new FsDbAdapter(db, TREE).storeFsTree(theirTree, {
-      skipNotification: true,
-    });
-
-    beacon(theirs);
-    await sleep(900);
-
+    // Merged — both files are here — and still different from what the hub
+    // says until the hub hears the merge.
     const status = agent.antiEntropyStatus!;
     expect(status.diverged).toBe(true);
-    const differing = [...status.differingPaths].sort();
-    expect(
-      differing,
-      `the status says only that something differs: ${JSON.stringify(status.differingPaths)}`,
-    ).toEqual(['differs.txt', 'only-mine.txt']);
-    // And the one they agree on is NOT listed, or the list is just a file
-    // listing with extra steps.
-    expect(differing).not.toContain('shared.txt');
-    await rm(other, { recursive: true, force: true });
-  }, 30_000);
-
-  // ...........................................................................
-  it('lists nothing while the two agree', async () => {
-    // The counterpart. A list that is never empty is a permanent red mark in
-    // the UI, which is the complaint this started from.
-    await writeFile(join(dir, 'a.txt'), 'a');
-    const { agent, db, beacon } = await start();
-    await sleep(600);
-
-    const mine = await agent.extract();
-    const theirs = await storeOldBuildVariant(db, mine);
-    beacon(theirs);
-    await sleep(900);
-
-    expect(agent.antiEntropyStatus!.diverged).toBe(false);
-    expect(agent.antiEntropyStatus!.differingPaths).toEqual([]);
-  }, 30_000);
+    expect(status.lastRepair?.action).toBe('merge');
+    expect(status.hubRef).toBe(peer.head);
+  });
 });

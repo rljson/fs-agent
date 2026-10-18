@@ -5,11 +5,22 @@
 // found in the LICENSE file in the root of this package.
 
 export {
+  FsSignals,
+  SIGNAL_LOG_FILE,
+  SIGNAL_LOG_MAX,
+  SIGNAL_ONCE_MAX,
+  SIGNAL_PATHS_MAX,
+  type FsSignal,
+  type FsSignalAction,
+  type FsSignalDecidedBy,
+  type FsSignalInput,
+  type FsSignalKind,
+  type FsSignalLog,
+} from './fs-signals.ts';
+export {
   FsAgent,
-  REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
   type FsAgentOptions,
-  type RefusedDeletion,
   type RestoreOptions,
   type TimeoutConfig,
 } from './fs-agent.ts';
@@ -24,58 +35,14 @@ export {
   globToRegExp,
   type IgnoreMatcher,
 } from './fs-ignore.ts';
-export {
-  antiEntropyDecision,
-  DEFAULT_ANTI_ENTROPY,
-  FsAntiEntropy,
-  type AntiEntropyAction,
-  type AntiEntropyDecision,
-  type AntiEntropyDeps,
-  type AntiEntropyOptions,
-  type AntiEntropyStatus,
-  type AntiEntropyView,
-  type HubAnnouncement,
-  type Reachability,
-} from './fs-anti-entropy.ts';
-export {
-  BE,
-  BG,
-  BQ,
-  BR,
-  BUCKET_SYNC_PREFIXES,
-  decodeEntries,
-  decodeRoots,
-  decodeWanted,
-  encodeEntries,
-  encodeRoots,
-  encodeWanted,
-  FsBucketSync,
-  isBucketSync,
-  type BucketSyncHost,
-} from './fs-bucket-sync.ts';
-export {
-  BUCKET_COUNT,
-  bucketOf,
-  bucketRoots,
-  differingBuckets,
-  entriesInBuckets,
-  reconcile,
-  TOMBSTONE_BLOB,
-  type BucketRoots,
-  type ManifestEntry,
-  type ReconcilePlan,
-} from './fs-manifest.ts';
+export type { AntiEntropyStatus } from './fs-receive.ts';
 export {
   createFsChainTables,
   FS_EDIT_ACTION,
   FsEditChain,
-  compareTimeId,
-  planRemovals,
   type FsAppendOptions,
   type FsChainEntry,
   type FsEditData,
-  type RemovalPlan,
-  type RemovalQuestion,
 } from './fs-edit-chain.ts';
 export {
   FsBlobAdapter,
@@ -84,22 +51,6 @@ export {
   type FileToBlobOptions,
 } from './fs-blob-adapter.ts';
 export { FsDbAdapter, type StoreFsTreeOptions } from './fs-db-adapter.ts';
-export {
-  compareTips,
-  conflictCopyName,
-  decideWinner,
-  DIR_MARKER,
-  findCommonAncestor,
-  formatConflictTimestamp,
-  FsConflictResolver,
-  fsTreeToContentMap,
-  threeWayMerge,
-  type BranchTip,
-  type ConflictCopy,
-  type ConflictResolverDeps,
-  type ContentMap,
-  type MergePlan,
-} from './fs-conflict-resolver.ts';
 export {
   FsScanner,
   type FsChange,

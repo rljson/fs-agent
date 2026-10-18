@@ -277,6 +277,9 @@ describe('the scenario matrix, at the mesh tier', () => {
   // is what made it findable at all: reasoning about the cascade was wrong
   // three times, and the trace was right the first time.
   // ...........................................................................
+  // In 0.2.0 this is no longer a conflict at all: C's re-creation descends from
+  // the deletion every node applied, so every node applies it as a `behind`
+  // head — B too, once it is back.
   it('I7b: a delivered deletion does not beat a later re-creation', async () => {
     mesh = await buildFsMesh({ root: root('i7b'), names: ['A', 'B', 'C'] });
 

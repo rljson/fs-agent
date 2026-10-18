@@ -61,7 +61,9 @@ describe('the weakness register reproductions, verbatim', () => {
     const serverIo = new IoMem();
     await serverIo.init();
     await new Db(serverIo).core.createTableWithInsertHistory(treeCfg);
-    const server = new Server(route, serverIo, new BsMem());
+    const server = new Server(route, serverIo, new BsMem(), {
+      stamp: { domain: 'test', hub: 'hub' },
+    });
     await server.init();
 
     const clients: Client[] = [];

@@ -7,7 +7,7 @@
 import { readFileSync } from 'fs';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
 import { Connector, Db } from '@rljson/db';
@@ -16,7 +16,6 @@ import { createTreesTableCfg, Route } from '@rljson/rljson';
 
 import { FsAgent } from '../src/fs-agent.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
-import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
 // A client destroyed its OWN edit by applying its OWN last advertisement back
 // over it.
@@ -32,10 +31,9 @@ import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 // send anything because the folder was back at the content it had already
 // sent. The edit reached no peer and was gone locally too.
 //
-// Neither existing defence sees it. The origin filter compares the payload\'s
-// origin to this connector\'s, and a bootstrap carries the SERVER as origin.
-// The staleness check asks whether this is the newest thing its sender has
-// said — and the sender it sees is the server, whose count did advance.
+// In 0.2.0 it cannot happen by construction: a node authors its own work
+// before it judges anything that arrived, so its own echoed head finds the
+// node AHEAD of it, and the answer is to announce, never to restore.
 describe('FsAgent — its own advertisement echoed back', () => {
   const dir = join(process.cwd(), 'test-temp-own-echo');
 
@@ -47,6 +45,12 @@ describe('FsAgent — its own advertisement echoed back', () => {
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   });
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const until = async (check: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 300 && !(await check()); i++) await sleep(10);
+    expect(await check(), `timed out waiting: ${what}`).toBe(true);
+  };
 
   const makeDb = async () => {
     const io = new IoMem();
@@ -62,62 +66,53 @@ describe('FsAgent — its own advertisement echoed back', () => {
 
     await writeFile(join(dir, 'shared.txt'), 'v1');
 
-    // The ref the agent will broadcast. A tree ref is a pure content hash and
-    // excludes mtime, so recomputing it here yields the same string the agent
-    // derives from the same bytes.
-    const ownRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(dir, bs, ORIGIN_FIXTURE).extract(),
-    );
-
     const agent = new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 20 },
     });
     const socket = new SocketMock();
     const connector = new Connector(db, Route.fromFlat('/fsTree+'), socket);
 
-    // Broadcasts the folder as it stands — and, as `_sendRef` always does,
-    // retires that ref from both dedup sets, which is what leaves the agent
-    // reachable by its own advertisement.
+    // Records and announces the folder as it stands.
     const stopToDb = await agent.syncToDb(db, connector, 'fsTree');
-    await new Promise((r) => setTimeout(r, 300));
+    await until(() => agent.ownHead !== undefined, 'the first head');
+    const ownHead = agent.ownHead as string;
 
     // Stop pushing. The edit below then stays un-sent, which is the situation
     // the trace captured: the echo lands while the agent's newest state is
-    // still only on disk, so its last advertisement is the one being echoed.
+    // still only on disk, so its last announcement is the one being echoed.
     stopToDb();
-
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const stop = await agent.syncFromDb(db, connector, 'fsTree', {
-      cleanTarget: true,
-    });
+    const stop = await agent.syncFromDb(db, connector, 'fsTree');
 
     // The user edits the file. This is the state that must survive.
     await writeFile(join(dir, 'shared.txt'), 'v2');
 
-    // The server echoes the agent's own ref back on the bootstrap channel —
-    // server as origin, so the connector's self-filter does not fire, and a
-    // sequence the server has advanced, so the staleness check reads it as
-    // news.
+    // Seen by the scanner before the echo arrives — still un-sent, as in the
+    // trace. Otherwise a watcher pass that caught the write half-done holds it
+    // back past the echo, and with the push stopped nothing would record it.
+    const { blobId: v2 } = await bs.setBlob('v2');
+    await until(async () => {
+      await agent.scanner.scanFresh();
+      return agent.scanner.knownFile('shared.txt')?.blobId === v2;
+    }, 'the scanner to read the edit');
+
+    // The server echoes the agent's own head back — server as origin, so the
+    // connector's self-filter does not fire.
     socket.emit(connector.events.ref, {
       o: '__server__',
-      r: ownRef,
+      r: ownHead,
       c: '__server__',
       seq: 99,
     });
-    await new Promise((r) => setTimeout(r, 600));
+    await until(() => agent.ownHead !== ownHead, 'the edit to be authored');
 
-    // The edit is still there — the echo did not roll the folder back.
+    // The edit is still there, and it is in the chain: the folder's own work
+    // is authored before anything that arrived is judged.
     expect(readFileSync(join(dir, 'shared.txt'), 'utf8')).toBe('v2');
-    expect(
-      warnSpy.mock.calls.some((c) =>
-        String(c[0]).includes('own last advertisement echoed back'),
-      ),
-    ).toBe(true);
+    expect(agent.ownHead).not.toBe(ownHead);
 
     stop();
     agent.scanner.stopWatch();
-    warnSpy.mockRestore();
   });
 
 });

@@ -4,7 +4,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { access, mkdir, readFile, rm, writeFile } from 'fs/promises';
+import { access, mkdir, readFile, rm, stat, utimes, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -38,6 +38,16 @@ describe('FsScanner', () => {
       expect(rootTree?.meta).toBeDefined();
       const meta = rootTree?.meta as any;
       expect(meta.type).toBe('directory');
+    });
+
+    it('remembers when the pass behind its tree began', async () => {
+      const scanner = new FsScanner(testDir);
+      expect(scanner.treeStartedAt, 'before the first pass').toBe(0);
+      const before = Date.now();
+      await scanner.scan();
+      const after = Date.now();
+      expect(scanner.treeStartedAt).toBeGreaterThanOrEqual(before);
+      expect(scanner.treeStartedAt).toBeLessThanOrEqual(after);
     });
 
     it('should scan a directory with files', async () => {
@@ -162,6 +172,118 @@ describe('FsScanner', () => {
     });
   });
 
+  describe('noteWrite', () => {
+    const paths = (tree: { trees: Map<string, { meta?: unknown }> }) =>
+      [...tree.trees.values()]
+        .map((node) => (node.meta as { relativePath?: string } | null)?.relativePath)
+        .filter((path) => path !== undefined && path !== '.');
+    const blobOf = (
+      tree: { trees: Map<string, { meta?: unknown }> },
+      path: string,
+    ) =>
+      [...tree.trees.values()]
+        .map((node) => node.meta as { relativePath?: string; blobId?: string })
+        .find((meta) => meta?.relativePath === path)?.blobId;
+
+    it('takes a file this process wrote whole as written, not as one in progress', async () => {
+      const bs = new BsMem();
+      const scanner = new FsScanner(testDir, { bs });
+      await scanner.scan();
+      await scanner.watch();
+      try {
+        // A new file is held back on first sight — unless this process wrote
+        // it whole and says so.
+        await writeFile(join(testDir, 'noted.txt'), 'written whole');
+        await writeFile(join(testDir, 'unnoted.txt'), 'still settling');
+        const noted = await stat(join(testDir, 'noted.txt'));
+        const { blobId } = await bs.setBlob('written whole');
+        scanner.noteWrite('noted.txt', blobId, noted.size, noted.mtime.getTime());
+
+        const tree = await scanner.scanFresh();
+        expect(paths(tree)).toContain('noted.txt');
+        expect(blobOf(tree, 'noted.txt')).toBe(blobId);
+        expect(paths(tree)).not.toContain('unnoted.txt');
+      } finally {
+        scanner.stopWatch();
+      }
+    });
+
+    it('reads its own rewrite in the millisecond the scan started as written, not as the version before it', async () => {
+      const bs = new BsMem();
+      const scanner = new FsScanner(testDir, { bs });
+      await writeFile(join(testDir, 'noted.txt'), 'first');
+      await writeFile(join(testDir, 'unnoted.txt'), 'first');
+      const before = await scanner.scan();
+      // Watching, as far as the settle rule is concerned — without a live
+      // watcher, whose own passes would race this one.
+      const watching = scanner as unknown as { _watcher: unknown };
+      watching._watcher = {};
+      try {
+        // Both files are rewritten in the millisecond the scan starts in — to
+        // the same length, so only the timestamp can decide. Node reports an
+        // mtime rounded to the NEAREST millisecond, the scan's start is
+        // truncated, so these read as one millisecond AFTER the start.
+        const start = Date.now() + 60_000;
+        for (const name of ['noted.txt', 'unnoted.txt']) {
+          await writeFile(join(testDir, name), 'other');
+          await utimes(join(testDir, name), start / 1000, (start + 0.6) / 1000);
+        }
+        const written = await stat(join(testDir, 'noted.txt'));
+        expect(written.mtimeMs).toBeLessThan(start + 1);
+        expect(written.mtime.getTime()).toBe(start + 1);
+        const { blobId } = await bs.setBlob('other');
+        scanner.noteWrite('noted.txt', blobId, written.size, written.mtime.getTime());
+
+        const now = vi
+          .spyOn(Date, 'now')
+          .mockReturnValueOnce(start)
+          .mockReturnValue(start + 5);
+        let tree;
+        try {
+          tree = await scanner.scan();
+        } finally {
+          now.mockRestore();
+        }
+
+        expect(blobOf(tree, 'noted.txt')).toBe(blobId);
+        // Unnoted, the same write is taken for one still in progress and the
+        // scan reports the version before it — for the agent's own apply,
+        // that version went back out as a new edit.
+        expect(blobOf(tree, 'unnoted.txt')).toBe(blobOf(before, 'unnoted.txt'));
+      } finally {
+        watching._watcher = null;
+        clearTimeout(
+          (scanner as unknown as { _settleTimer: ReturnType<typeof setTimeout> })
+            ._settleTimer,
+        );
+      }
+    });
+
+    it('reads a noted file as usual once it has changed since', async () => {
+      const bs = new BsMem();
+      const scanner = new FsScanner(testDir, { bs });
+      await writeFile(join(testDir, 'f.txt'), 'first');
+      await scanner.scan();
+      const { blobId } = await bs.setBlob('first');
+      // A note that no longer matches the file: a different size.
+      scanner.noteWrite('f.txt', blobId, 999, Date.now());
+
+      await writeFile(join(testDir, 'f.txt'), 'second, longer');
+      const tree = await scanner.scan();
+      expect(blobOf(tree, 'f.txt')).not.toBe(blobId);
+    });
+
+    it('remembers a bounded number of them', async () => {
+      const scanner = new FsScanner(testDir);
+      for (let i = 0; i <= 10_000; i++) scanner.noteWrite(`f${i}`, 'b', 1, 1);
+      const notes = (
+        scanner as unknown as { _ownWrites: Map<string, unknown> }
+      )._ownWrites;
+      expect(notes.size).toBe(10_000);
+      expect(notes.has('f0')).toBe(false);
+    });
+  });
+
   describe('getTreeByHash', () => {
     it('should retrieve a tree by hash', async () => {
       await writeFile(join(testDir, 'test.txt'), 'content');
@@ -278,6 +400,38 @@ describe('FsScanner', () => {
 
       scanner.stopWatch();
     });
+
+    // Windows keeps its own handler, which reinstalls the watcher.
+    it.skipIf(process.platform === 'win32')(
+      'survives a watcher error instead of crashing the process',
+      async () => {
+        // An FSWatcher with no 'error' listener throws what it emits. On
+        // Linux, Node's recursive watcher emits ENOENT for a directory
+        // deleted while it walks it — that killed the agent in CI.
+        const scanner = new FsScanner(testDir);
+        await scanner.watch();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const watcher = (
+            scanner as unknown as {
+              _watcher: { emit(event: string, err: unknown): boolean };
+            }
+          )._watcher;
+          const vanished = Object.assign(new Error('ENOENT: scandir d2'), {
+            code: 'ENOENT',
+          });
+          expect(() => watcher.emit('error', vanished)).not.toThrow();
+          expect(warn).not.toHaveBeenCalled();
+
+          expect(() => watcher.emit('error', new Error('EACCES'))).not.toThrow();
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+          expect(scanner.isWatching).toBe(true);
+        } finally {
+          warn.mockRestore();
+          scanner.stopWatch();
+        }
+      },
+    );
   });
 
   describe('example', () => {

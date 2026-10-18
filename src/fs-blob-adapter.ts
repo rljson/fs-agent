@@ -180,8 +180,8 @@ export class FsBlobAdapter {
     // both write from offset zero, and the shorter one leaves the longer one's
     // tail behind. Measured as a fuzz run where a node held `"s25"` in a file
     // that had only ever been given `s2`, `s14`, `s15` and `s22` — `"s2"`
-    // written over `"s15"`. This is the bucket-sync fetch path, where a path
-    // edited on both sides is exactly what gets fetched twice.
+    // written over `"s15"`. A path edited on both sides is exactly what gets
+    // fetched twice.
     const stream = await bs.getBlobStream(metadata.blobId);
     await atomicWriteStream(targetPath, stream);
 

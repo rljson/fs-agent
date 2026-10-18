@@ -197,33 +197,19 @@ describe('scale and endurance', () => {
     stops.push(await agent.syncToDb(db, connector, TREE));
     stops.push(await agent.syncFromDb(db, connector, TREE));
 
-    type Sample = {
-      atMs: number;
-      heapMb: number;
-      tombstones: number;
-      announced: number;
-    };
+    type Sample = { atMs: number; heapMb: number; watched: number };
     const samples: Sample[] = [];
-    const inner = (a: FsAgent, k: string): number => {
-      const v = (a as unknown as Record<string, unknown>)[k];
-      if (v instanceof Set || v instanceof Map) return v.size;
-      if (Array.isArray(v)) return v.length;
-      /* v8 ignore next -- @preserve every key below exists */
-      return 0;
-    };
+    const inner = (a: FsAgent, k: string): number =>
+      ((a as unknown as Record<string, Set<string>>)[k]).size;
 
     const started = Date.now();
     let round = 0;
     while (Date.now() - started < SOAK_MS) {
-      // Churn: write a few, delete a few. Deletions are what grows a
-      // tombstone log, which is the structure the register names.
+      // Churn: write a few, delete a few — long enough apart that each is
+      // authored, so the chain grows and the watcher's deletions are used.
       for (let i = 0; i < 20; i++) {
         await writeFile(join(dir, `soak-${round}-${i}.txt`), `r${round}`);
       }
-      // Long enough that the files are ANNOUNCED before being deleted, which
-      // is what puts entries in the tombstone log — the structure the register
-      // names as growing without bound. Churning faster than an announcement
-      // exercises nothing: a file no peer was told about needs no tombstone.
       await sleep(500);
       for (let i = 0; i < 20; i++) {
         await rm(join(dir, `soak-${round}-${i}.txt`), { force: true });
@@ -237,8 +223,7 @@ describe('scale and endurance', () => {
         samples.push({
           atMs: Date.now() - started,
           heapMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-          tombstones: inner(agent, '_pendingDeletes'),
-          announced: inner(agent, '_announcedFiles'),
+          watched: inner(agent, '_watched'),
         });
       }
     }
@@ -249,29 +234,20 @@ describe('scale and endurance', () => {
           .map(
             (s) =>
               `  ${String(s.atMs).padStart(7)} ms  heap ${s.heapMb} MB  ` +
-              `tombstones ${s.tombstones}  ` +
-              `announced ${s.announced}`,
+              `watched ${s.watched}`,
           )
           .join('\n'),
     );
 
     expect(samples.length, 'no samples were taken').toBeGreaterThan(1);
-    // The churn has to have actually reached the announce path, or the caps
-    // below are being asserted against structures nothing filled.
-    expect(
-      Math.max(...samples.map((s) => s.tombstones)),
-      'no deletion was ever announced, so nothing exercised the tombstone log',
-    ).toBeGreaterThan(0);
-    const last = samples[samples.length - 1];
-    // The caps this agent documents, asserted rather than trusted. These are
-    // the "zwei unbegrenzte Listen" the register asks to be bounded — on the
-    // file side they are.
-    // `_announcedHeads` is NOT asserted here. This run is single-node, so it
-    // receives no announcements and the map stays empty — a cap asserted
-    // against a structure nothing filled, which is the very mistake the
-    // `tombstones > 0` check above exists to prevent. Its own bound is
-    // measured in `fs-agent-announced-heads.spec.ts`.
-    expect(last.tombstones).toBeLessThanOrEqual(10_000);
+    // The churn has to have reached the chain, or the bound below is asserted
+    // against a structure nothing filled.
+    const table = `${TREE}EditHistory`;
+    const entries = (await db.core.dumpTable(table))[table]._data.length;
+    expect(entries, 'the churn authored nothing').toBeGreaterThanOrEqual(round);
+    // A deletion the watcher saw is kept only until it is authored: one
+    // round's worth at most, however long this runs.
+    expect(Math.max(...samples.map((s) => s.watched))).toBeLessThanOrEqual(20);
     // And the folder is empty at the end, so nothing accumulated on disk
     // either.
     expect((await agent.extract()).trees.size).toBeLessThan(10);

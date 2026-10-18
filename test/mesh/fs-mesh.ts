@@ -29,9 +29,8 @@
 //
 //   - a real `Server` with the STATE BEACON, a real `Client` per node over a
 //     real socket pair, a real `Connector` carrying the SyncConfig a host
-//     client ships (`causalOrdering` + `includeClientIdentity`), and
-//     `resolveConflicts: true` — the production value, without which the
-//     ancestry DAG, the inline merge and the prune rule are all switched off;
+//     client ships (`causalOrdering` + `includeClientIdentity`), and a hub
+//     that stamps what it relays, as production's file routes do;
 //   - a real `FsAgent` per node over a real temp folder with a real watcher,
 //     running the live `syncToDb` + `syncFromDb({ cleanTarget: true })` loops;
 //   - its own `Bs` per node, so a blob has to travel to reach a peer. A shared
@@ -100,14 +99,12 @@ import { dirname, join, relative, sep } from 'path';
 import {
   AGENT_STATE_FILE,
   ATOMIC_TMP_PREFIX,
-  CONFLICT_LOG_FILE,
   FsAgent,
   RECOVERED_DIR,
   SYNC_ERROR_FILE,
 } from '../../src/fs-agent.ts';
+import { SIGNAL_LOG_FILE, type FsSignal } from '../../src/fs-signals.ts';
 
-import type { AntiEntropyOptions } from '../../src/fs-anti-entropy.ts';
-import type { FsConflictReport } from '../../src/fs-conflict-resolver.ts';
 
 // .............................................................................
 /** The sync configuration a host client ships. */
@@ -117,18 +114,13 @@ export const MESH_SYNC: SyncConfig = {
 };
 
 /**
- * How often the hub announces what it holds.
+ * How often the hub says what it holds.
  *
- * Short, because the anti-entropy's grace period is measured against it and a
- * test that waits out a production beacon takes minutes.
+ * Short, because a node that missed an announcement hears the head again on
+ * the next beacon, and a test that waits out a production beacon takes
+ * minutes.
  */
 export const MESH_BEACON_MS = 150;
-
-/** The anti-entropy tuning every mesh node runs with. */
-export const MESH_ANTI_ENTROPY: AntiEntropyOptions = {
-  graceMs: 500,
-  maxBackoffMs: 2_000,
-};
 
 /** Files the agent keeps beside the content, which are nobody else's business. */
 // What the agent keeps in the folder and never syncs. A test comparing folders
@@ -136,11 +128,16 @@ export const MESH_ANTI_ENTROPY: AntiEntropyOptions = {
 // divergence — which `RECOVERED_DIR` produced the moment it existed: a joiner
 // correctly kept a file outside the synced tree and `converged()` called the
 // fleet divided over it.
+// THIS LIST AND THE AGENT'S IGNORE LIST ARE ONE DECISION IN TWO PLACES, and
+// they were out of step the moment the signal log existed: the agent stopped
+// syncing it and this kept counting it, so twelve tests across six files read
+// as a divergence over a file no peer has. The agent's own ignore list is in
+// `FsAgent`'s constructor — a file added there belongs here too.
 const BOOKKEEPING = [
   SYNC_ERROR_FILE,
   ATOMIC_TMP_PREFIX,
   AGENT_STATE_FILE,
-  CONFLICT_LOG_FILE,
+  SIGNAL_LOG_FILE,
   RECOVERED_DIR,
 ];
 
@@ -373,11 +370,18 @@ export interface FsMesh {
    *   snapshot and read the disagreement rather than a timeout message.
    */
   /**
-   * Every conflict any node in this mesh reported, in the order reported.
+   * Every conflict signal any node in this mesh emitted, in order.
    *
    * Live array, appended to as the mesh runs.
    */
-  readonly conflicts: readonly FsConflictReport[];
+  readonly conflicts: readonly FsSignal[];
+  /**
+   * Every signal of every kind, with the node that emitted it, in order.
+   *
+   * Live array. `conflicts` stays for the tests that only count conflicts;
+   * a rule that ends in `collision/type` or `repair/blocked` needs this.
+   */
+  readonly signals: ReadonlyArray<{ node: string; signal: FsSignal }>;
   converged(opts?: {
     stableMs?: number;
     timeoutMs?: number;
@@ -391,8 +395,7 @@ export interface FsMesh {
 /**
  * Builds and starts an n-node mesh.
  * @param opts - `root` is where the folders go (removed by `stop`); `names`
- *   defaults to `['A', 'B']`; `antiEntropy` overrides
- *   {@link MESH_ANTI_ENTROPY}; `seed` runs before sync starts, so a node can
+ *   defaults to `['A', 'B']`; `seed` runs before sync starts, so a node can
  *   begin holding content nobody has announced.
  * @returns The started mesh.
  */
@@ -400,13 +403,7 @@ export const buildFsMesh = async (opts: {
   root: string;
   names?: string[];
   treeKey?: string;
-  antiEntropy?: AntiEntropyOptions;
   seed?: (folders: Record<string, string>) => Promise<void>;
-  /**
-   * Answer a divergence with an ADDITIVE bucket-sync round instead of
-   * replacing a folder. `FsAgentOptions.bucketSync` on every node.
-   */
-  bucketSync?: boolean;
 
   /**
    * `FsAgentOptions.joinWaitMs` on every node.
@@ -424,10 +421,17 @@ export const buildFsMesh = async (opts: {
   recordHistory?: boolean;
   /** How often to sample when `recordHistory` is on. Default 60 ms. */
   historyMs?: number;
+  /**
+   * Whether the hub stamps what it relays. Default `true`, as production's
+   * file routes have it; `false` is a hub that never says which version
+   * reached the fleet first.
+   */
+  stamping?: boolean;
 }): Promise<FsMesh> => {
   const treeKey = opts.treeKey ?? 'sharedTree';
   const names = opts.names ?? ['A', 'B'];
-  const conflicts: FsConflictReport[] = [];
+  const conflicts: FsSignal[] = [];
+  const signals: Array<{ node: string; signal: FsSignal }> = [];
   /** Per node, the series its timeline exposes. Filled by the poller below. */
   const series = new Map<string, Array<{ atMs: number; files: FsSnapshot }>>();
   const route = Route.fromFlat(`/${treeKey}`);
@@ -442,6 +446,9 @@ export const buildFsMesh = async (opts: {
   const server = new Server(route, serverIo, new BsMem(), {
     syncConfig: MESH_SYNC,
     stateBeaconMs: MESH_BEACON_MS,
+    // The hub's order, as production's file routes have it: a conflict
+    // between two versions is decided by which reached the fleet later.
+    ...(opts.stamping === false ? {} : { stamp: { domain: 'mesh', hub: 'hub' } }),
   });
   await server.init();
 
@@ -541,23 +548,14 @@ export const buildFsMesh = async (opts: {
       // identical `applied 3 peer deletions: …` lines with nothing saying who,
       // and a convergence investigation stopped dead there.
       logName: name,
-      // Production sets this, and it is load-bearing: with it off the ancestry
-      // DAG, the inline three-way merge and half the prune rule never run, so
-      // a mesh without it tests a code path no client ships.
-      resolveConflicts: true,
       // Collected so a test can assert the agent SAID a conflict happened,
       // not just that a renamed file turned up. Resolving one used to be
       // silent, and silence is the defect.
-      onConflict: (reports) => {
-        conflicts.push(...reports);
+      onSignal: (signal) => {
+        signals.push({ node: name, signal });
+        if (signal.kind.startsWith('conflict/')) conflicts.push(signal);
       },
-      antiEntropy: opts.antiEntropy ?? MESH_ANTI_ENTROPY,
-      timeouts: { debounceMs: 100, processRefRetryDelayMs: 300 },
-      // Undefined, not `false`. Passing `false` here overrode the agent's own
-      // default and silently measured the OLD model: T4 ran at 3 of 8 while
-      // the identical scenario passed 8 of 8 elsewhere, for no reason but
-      // this line.
-      bucketSync: opts.bucketSync,
+      timeouts: { debounceMs: 100 },
       // ZERO unless a test asks. A mesh is built from scratch, so every node
       // in it IS the origin of its own history and has nothing to join — the
       // wait could only expire. The scenario that needs it is a node arriving
@@ -869,6 +867,7 @@ export const buildFsMesh = async (opts: {
     converged,
     stop: stopAll,
     conflicts,
+    signals,
   };
 };
 

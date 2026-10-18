@@ -1,5 +1,151 @@
 # Changelog
 
+## [0.2.0]
+
+**No compatibility with 0.1.x.** A machine on 0.2.0 and one on an older release
+cannot sync: upgrade a domain together, while it is in sync, and configure its
+hubs to stamp (`@rljson/server` `stamp: { domain, hub }`).
+
+### Removed
+
+Every mechanism that existed to tolerate, migrate from or diagnose 0.1.x, with
+its tests:
+
+- bucket sync and the manifest (`fs-bucket-sync.ts`, `fs-manifest.ts`);
+- the tombstone log, the per-path edit times and the stated-removal gate
+  (`planRemovals`, `RemovalPlan`, `RemovalQuestion`);
+- the anti-entropy module (`FsAntiEntropy`, `antiEntropyDecision`,
+  `DEFAULT_ANTI_ENTROPY` and its types) and the `antiEntropy` option;
+- the old conflict resolver (`FsConflictResolver`, `threeWayMerge`,
+  `compareTips`, `decideWinner`, `findCommonAncestor`, `conflictCopyName`,
+  `formatConflictTimestamp`, `fsTreeToContentMap` and its types) and the
+  `resolveConflicts` option — the merge always runs;
+- the `~H~` prefix and bare tree refs on the wire; `onConflict`,
+  `refusedDeletions` and `.fsagent-conflicts.json`; the `causalOrdering`
+  warning;
+- `FsEditChain.classify`, `head`, `ready`, `refreshHead`, `entryForTreeRef`,
+  `oldestEntryForTreeRef`, the `timeId` of `collectRemovals`, and the default of
+  `FsAppendOptions.previous`, which is now required;
+- the `conflict/merged`, `conflict/overwritten` and `config/degraded` signals,
+  and `'clock'`, `'claim'` and `'hash'` in `FsSignalDecidedBy`;
+- `differingPaths` in `AntiEntropyStatus`;
+- the `storageOptions` and `restoreOptions` agent options, the
+  `syncCallback`, `processRefRetries`, `processRefRetryDelayMs` and
+  `recoveryRetries` timeouts, and `FsScanOptions.settleMinBytes` — none of them
+  was read by anything.
+
+### The protocol
+
+- **The chain is the only order.** A node authors an entry per change and
+  announces its head; a receiver relates the head to its own: `behind` →
+  apply and adopt, `ahead` → announce, `fork` → merge, `incomplete` → nothing,
+  said. A deletion is applied because the head that lacks the file descends from
+  this node's own; local work is authored before any head is judged.
+- **The conflict table** (`merge3`): one side's change wins; different paths
+  and the same change merge; two versions of one file are both kept and the one
+  that reached the fleet later keeps the name; an edit beats a concurrent
+  deletion; a directory and a file at one path are both kept, the directory
+  keeps it (`collision/type`, required).
+- **The stamp.** The hub stamps what it relays; a version's stamp is the stamp
+  of the announcement that first carried it to the fleet, derived by every
+  machine from what it receives and kept in `${treeKey}EditStamps`. No machine's
+  clock is compared to another's.
+- **Guards at both ends.** A sender does not record a mass disappearance its
+  watcher did not see. A receiver keeps what an apply would lose, adopts the
+  head anyway, and records the kept files again — which refills a machine that
+  lost its folder.
+- **Healing** is the hub saying its head again on the beacon and the bootstrap.
+
+### Fixed on the way
+
+- Authoring read the watcher's last pass, which can run while an apply is still
+  writing, and announced the version before the write as a local edit — a
+  revert, on every machine. After a receive or a join, authoring now scans
+  afresh under the lock; otherwise it reads the watcher's last pass, which
+  then began after every write of the agent's own. Scanning afresh on every
+  change was measured to hash a copy that stalls past the settle window
+  truncated two to five times as often, so it is not done.
+- A partial apply — a locked file, an unreachable blob — made the node claim
+  the files that had landed. What landed is recorded, not claimed, and
+  recognised by the retry.
+- A receiver could author the version of a file before the one it had just
+  applied — reverting the writer's own copy — when the apply landed in the
+  second half of the millisecond the next scan started in (Node rounds an mtime
+  to the nearest millisecond). The scanner now takes what the agent wrote whole
+  as written (`FsScanner.noteWrite`).
+- An apply had no time bound; one waiting on a blob nobody served would have
+  kept the node from recording its own work.
+- A stamp walk that met a row it could not read yet never resumed.
+- A node whose head never reached the hub deferred the same merge for ever; it
+  now announces its head again, backing off.
+- On Linux the agent died when a nested folder was deleted while its watcher
+  walked it: Node's recursive watcher emits ENOENT, and the watcher had an
+  error listener on Windows only. Every platform has one now; a vanished
+  directory is ignored and the safety rescan picks up what was missed.
+- A refused deletion's signal says why. A sender that would not record a
+  folder emptying unseen and a receiver that kept files while applying the
+  rest raised the same text, and the receiver's claimed nothing was deleted.
+
+## [0.1.1]
+
+> **Never published.** The signal channel below ships in 0.2.0, which then
+> removed `onConflict`, `refusedDeletions` and the conflict log after all, and
+> changed the signal kinds — see [0.2.0]. Kept as the record of the step.
+
+### One channel for everything that happened to the folder
+
+The agent knew more than it said. A same-file merge reported itself through
+`onConflict` and a refused deletion through `refusedDeletions`; everything else
+that touched a user's folder went to `console.warn` and nowhere a program can
+read — a bucket round settling two edits, a joining machine moving files into
+`.fsagent-recovered/`, a path the filesystem rejected, a configuration keeping
+less than it could. A host cannot grep a log on a machine it is not running on.
+
+`agent.signals`, `agent.signalsNeedingAction`, `agent.signalTotals`,
+`agent.onSignal(cb)` and the `onSignal` option now carry all of it through one
+type. Each signal says what happened, to which paths, **how it was decided**, and
+whether a person still has to act.
+
+- **`action`** is the field to build on. `review` means the agent dealt with it
+  and somebody may want to know; `required` means nothing here will ever resolve
+  it. Only two of the nine kinds earn `required` — a refused deletion and a path
+  this filesystem rejects — because a list that cries wolf gets ignored.
+- **`decidedBy`** separates a verdict from a coin flip. A conflict settled from
+  the edit chain is a fact; one settled on the content hash converges and is
+  otherwise arbitrary. Two defects hid in exactly that distinction, so the
+  verdict travels: `ReconcilePlan` gains `conflictDecidedBy`, and a bucket round
+  reports `conflict/merged` for what the chain decided and `conflict/arbitrary`
+  for the rest.
+- Persisted to `.fsagent-signals.json`, so a host that starts after the event
+  still sees it. Bounded at 200, with per-kind totals that are **not** bounded —
+  a cap that hides the scale of what it dropped is worse than no cap.
+
+**Nothing is removed.** `onConflict`, `refusedDeletions`,
+`.fsagent-conflicts.json` and `.sync-errors.log` are unchanged, the tests that
+pin them are still in the suite, and `ReconcilePlan.conflict` keeps its shape. A
+host written against 0.1.0 keeps working — see `README.api.md`, *Migrating from
+0.1.0*.
+
+### Fixed
+
+- `_applyReconcilePlan` indexed the new verdict map without guarding it, so a
+  plan built anywhere other than `reconcile` — a test, a host driving the apply,
+  a plan across a version boundary — threw and took the whole round with it.
+- Two comments in `fs-edit-chain.ts` described the opposite of what the code
+  does, including one telling the reader the chain is unused scaffolding that
+  a later work package must replace. Nineteen pointers into documents that are
+  not in this repository were replaced with what they say.
+
+### Internal
+
+`.fsagent-signals.json` has to be in the scanner's ignore list AND in the mesh
+harness's, which are one decision in two places. Missing either made the
+notification into content: a folder that writes a file to itself on every event
+never stops changing, and twelve tests across six files read it as a divergence
+over a file no peer has. Both lists now say so.
+
+72 files, 988 scenarios, 100 % on statements, branches, functions and lines.
+
 ## [0.1.0]
 
 The edit chain becomes the sync mechanism. A folder's state is no longer a bare

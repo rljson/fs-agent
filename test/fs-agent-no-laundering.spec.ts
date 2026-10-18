@@ -4,19 +4,19 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
-import { Connector, Db } from '@rljson/db';
+import { Connector, Db, stateBeaconEvent } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
-import { CHAIN_HEAD_PREFIX, FsAgent } from '../src/fs-agent.ts';
+import { FsAgent } from '../src/fs-agent.ts';
+import { announceAsPeer } from './chain-announce.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
-import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
 
 // Traced on four machines during a 1 200-file seed. A node fetched ref
@@ -69,7 +69,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     const bs = new BsMem();
     const agent = new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 20},
     });
     return { db, connector, agent, sent, socket, bs };
   };
@@ -85,16 +85,22 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     await new Promise((r) => setTimeout(r, 600));
     sent.length = 0;
 
-    // A peer advertises the state this folder is already in — the bounce-back
-    // that takes the equivalent-content path.
+    // A peer's edit that ends in the state this folder is already in.
     await writeFile(join(peerDir, 'shared.txt'), 'shared');
-    const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
-    );
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
+    const peer = await announceAsPeer(db, 'fsTree', {
+      tree: await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
+      changed: ['shared.txt'],
+      previous: [agent.ownHead as string],
+    });
+    socket.emit(connector.events.ref, {
+      o: 'remote-peer',
+      r: peer.announcement,
+    });
     await new Promise((r) => setTimeout(r, 1_500));
 
-    expect(sent).not.toContain(peerRef);
+    // Adopted — so the test did reach the apply — and not said again.
+    expect(agent.ownHead).toBe(peer.head);
+    expect(sent).not.toContain(peer.head);
 
     stopTo();
     stopFrom();
@@ -109,29 +115,35 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
 
     await writeFile(join(dir, 'shared.txt'), 'shared');
     const stopTo = await agent.syncToDb(db, connector, 'fsTree');
-    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree', {
-      cleanTarget: false,
-    });
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
     await new Promise((r) => setTimeout(r, 600));
+    const root = agent.ownHead as string;
 
     // Only we have this one.
     await writeFile(join(dir, 'ours-alone.txt'), 'ours');
     await new Promise((r) => setTimeout(r, 600));
     sent.length = 0;
 
-    // The peer advertises a tree without it. cleanTarget is off, so the apply
-    // leaves a superset — our file plus theirs.
+    // The peer moved on from the same root without it: a fork, merged here
+    // into a superset — our file plus theirs.
     await writeFile(join(peerDir, 'shared.txt'), 'shared');
     await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
-    const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
-    );
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
+    const peer = await announceAsPeer(db, 'fsTree', {
+      tree: await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
+      changed: ['theirs.txt'],
+      previous: [root],
+    });
+    socket.emit(connector.events.ref, {
+      o: 'remote-peer',
+      r: peer.announcement,
+    });
     await new Promise((r) => setTimeout(r, 2_000));
 
-    // Something went out, and it was not simply the peer's own ref handed back.
+    // Something went out, and it was not simply the peer's own head handed
+    // back: the merge, which holds both.
     expect(sent.length).toBeGreaterThan(0);
-    expect(sent).not.toContain(peerRef);
+    expect(sent).not.toContain(peer.head);
+    expect(existsSync(join(dir, 'theirs.txt'))).toBe(true);
 
     stopTo();
     stopFrom();
@@ -161,26 +173,47 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     for (let i = 0; i < 5; i++) {
       await writeFile(join(peerDir, `theirs-${i}.txt`), `t${i}`);
     }
-    const peerRef = await new FsDbAdapter(db, 'fsTree').storeFsTree(
-      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
-    );
+    const own = agent.ownHead as string;
+    const peerTree = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
+    const peer = await announceAsPeer(db, 'fsTree', {
+      tree: peerTree,
+      changed: [0, 1, 2, 3, 4].map((i) => `theirs-${i}.txt`),
+      previous: [own],
+    });
+    const unreachable = [...peerTree.trees.values()].find(
+      (node) => node.meta?.relativePath === 'theirs-4.txt',
+    )?.meta?.blobId as string;
 
     // Make the restore fall short, exactly as a timeout or a slow link does:
     // one blob is unreachable, so the folder ends up a strict subset.
-    const realGet = bs.getBlob.bind(bs);
-    (bs as unknown as { getBlob: unknown }).getBlob = async (id: string) => {
-      const blob = await realGet(id);
-      const text = blob ? Buffer.from(blob).toString('utf-8') : '';
-      if (text === 't4') throw new Error('blob unreachable');
-      return blob;
+    const realStream = bs.getBlobStream.bind(bs);
+    (bs as unknown as { getBlobStream: unknown }).getBlobStream = async (
+      id: string,
+    ) => {
+      if (id === unreachable) throw new Error('blob unreachable');
+      return realStream(id);
     };
 
     sent.length = 0;
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
+    socket.emit(connector.events.ref, {
+      o: 'remote-peer',
+      r: peer.announcement,
+    });
     await new Promise((r) => setTimeout(r, 2_000));
 
-    // Nothing announced: what this node holds is the peer's tree minus what
-    // has not landed yet, and saying so would ask everyone to prune to it.
+    // Some of it landed — so the apply ran — and the head was not adopted.
+    expect(existsSync(join(dir, 'theirs-0.txt'))).toBe(true);
+    expect(agent.ownHead).toBe(own);
+    // Nothing announced: what landed is the peer's work, not this node's.
+    expect(sent).toEqual([]);
+
+    // Once the blob is reachable, the next time the hub says the head, the
+    // rest lands and the head is adopted.
+    (bs as unknown as { getBlobStream: unknown }).getBlobStream = realStream;
+    socket.emit(stateBeaconEvent(connector.route.flat), { r: peer.head });
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(existsSync(join(dir, 'theirs-4.txt'))).toBe(true);
+    expect(agent.ownHead).toBe(peer.head);
     expect(sent).toEqual([]);
 
     stopTo();
@@ -197,21 +230,100 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
   //   sent 6guj63Ox parent yNAJN-wC | seen parent CtAgdd1w
   //   sent UBl35ZQQ parent 6guj63Ox | seen parent yNAJN-wC
   //
-  // Harmless while nothing read the ancestry. Now that a receiver prunes only
-  // for a sender that names a state it is in, it refuses every deletion.
+  // The watcher's last pass can have run while an apply was still writing. A
+  // node that authored from it read its own write as missing, and the version
+  // before it as a local edit — and announced a REVERT. Measured as the
+  // multi-megabyte field case (F9): two receivers re-authored the partial
+  // version of the file the writer had just completed, and the deletion that
+  // followed came back from them as residue.
+  it('authors from the folder as it is now, never from a pass that began before its own write', async () => {
+    const { db, connector, agent, sent, socket, bs } = await wire();
+
+    await writeFile(join(dir, 'doc.txt'), 'v1');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
+    await new Promise((r) => setTimeout(r, 300));
+    const before = agent.scanner.tree;
+    const beforeStartedAt = agent.scanner.treeStartedAt;
+
+    await writeFile(join(peerDir, 'doc.txt'), 'v2');
+    const peer = await announceAsPeer(db, 'fsTree', {
+      tree: await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
+      changed: ['doc.txt'],
+      previous: [agent.ownHead as string],
+    });
+    socket.emit(connector.events.ref, {
+      o: 'remote-peer',
+      r: peer.announcement,
+    });
+    for (let i = 0; i < 100 && agent.ownHead !== peer.head; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(agent.ownHead).toBe(peer.head);
+    // Let the watcher's own pass over the write finish, then hold the
+    // scanner still, so nothing refreshes the pass staged below.
+    await new Promise((r) => setTimeout(r, 300));
+    agent.scanner.stopWatch();
+    sent.length = 0;
+
+    // The pass that ran before the write landed — with its own start time, as
+    // the scanner keeps the two — and the event that follows.
+    const scanner = agent.scanner as unknown as {
+      _tree: unknown;
+      _treeStartedAt: number;
+    };
+    scanner._tree = before;
+    scanner._treeStartedAt = beforeStartedAt;
+    await (
+      agent.scanner as unknown as {
+        _notifyChange(c: { type: string; path: string }): Promise<void>;
+      }
+    )._notifyChange({ type: 'modified', path: 'doc.txt' });
+    await new Promise((r) => setTimeout(r, 400));
+
+    expect(readFileSync(join(dir, 'doc.txt'), 'utf8')).toBe('v2');
+    expect(agent.ownHead).toBe(peer.head);
+    expect(sent).toEqual([]);
+
+    stopTo();
+    stopFrom();
+    agent.scanner.stopWatch();
+  });
+
+  // The other half of that rule. With no write of its own since the watcher's
+  // last pass began, that pass already shows the change, and scanning again
+  // only looks at a file mid-copy one more time: a copy that stalled hashed a
+  // truncated version for every extra look — two to five times as many as
+  // when the last pass was used.
+  it('authors a local edit from the last pass when it has not written since', async () => {
+    const { db, connector, agent } = await wire();
+
+    await writeFile(join(dir, 'doc.txt'), 'v1');
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const head = agent.ownHead;
+    const fresh = vi.spyOn(agent.scanner, 'scanFresh');
+
+    await writeFile(join(dir, 'doc.txt'), 'v2, a local edit');
+    for (let i = 0; i < 300 && agent.ownHead === head; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    expect(agent.ownHead, 'the edit was never authored').not.toBe(head);
+    expect(fresh).not.toHaveBeenCalled();
+
+    stopTo();
+    agent.scanner.stopWatch();
+    vi.restoreAllMocks();
+  });
+
+  // In 0.2.0 the ancestry is the chain's, so each announcement is an entry
+  // and the second one's `previous` is the first.
   it('announces each state once, with its own ancestry', async () => {
     const { db, connector, agent, sent } = await wire();
 
     await writeFile(join(dir, 'first.txt'), 'one');
     const stopTo = await agent.syncToDb(db, connector, 'fsTree');
     await new Promise((r) => setTimeout(r, 600));
-
-    const predecessors: Array<string[]> = [];
-    const realSetPredecessors = connector.setPredecessors.bind(connector);
-    connector.setPredecessors = (refs: string[]) => {
-      predecessors.push([...refs]);
-      return realSetPredecessors(refs);
-    };
     sent.length = 0;
 
     await writeFile(join(dir, 'second.txt'), 'two');
@@ -223,25 +335,9 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
     expect(sent.length).toBe(new Set(sent).size);
     expect(sent.length).toBe(2);
 
-    // And the second push declares the STATE the first one created.
-    //
-    // Two namespaces, deliberately. What goes on the wire is the chain HEAD
-    // (`~H~…`), because a receiver holding a tree ref cannot find the chain row
-    // for it by hash — only by query. What goes in `p` stays a TREE ref,
-    // because the receiver's prune rule compares it against
-    // `[_currentRef, _lastAppliedRef]`, and translating it there would break
-    // the one rule that separates a deletion from a straggler.
-    //
-    // So the assertion resolves the announcement rather than string-comparing
-    // it, which also exercises the head → tree ref mapping end to end.
-    const announced = sent[0];
-    expect(announced.startsWith(CHAIN_HEAD_PREFIX)).toBe(true);
+    // And the second entry was made from the first.
     const chain = new FsEditChain(db, 'fsTree');
-    await chain.init();
-    const entry = await chain.entry(
-      announced.slice(CHAIN_HEAD_PREFIX.length),
-    );
-    expect(predecessors[1]?.[0]).toBe(entry?.treeRef);
+    expect((await chain.entry(sent[1]))?.previous).toEqual([sent[0]]);
 
     stopTo();
     agent.scanner.stopWatch();
@@ -278,7 +374,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
 
     const agent = new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 1},
     });
 
     const incoming = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
@@ -301,7 +397,7 @@ describe('FsAgent — a node does not re-advertise what it adopted', () => {
 
     const agent = new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 1},
     });
 
     const incoming = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();

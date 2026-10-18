@@ -22,6 +22,7 @@ machine switched off for a week catches up without replaying the week.
 - [Starting and stopping](#starting-and-stopping)
 - [Configuration](#configuration)
 - [Ignore patterns](#ignore-patterns)
+- [Knowing what happened to the folder](#knowing-what-happened-to-the-folder)
 - [Reading what the agent is doing](#reading-what-the-agent-is-doing)
 - [Using it without sync](#using-it-without-sync)
 - [What it guarantees — and what it does not](#what-it-guarantees--and-what-it-does-not)
@@ -52,10 +53,10 @@ the chain.
 
 **That is why a deletion works.** An absence is not a deletion. A tree lacks a
 path because the sender removed it, or because the sender never had it, and a
-content hash cannot tell the two apart. So a removal is **stated** by the
-machine that performed it, and a receiver applies what is stated rather than
-inferring from what is missing. Every attempt to guess it instead cost data —
-see [Known constraints](#known-constraints).
+content hash cannot tell the two apart. So a machine deletes a file for one
+reason only: the edit that lacks it **descends from what this machine holds** —
+its author had the file and chose not to. Anywhere else an absence reaches the
+folder only through a three-way merge, which knows what each side did.
 
 Consequences worth knowing before you start:
 
@@ -63,8 +64,8 @@ Consequences worth knowing before you start:
 | --- | --- |
 | **A deletion is a fact, not a gap** | so it survives a partition, a restart, and a peer who never heard about it |
 | **A receiver never claims authorship** | so a machine catching up cannot out-order the person who actually typed |
-| **A conflict keeps both versions** | one wins deterministically on every machine, the loser is kept as a renamed copy, and the conflict is reported |
-| **Nothing is pruned on a peer's authority** | a tree you receive can add and overwrite; only a stated removal deletes |
+| **A conflict keeps both versions** | the version that reached the fleet later keeps the name — by the hub's stamp, never by a clock — the other is kept as a renamed copy, and the conflict is reported |
+| **Nothing is pruned on a peer's authority** | only an edit that descends from this machine's own state can delete anything here |
 | **A joining machine applies the history first** | and a file the history deliberately deleted is moved aside, not resurrected and not destroyed |
 
 ---
@@ -107,14 +108,9 @@ await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
 const agent = new FsAgent('./my-project', new BsMem(), {
   ignore: ['node_modules', '.git', 'dist', '*.log'],
 
-  // Reconciles two edits to one file and keeps both versions. The host
-  // application
-  // sets this; a hub deliberately leaves it off to stay a dumb relay. Off,
-  // a conflicting edit is never merged.
-  resolveConflicts: true,
-
-  // Told, not discovered: where a conflict is reported to a user.
-  onConflict: (reports) => console.warn('conflict', reports),
+  // Told, not discovered: everything a person might care about, from a
+  // conflict to a refused deletion.
+  onSignal: (signal) => console.warn(signal.kind, signal.paths),
 
   // So a restart does not re-read and re-hash the whole folder.
   scanCachePath: '.cache/fs-agent-scan.json',
@@ -124,12 +120,16 @@ const agent = new FsAgent('./my-project', new BsMem(), {
 const socket = new SocketMock();
 const route = Route.fromFlat(`/${treeKey}`);
 const connector = new Connector(db, route, socket, {
-  // A REQUIREMENT, not a tuning option: the predecessor refs this puts on
-  // the wire are what let a conflicting edit be merged at all. The agent
-  // warns, once and loudly, if it is missing.
+  // `includeClientIdentity` lets the hub tell a machine saying its head
+  // again from an echo; `causalOrdering` gives the hub a log to fill gaps from.
   causalOrdering: true,
   includeClientIdentity: true,
 });
+
+// The HUB must stamp what it relays — `new Server(route, io, bs,
+// { stamp: { domain, hub } })` in `@rljson/server`. The stamp is what decides
+// which of two versions of one file keeps its name; without it such a
+// conflict waits, both versions kept, and says so as `repair/blocked`.
 
 // --- start: RECEIVE FIRST, then push ------------------------------------
 // A machine that announces before it can hear speaks about a state it may be
@@ -148,9 +148,9 @@ agent.dispose();
 What the host application does, and **the path that defaults to the
 configuration above**. `fromClient` builds the `Db`, the `Connector` and the
 blob store from an initialised client, adds two convenience wrappers, and
-defaults `resolveConflicts`, `causalOrdering` and `includeClientIdentity` to
-`true`, because that is the only mode this package measures end to end. Your own
-values still win if you pass them.
+defaults `causalOrdering` and `includeClientIdentity` to `true`, because that is
+the only mode this package measures end to end. Your own values still win if
+you pass them.
 
 `new FsAgent(...)` keeps the primitive defaults — it is the building block, and
 the quick start above sets them explicitly for exactly that reason.
@@ -158,7 +158,6 @@ the quick start above sets them explicitly for exactly that reason.
 ```typescript
 const agent = await FsAgent.fromClient(folder, treeKey, client, socket, {
   ignore,
-  resolveConflicts: true,
   scanCachePath,
 });
 
@@ -174,8 +173,8 @@ Three calls, and they are not interchangeable.
 
 | call | starts | returns |
 | --- | --- | --- |
-| `syncFromDb(db, connector, treeKey, restoreOptions?)` | receiving — applying what peers announce | a `stop()` |
-| `syncToDb(db, connector, treeKey, storageOptions?)` | sending — watching the folder and announcing | a `stop()` |
+| `syncFromDb(db, connector, treeKey)` | receiving — acting on the heads the network says | a `stop()` |
+| `syncToDb(db, connector, treeKey)` | sending — watching the folder, authoring and announcing | a `stop()` |
 | `dispose()` | — | nothing; **abandons a pending join** |
 
 **Start receiving first.** A machine that pushes before it can receive
@@ -222,12 +221,8 @@ costs.
 
 | option | default | what it does |
 | --- | --- | --- |
-| `resolveConflicts` | `false` on the constructor, **`true` via `fromClient`** | Reconciles two edits to one file, keeping the loser as a renamed copy. Off, a conflicting edit is never merged — the resolver is not even constructed. The constructor keeps the primitive default because a hub may relay without arbitrating |
-| `onConflict` | — | Called with the conflict reports. Without it a conflict is resolved and nobody is told |
 | `joinWaitMs` | `1500` | How long a folder with files and no history waits for the network before speaking. `0` means "this folder is its own origin" |
-| `bucketSync` | `true` | Repairs a divergence by comparing manifests and fetching only what is missing, instead of replacing a folder |
-| `antiEntropy` | `DEFAULT_ANTI_ENTROPY` | The periodic comparison that heals a lost announcement. A machine that is behind **asks**, rather than waiting to be told |
-| `syncConfig` | **`causalOrdering` and `includeClientIdentity` default to `true` via `fromClient`** | Forwarded to every `Connector` the agent builds. Without `causalOrdering` the wire carries no predecessor refs, so no conflicting edit can be merged — the agent warns once, loudly |
+| `syncConfig` | **`causalOrdering` and `includeClientIdentity` default to `true` via `fromClient`** | Forwarded to the `Connector` `fromClient` builds. Without `includeClientIdentity` the hub cannot tell a machine saying its head again from an echo, and holds the re-announcement back |
 | `clientIdentity` | — | Who this machine is, on the wire |
 
 ### Scanning
@@ -249,24 +244,22 @@ Every async step is bounded, because an unbounded one is a silent hang.
 | `fetchTree` | 20 000 ms |
 | `extract` | 15 000 ms |
 | `restore` | 15 000 ms |
-| `syncCallback` | 25 000 ms |
 | `debounceMs` | 300 ms |
-| `processRefRetries` | 3 |
-| `processRefRetryDelayMs` | 5 000 ms |
-| `recoveryRetries` | 10 |
 
-`debounceMs` coalesces a burst of filesystem events into one sync cycle. Raise
-it on a folder under constant churn, lower it to make a single save feel
-immediate. A large catalogue wants a larger `extract` and `restore` than the
-defaults.
+`debounceMs` coalesces a burst of filesystem events into one edit. Raise it on a
+folder under constant churn, lower it to make a single save feel immediate.
+`restore` bounds every apply: sending and receiving share one lock, so an apply
+waiting on a blob nobody serves would keep this machine from recording its own
+work. A timed-out apply is tried again the next time the hub says its head. A
+large catalogue wants a larger `extract` and `restore` than the defaults.
 
 ### `restoreOptions.cleanTarget` — read this before setting it
 
-`cleanTarget: true` makes `restore()` prune anything not in the tree. **The
-sync path ignores it and always applies additively**, because pruning on a
-received tree is precisely how an absence becomes a deletion. It is honoured
-only by a direct `restore()` call, where *you* are asserting the tree is the
-whole truth. Passing it to `syncFromDb` is harmless and has no effect.
+`cleanTarget: true` makes `restore()` prune anything not in the tree. **The sync
+never uses it**: an apply deletes exactly what an edit descending from this
+machine's state removed, and nothing else. It is honoured only by a direct
+`restore()` or `loadFromDb()` call, where *you* are asserting the tree is the
+whole truth.
 
 ---
 
@@ -325,19 +318,56 @@ matcher.ignores('src/server.log'); // true
 
 ---
 
+## Knowing what happened to the folder
+
+**Start here, and read one thing:** `agent.signalsNeedingAction`. It is the list
+of things this machine could not resolve and will not resolve — a deletion the
+guard refused, a path this filesystem rejects. If it is empty, the folder has
+dealt with everything it met.
+
+```ts
+const agent = await FsAgent.fromClient(folder, 'fileTree', client, socket, {
+  onSignal: (signal) => {
+    if (signal.action === 'required') alertSomebody(signal.detail);
+  },
+});
+
+// On start, for whatever happened while this process was not running:
+for (const signal of agent.signalsNeedingAction) alertSomebody(signal.detail);
+```
+
+|  |  |
+| --- | --- |
+| `agent.signals` | everything that happened to this folder worth telling somebody, oldest first. Survives a restart: it is read back from `.fsagent-signals.json` the first time you ask |
+| `agent.signalsNeedingAction` | only the ones a **person** has to act on |
+| `agent.signalTotals` | how many of each kind ever happened — unbounded, so "and 1 240 more" stays answerable after the list has dropped the oldest |
+| `agent.onSignal(cb)` | subscribe at any time; returns an unsubscribe |
+
+Each signal says what happened (`kind`), to what (`paths`, `pathCount`), who
+decided (`decidedBy`), and whether somebody has to act (`action`). Three of the
+seven kinds are `required` — a refused deletion, a directory and a file at one
+path, and an unwritable path — because those wait for a person.
+
+**The one to read is `conflict/arbitrary`.** Two machines changed one file at
+once: both versions were kept, and the one that reached the fleet later keeps
+the name. That is the order the hub heard them in, not who edited last — which
+nobody can know without trusting two machines' clocks.
+
+The full table of kinds and the field reference are in
+[README.api.md § Signals](README.api.md#signals).
+
 ## Reading what the agent is doing
 
 |  |  |
 | --- | --- |
-| `agent.stageTimings` | milliseconds per stage of the **last** cycle — scan, hash, store, announce, fetch, write, re-derive. A total says a run was slow; this says where |
-| `agent.antiEntropyStatus` | whether this machine agrees with the hub, and what it last did about it |
-| `agent.refusedDeletions` | deletions the mass-delete guard **refused**, newest last — `{ atMs, route, wouldRemove, held, paths }`. Read this to answer "why did my deletion not arrive": the guard refuses on every machine, so a deliberate mass deletion stalls the whole fleet and the only other trace is a line in each machine's log. Bounded at `REFUSED_DELETION_LOG_MAX`, in memory, and it refills on the next announcement |
+| `agent.stageTimings` | milliseconds per stage of the **last** cycle — scan, announce, fetch, write. A total says a run was slow; this says where |
+| `agent.ownHead` | the chain entry this folder stands on |
+| `agent.antiEntropyStatus` | what the last head the hub said made this machine do — `diverged`, since when, and the last action (`pull`, `push`, `merge` or `blocked`) |
 | `agent.scanner.onChange(cb)` | every filesystem event the scanner accepted |
-| `onConflict` | conflicts, as they are resolved |
-| `SYNC_ERROR_FILE` | `.sync-errors.log` in the folder: a keyed, append-only record of every refusal and failure — a locked file, an unfetchable blob, an impossible path, a refused mass deletion |
-| `.fsagent-conflicts.json` | resolved conflicts, bounded |
+| `SYNC_ERROR_FILE` | `.sync-errors.log` in the folder: a keyed, append-only record of internal failures — a locked file, an unfetchable blob, an impossible path. A refused mass deletion is a signal, not an error |
+| `.fsagent-signals.json` | every signal, bounded, plus the per-kind totals that are not |
 | `.fsagent-recovered/` | files a join kept but deliberately did not announce |
-| `.fsagent-state.json` | what this machine remembers across restarts: the state it was last at, the paths it deleted, and **when each path was last edited**. The edit times are what let a peer's tombstone be ordered against the write it claims to supersede — a machine that has forgotten them sends no time, and the comparison has one operand |
+| `.fsagent-state.json` | what this machine remembers across restarts: the chain entry it stands on, and the highest stamp epoch it has heard — which a hub taking office on this machine continues above (`minEpoch`) |
 
 All of these live inside the synced folder and all are ignored by the scanner —
 otherwise the notification would itself be content, propagate, and be rewritten
@@ -387,60 +417,44 @@ rewriting a whole catalogue.
 - **split a large file into blocks.** A file transfers whole, so the transport's
   message limit is the per-file ceiling;
 - **let you approve a mass deletion.** One that looks like a loss is refused
-  and reported through `agent.refusedDeletions`; there is no override yet;
+  and reported as a `deletion/refused` signal marked `required`; there is no
+  override yet;
 - **collect garbage.** Every superseded version stays on every machine;
 - **promise a latency.** Nothing in the suite asserts an arrival deadline, so
   nothing here should be read as one;
 - **repair a folder reverted under a running agent.** Restoring a backup while
   the agent is stopped is handled; doing it underneath a live one is not
   decidable from the history, and the reasoning is in the test;
-- **promise that a deletion made while the agent was NOT RUNNING propagates.**
-  **Delete files with the client running.** One deleted while it is stopped may
-  come back from the history on the next sync.
-
-  This is a deliberate trade, and the reason is worth knowing. A removal is
-  only ever announced for a file the agent WATCHED being deleted — never for
-  any file merely missing from the folder. Announcing an absence is the same "an
-  absence is a deletion" inference the edit chain exists to remove, just moved
-  to the sending side, and the chain would then carry that guess as a stated,
-  ordered, authoritative removal that every peer obeys — correctly, because
-  obeying a stated removal is the whole design. A node whose idea of its own
-  last state had drifted could tell the entire fleet to delete files nobody had
-  touched.
-
-  So the asymmetry is chosen on purpose: a file that comes back is visible and
-  recoverable — delete it again with the client running and it propagates
-  properly — while a file deleted across every machine on a mistaken statement
-  is neither. In practice the offline case is often still caught, but it is not
-  promised here, and nothing in this package should be read as promising it.
+- **follow a whole folder disappearing that it did not watch go.** A deletion
+  made while the agent was stopped is recorded at the next start like any
+  edit — unless it looks like a lost folder: more than the floors (a hundred
+  files and 30 % of the folder, or all but ten) gone without the watcher seeing
+  it. That is the shape of a failed mount or a wiped drive, never of a person,
+  so nothing is recorded and a `deletion/refused` signal asks somebody to
+  decide. **Delete large amounts with the client running.**
 
 ---
 
 ## Troubleshooting
 
-**Nothing syncs and the log says `carries no ancestry`.**
-`syncConfig.causalOrdering` is not `true`, so conflicting edits will not be
-merged. Set it on the `Connector`.
-
-**A conflict happened and nobody was told.** `resolveConflicts` defaults to
-`false`. Set it `true` and pass `onConflict`.
+**Two versions of one file wait instead of being settled.** Their conflict needs
+the hub's stamp and the hub does not give one: a `repair/blocked` signal says
+so, and both machines keep their own version. Configure the hub with
+`stamp: { domain, hub }`.
 
 **An ignore pattern does nothing.** With no `*`, `?` or `/` it is a *prefix*,
 not a glob: `exe` ignores files starting with `exe`, while `*.exe` is what
 ignores the extension. Check it with `compileIgnore`.
 
-**A deletion is slow rather than lost.** A removal travels as a statement, and
-a walk that cannot complete yet does nothing and waits for the next
-announcement. The failure mode is *delayed*, not *silently dropped*, and that
-is deliberate.
+**A change arrives late rather than not at all.** A machine that missed an
+announcement catches up the next time the hub says its head — on the state
+beacon, every 30 s in the host client. The failure mode is *delayed*, not
+*silently dropped*.
 
-**A whole-folder deletion was refused.** The mass-delete guard.
-`.sync-errors.log` names the count and the threshold. There is no override yet.
-
-**A machine sits empty after its folder was wiped.** Above a hundred files the
-agent recognises the loss and re-joins. Between eleven and ninety-nine it
-announces the emptiness, the fleet correctly refuses it, and that machine is
-not refilled — no data is lost anywhere, but it needs a restart.
+**A whole-folder deletion was refused.** The mass-delete guard, at the machine
+that would have recorded it or at one that would have applied it. A
+`deletion/refused` signal names the count and the threshold. There is no
+override yet.
 
 **The first start takes minutes.** A cold scan reads and hashes every file.
 Pass `scanCachePath`.
@@ -468,30 +482,19 @@ than forever. See [doc/safety-rescan.md](doc/safety-rescan.md).
 advertised — but no mesh test runs on Windows, so this wants a Windows CI
 runner.
 
-**An upgrade changes every tree ref in the fleet.** Content identity now
-excludes mtime and fixes a canonical child order, so the same bytes hash
-differently than in older releases. Nothing is destroyed, but the fleet reads
-divergent until every machine has re-scanned. **Upgrade machines together**:
-there is no switch for speaking an older wire format, deliberately — a build
-that cannot read a chain head cannot read the bucket protocol either, so one
-flag would select two different consistency models.
+**Upgrading from 0.0.x changes every ref in the fleet.** 0.2.0 announces chain
+heads only, orders conflicts by the hub's stamp, and keeps no compatibility with
+older wire formats — deliberately: one flag would select two consistency models.
+A machine on 0.2.0 and one on an older release cannot sync. **Upgrade a domain
+together, while it is in sync**, and configure its hubs to stamp; a machine
+whose state file names no head it can read starts as a joiner.
 
 **A deliberate mass deletion does not arrive.** Deleting most of a folder is
-refused on every machine, and nothing asks the user — see "what it does not do"
-above. Read `agent.refusedDeletions` to find out it happened: the guard cannot
-tell a person deleting a project from a machine that was wiped telling the fleet
-to wipe, and the second one is why the guard exists.
-
-**On Linux, deleting a whole directory may leave its files behind.** `rm -r`
-unlinks the children and then the directory; when the watched directory goes,
-inotify removes its watch and the queued child events are lost. A removal is
-only stated for a deletion the agent **watched** — an absence is not a deletion,
-which is what stops a folder that failed to mount from wiping the fleet — so an
-unobserved child is not merely unpropagated: a peer still holding it announces
-it back and the folder is restored. Measured on Linux CI across four runs, a
-different subset surviving each time. macOS reports every child deletion and is
-unaffected. Deleting the files individually, or deleting the directory a second
-time, propagates normally.
+refused, and nothing asks the user — see "what it does not do" above. Read
+`agent.signalsNeedingAction` to find out it happened: the guard cannot tell a
+person deleting a project from a machine that lost its disk, and the second is
+why the guard exists. A machine that did lose its folder is refilled: the fleet
+keeps the files and records them again on top of the deletion.
 
 **A file still being written cannot be recognised with certainty.** The settle
 rule holds a file back on the first sight of it and for as long as its size keeps
@@ -504,44 +507,17 @@ truncated version until the copy finishes — at which point the size and timest
 change, the file is re-read, and the complete version propagates. Nothing is
 corrupted permanently.
 
-**Heavy churn is now gated, and two constraints that stood here are gone.**
-Earlier releases of this document listed three things the churn fuzzer found.
-What they actually were:
+**Two limits of ordering by the hub.** Neither loses data, and both converge.
+A machine that missed an announcement derives a later stamp for the versions it
+carried, so its verdict on a same-file conflict can differ from a peer's; the
+two merges then merge once more, leaving one redundant conflicted copy. And a
+version that passed through a merge carries the merge's stamp, so in a
+three-way race the name can go to a version first edited earlier.
 
-- **Two machines holding different bytes for one path while both reported
-  perfect health — FIXED.** A same-path conflict where both sides had edited the
-  file was settled by whichever content hash sorted higher, because the edit time
-  carried on the wire was read only when one side had deleted the path. The newer
-  edit now wins, and both sides compute the same verdict. The fleet converged on
-  the superseded write about half the time this arose.
-- **A re-created file lost from every machine — DID NOT EXIST.** It was an error
-  in the test's own instrument. The count of entries in a node's tree used a
-  field the tree nodes do not have, so it counted every directory and the folder
-  root as files: `6 entries` beside `4 files on disk` was four files, one
-  subdirectory and the root, exactly consistent. Nothing was ever lost. The
-  measurement that appeared to confirm it on older code was the same miscount.
-- **A machine finishing one file short — FIXED, and it was never rare.** This was
-  written down as a limit while the test read the fleet's convergence verdict and
-  threw it away, so nothing had ever gated it. Asserting it exposed the cause at
-  once: a node that deletes a file keeps a tombstone until it has announced it,
-  and that tombstone was allowed to refuse a peer's LATER write of the same path
-  — although the comparison had already established the write was newer. The
-  deleting node stayed permanently short of a file every peer held, still
-  advertising a deletion the fleet had moved past, with nothing to end it. On
-  Linux, 6 runs in 8 of one churn scenario. The stale tombstone is now lifted,
-  and the node says so in its log when it happens.
-
-So the churn scenarios are a real gate: every node ends with the same files and
-the same bytes, and any disagreement must at least be visible in some node's
-`diverged` or `differingPaths`. A run that ends disagreeing says so in the test
-output rather than passing quietly. Measured 8 of 8 on Linux where the same
-scenario failed 6 of 8 before these two fixes.
-
-**What to watch in production.** `agent.antiEntropyStatus.differingPaths` names
-the paths rather than reporting that the checksums differ, so it is the more
-useful of the two. `localRef` is this node's state right now and `hubRef` is what
-the hub last announced, so the pair can legitimately differ for a moment while
-`diverged` still reports the previous comparison's verdict.
+**What to watch in production.** `agent.antiEntropyStatus`: `hubRef` is the head
+the hub said last and `localRef` this machine's head now. They differ for a
+moment after every edit; `diverged` for a long time, with `lastRepair.action`
+`blocked`, is the case to look at.
 
 ---
 
@@ -549,9 +525,9 @@ the hub last announced, so the pair can legitimately differ for a moment while
 
 | document | what is in it |
 | --- | --- |
-| [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, additive reconciliation, anti-entropy |
+| [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, the conflict table, the stamp, the guards |
 | [README.api.md](README.api.md) | every export, grouped by module — the shape, where this document gives the advice |
-| [README.tests.md](README.tests.md) | the 810 scenarios this package ships, by what they prove |
+| [README.tests.md](README.tests.md) | the 723 scenarios this package ships, by what they prove |
 
 Related packages: `@rljson/rljson` (trees), `@rljson/db` (database and
 `Connector`), `@rljson/io` (sockets and storage), `@rljson/bs` (blobs),

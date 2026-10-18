@@ -17,8 +17,7 @@
 // announcement — so a node claimed every path that differed, including the ones
 // it had merely received. The entry it authored was then a real edit with a
 // correct stamp for the moment of authoring, and that is exactly why it won an
-// ordering it should never have entered: see `orders a BRANCH, not a path` in
-// `fs-conflict-resolver.spec.ts`.
+// ordering it should never have entered.
 //
 // Tested HERE rather than through the mesh. The mesh scenario that first showed
 // this (`fs-mesh-invariants.spec.ts`) has too much run-to-run variance to judge
@@ -33,14 +32,15 @@ import { Connector, Db } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
+import { existsSync } from 'fs';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent } from '../src/fs-agent.ts';
-import { ORIGIN_FIXTURE } from './origin-fixture.ts';
-import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 import { FsEditChain } from '../src/fs-edit-chain.ts';
+import { announceAsPeer } from './chain-announce.ts';
+import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 
 const TREE = 'fsTree';
 
@@ -76,64 +76,88 @@ describe('a node claims only what it changed', () => {
     const bs = new BsMem();
     const agent = new FsAgent(dir, bs, {
       ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 20, processRefRetries: 0, recoveryRetries: 0 },
+      timeouts: { debounceMs: 20},
     });
     return { db, connector, agent, socket, bs };
   };
 
-  /** Every path this node has ever claimed to have changed. */
-  const claimed = async (db: Db): Promise<string[]> => {
+  /**
+   * What the entries this node authored name: every entry on its lineage
+   * except the peer's.
+   * @param db - The node's database.
+   * @param head - The node's head.
+   * @param peer - The heads the peer authored.
+   * @returns The paths changed and removed by this node's own entries.
+   */
+  const claimed = async (
+    db: Db,
+    head: string | undefined,
+    peer: ReadonlySet<string>,
+  ) => {
     const chain = new FsEditChain(db, TREE);
-    await chain.init();
-    const out = new Set<string>();
-    let head = chain.head;
+    const changed = new Set<string>();
+    const removed = new Set<string>();
     const seen = new Set<string>();
-    while (head && !seen.has(head)) {
-      seen.add(head);
-      const entry = await chain.entry(head);
-      if (!entry) break;
-      for (const path of entry.changed) out.add(path);
-      head = entry.previous[0];
+    const stack = head ? [head] : [];
+    while (stack.length > 0) {
+      const ref = stack.pop() as string;
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      const entry = await chain.entry(ref);
+      if (!entry) continue;
+      if (!peer.has(ref)) {
+        for (const path of entry.changed) changed.add(path);
+        for (const path of entry.removed) removed.add(path);
+      }
+      stack.push(...entry.previous);
     }
-    return [...out].sort();
+    return { changed: [...changed].sort(), removed: [...removed].sort() };
+  };
+
+  /**
+   * Waits until a node's head has moved past `from`.
+   * @param agent - The node.
+   * @param from - Its head before.
+   */
+  const moved = async (agent: FsAgent, from: string | undefined) => {
+    for (let i = 0; i < 100 && agent.ownHead === from; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(agent.ownHead, 'the node never moved').not.toBe(from);
   };
 
   // ...........................................................................
   it('does not claim a file it received', async () => {
     const { db, connector, agent, socket, bs } = await wire();
 
-    // Sync starts on an EMPTY folder, so the root entry is empty and every
-    // claim after it is an edit. A file already present when a node starts is
-    // part of the state it began in, not something it did — which is why the
-    // first push states nothing at all.
+    // The folder's first state is its root and names nothing; every claim
+    // after it is an edit.
+    await writeFile(join(dir, 'seed.txt'), 'seed');
     const stopTo = await agent.syncToDb(db, connector, TREE);
-    const stopFrom = await agent.syncFromDb(db, connector, TREE, {
-      cleanTarget: true,
-    });
-    await new Promise((r) => setTimeout(r, 400));
+    const stopFrom = await agent.syncFromDb(db, connector, TREE);
 
     // One file of its own, written here, after the node is live.
+    let head = agent.ownHead;
     await writeFile(join(dir, 'mine.txt'), 'mine');
-    await new Promise((r) => setTimeout(r, 600));
+    await moved(agent, head);
 
-    // A peer sends a tree holding both files. `theirs.txt` arrives here; this
-    // node writes nothing.
-    await writeFile(join(peerDir, 'mine.txt'), 'mine');
-    await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
-    const peerRef = await new FsDbAdapter(db, TREE).storeFsTree(
-      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
-    );
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
-    await new Promise((r) => setTimeout(r, 1_200));
+    // A peer that held this node's state adds `theirs.txt`. It arrives here;
+    // this node writes nothing of its own.
+    const held = { 'seed.txt': 'seed', 'mine.txt': 'mine', 'theirs.txt': 'theirs' };
+    for (const [name, content] of Object.entries(held)) {
+      await writeFile(join(peerDir, name), content);
+    }
+    const peer = await announceAsPeer(db, TREE, {
+      tree: await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
+      changed: ['theirs.txt'],
+      previous: [agent.ownHead as string],
+    });
+    head = agent.ownHead;
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: peer.announcement });
+    await moved(agent, head);
 
-    const paths = await claimed(db);
-    expect(paths, 'the file never arrived, so the test proves nothing').toEqual(
-      expect.arrayContaining(['mine.txt']),
-    );
-    expect(
-      paths,
-      'claimed a file it only received — an edit where no change was made',
-    ).not.toContain('theirs.txt');
+    const paths = await claimed(db, agent.ownHead, new Set([peer.head]));
+    expect(paths.changed, 'its own edit went unclaimed').toEqual(['mine.txt']);
 
     stopTo();
     stopFrom();
@@ -146,26 +170,28 @@ describe('a node claims only what it changed', () => {
     // claiming real ones, or the chain says nothing about anybody's work.
     const { db, connector, agent, socket, bs } = await wire();
 
+    await writeFile(join(dir, 'seed.txt'), 'seed');
     const stopTo = await agent.syncToDb(db, connector, TREE);
-    const stopFrom = await agent.syncFromDb(db, connector, TREE, {
-      cleanTarget: true,
-    });
-    await new Promise((r) => setTimeout(r, 400));
+    const stopFrom = await agent.syncFromDb(db, connector, TREE);
 
+    await writeFile(join(peerDir, 'seed.txt'), 'seed');
     await writeFile(join(peerDir, 'theirs.txt'), 'theirs');
-    const peerRef = await new FsDbAdapter(db, TREE).storeFsTree(
-      await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
-    );
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
-    await new Promise((r) => setTimeout(r, 900));
+    const peer = await announceAsPeer(db, TREE, {
+      tree: await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
+      changed: ['theirs.txt'],
+      previous: [agent.ownHead as string],
+    });
+    let head = agent.ownHead;
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: peer.announcement });
+    await moved(agent, head);
 
     // And now a genuine local edit, on top of a received folder.
+    head = agent.ownHead;
     await writeFile(join(dir, 'later.txt'), 'written here');
-    await new Promise((r) => setTimeout(r, 900));
+    await moved(agent, head);
 
-    const paths = await claimed(db);
-    expect(paths, 'a real local edit went unclaimed').toContain('later.txt');
-    expect(paths).not.toContain('theirs.txt');
+    const paths = await claimed(db, agent.ownHead, new Set([peer.head]));
+    expect(paths.changed).toEqual(['later.txt']);
 
     stopTo();
     stopFrom();
@@ -181,51 +207,58 @@ describe('a node claims only what it changed', () => {
     await writeFile(join(dir, 'keep.txt'), 'keep');
     await writeFile(join(dir, 'doomed.txt'), 'doomed');
     const stopTo = await agent.syncToDb(db, connector, TREE);
-    const stopFrom = await agent.syncFromDb(db, connector, TREE, {
-      cleanTarget: true,
-    });
-    await new Promise((r) => setTimeout(r, 400));
+    const stopFrom = await agent.syncFromDb(db, connector, TREE);
 
     // The peer holds only `keep.txt` and STATES that it removed the other.
     await writeFile(join(peerDir, 'keep.txt'), 'keep');
-    const peerTree = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
-    const peerRef = await new FsDbAdapter(db, TREE).storeFsTree(peerTree);
-    const peerChain = new FsEditChain(db, TREE);
-    await peerChain.init();
-    const peerEntry = await peerChain.append({
-      treeRef: peerRef,
+    const peer = await announceAsPeer(db, TREE, {
+      tree: await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract(),
       removed: ['doomed.txt'],
+      previous: [agent.ownHead as string],
     });
-    socket.emit(connector.events.ref, {
-      o: 'remote-peer',
-      r: `~H~${peerEntry.head}`,
-    });
-    await new Promise((r) => setTimeout(r, 1_200));
+    const head = agent.ownHead;
+    socket.emit(connector.events.ref, { o: 'remote-peer', r: peer.announcement });
+    await moved(agent, head);
 
-    const chain = new FsEditChain(db, TREE);
-    await chain.init();
-    const removedByThisNode = new Set<string>();
-    let head = chain.head;
-    const seen = new Set<string>();
-    while (head && !seen.has(head)) {
-      seen.add(head);
-      const entry = await chain.entry(head);
-      if (!entry) break;
-      // The peer's own entry is in this db too; only entries this node
-      // authored are in its lineage, and the peer's is not one of them.
-      if (entry.head !== peerEntry.head) {
-        for (const path of entry.removed) removedByThisNode.add(path);
-      }
-      head = entry.previous[0];
-    }
-
-    expect(
-      [...removedByThisNode],
-      'claimed a deletion it was told about',
-    ).not.toContain('doomed.txt');
+    const paths = await claimed(db, agent.ownHead, new Set([peer.head]));
+    expect(paths.removed, 'claimed a deletion it was told about').toEqual([]);
 
     stopTo();
     stopFrom();
     agent.scanner.stopWatch();
+  });
+
+  // ...........................................................................
+  it('does not claim the absence of a file its scan has not caught up with', async () => {
+    // A scan can lag behind the disk: a file it has not read yet is skipped
+    // until it settles. Authoring that absence would delete the file on every
+    // node, so the node waits for a scan that has caught up.
+    const { db, connector, agent, bs } = await wire();
+    await writeFile(join(dir, 'a.txt'), 'a');
+    await writeFile(join(dir, 'x.txt'), 'x');
+    const stopTo = await agent.syncToDb(db, connector, TREE);
+
+    await writeFile(join(peerDir, 'a.txt'), 'a');
+    const lagging = await new FsAgent(peerDir, bs, ORIGIN_FIXTURE).extract();
+    // The pass authoring reads next lags behind the disk: x.txt is there,
+    // the pass has not seen it.
+    vi.spyOn(agent.scanner, 'tree', 'get').mockReturnValueOnce(lagging);
+    const waited = vi.spyOn(
+      agent as unknown as { _authorSoon: () => void },
+      '_authorSoon',
+    );
+    const head = agent.ownHead;
+    await writeFile(join(dir, 'y.txt'), 'y');
+    await moved(agent, head);
+
+    expect(waited, 'the lagging pass never reached the guard').toHaveBeenCalled();
+    const paths = await claimed(db, agent.ownHead, new Set());
+    expect(paths.removed).toEqual([]);
+    expect(paths.changed).toEqual(['y.txt']);
+    expect(existsSync(join(dir, 'x.txt'))).toBe(true);
+
+    stopTo();
+    agent.scanner.stopWatch();
+    vi.restoreAllMocks();
   });
 });

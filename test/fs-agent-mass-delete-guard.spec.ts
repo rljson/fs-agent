@@ -11,7 +11,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
-import { Connector, Db } from '@rljson/db';
+import { Connector, Db, stateBeaconEvent } from '@rljson/db';
 import { IoMem, SocketMock } from '@rljson/io';
 import { createTreesTableCfg, Route } from '@rljson/rljson';
 
@@ -19,10 +19,9 @@ import {
   FsAgent,
   MASS_DELETE_MIN_FILES,
   MassDeleteRefusedError,
-  REFUSAL_ANSWER_COOLDOWN_MS,
-  REFUSED_DELETION_LOG_MAX,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
+import { SIGNAL_LOG_FILE } from '../src/fs-signals.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
 import { FsDbAdapter } from '../src/fs-db-adapter.ts';
 
@@ -71,8 +70,13 @@ describe('FsAgent — the mass-delete guard', () => {
   const sourceTree = (bs: BsMem) => new FsAgent(sourceDir, bs, ORIGIN_FIXTURE).extract();
 
   /** Files currently in the target. */
+  // The agent's own bookkeeping is not content, so it is not counted. Every
+  // file it keeps in the folder it watches has to be listed here — a refusal
+  // now writes a signal as well as a log line, and counting that made the
+  // folder look one file larger than the guard had left it.
+  const AGENT_OWN = [SYNC_ERROR_FILE, SIGNAL_LOG_FILE];
   const targetFiles = async () =>
-    (await readdir(targetDir)).filter((f) => f !== SYNC_ERROR_FILE);
+    (await readdir(targetDir)).filter((f) => !AGENT_OWN.includes(f));
 
   const POPULATED = MASS_DELETE_MIN_FILES + 20;
 
@@ -104,11 +108,17 @@ describe('FsAgent — the mass-delete guard', () => {
     const tree = await sourceTree(bs);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await new FsAgent(targetDir, bs, ORIGIN_FIXTURE)
+    const agent = new FsAgent(targetDir, bs, ORIGIN_FIXTURE);
+    await agent
       .restore(tree, targetDir, { cleanTarget: true })
       .catch(() => undefined);
 
-    expect(existsSync(join(targetDir, SYNC_ERROR_FILE))).toBe(true);
+    // A refusal is a signal a person has to act on, persisted for a host that
+    // starts later — not an error.
+    expect(agent.signalsNeedingAction.map((s) => s.kind)).toEqual([
+      'deletion/refused',
+    ]);
+    expect(existsSync(join(targetDir, SIGNAL_LOG_FILE))).toBe(true);
     errSpy.mockRestore();
   });
 
@@ -192,341 +202,6 @@ describe('FsAgent — the mass-delete guard', () => {
 
     expect(await targetFiles()).toHaveLength(0);
   });
-
-  // The correction a real fleet forced, and the reason this is not symmetric with
-  // the locked-file case. The peer that sent the sparse tree is the one
-  // MISSING data; this node holds the fuller copy. If it goes quiet after
-  // refusing, the sparse peer has nothing to catch up from — and with every
-  // populated node refusing its pushes, the network livelocks. Measured on
-  // four machines, where two nodes sat at 5 and 15 of 121 files.
-  it('keeps advertising its own state after refusing, so the sparse peer can catch up', async () => {
-    const io = new IoMem();
-    await io.init();
-    const db = new Db(io);
-    const treeKey = 'fsTree';
-    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-    const bs = new BsMem();
-    await fill(targetDir, POPULATED);
-
-    // A peer advertises an almost-empty tree.
-    await fill(sourceDir, 2, 'sparse');
-    const sparseRef = await new FsDbAdapter(db, treeKey).storeFsTree(
-      await sourceTree(bs),
-    );
-
-    const route = Route.fromFlat(`/${treeKey}+`);
-    const socket = new SocketMock();
-    const connector = new Connector(db, route, socket);
-    const sent: string[] = [];
-    const realSend = connector.send.bind(connector);
-    connector.send = (ref: string) => {
-      sent.push(ref);
-      return realSend(ref);
-    };
-    const agent = new FsAgent(targetDir, bs, {
-      ...ORIGIN_FIXTURE,
-      timeouts: {
-        debounceMs: 1,
-        processRefRetries: 0,
-        processRefRetryDelayMs: 1,
-        recoveryRetries: 0,
-      },
-    });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const stopTo = await agent.syncToDb(db, connector, treeKey);
-    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
-      cleanTarget: true,
-    });
-
-    // Count only what goes out AFTER the refusal — syncToDb's initial store
-    // has already sent one ref.
-    sent.length = 0;
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: sparseRef });
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Refused: nothing DELETED. The two incoming files were still added —
-    // the restore is additive and only the prune is refused, which is the
-    // right split: new data is never the dangerous part.
-    const after = await targetFiles();
-    expect(after.filter((f) => f.startsWith('f'))).toHaveLength(POPULATED);
-    expect(after.filter((f) => f.startsWith('sparse'))).toHaveLength(2);
-
-    // …and crucially the node still SAYS something. After a refusal the
-    // watcher resumes, sees the two files the restore did add, and broadcasts
-    // the folder as it now stands — 120 files plus those two.
-    //
-    // The suppression that is right for a locked file silences exactly this,
-    // and here that is the livelock: the only node with the full copy goes
-    // quiet, and the sparse peer has nothing to catch up from.
-    expect(sent.length).toBeGreaterThan(0);
-
-    stopTo();
-    stopFrom();
-    agent.scanner.stopWatch();
-    errSpy.mockRestore();
-  });
-
-  // The test above passes for an incidental reason: the sparse tree carried two
-  // files, the restore added them, the watcher woke on the change and broadcast
-  // the folder. Nothing was DELIBERATE about the answer.
-  //
-  // An EMPTY incoming tree adds nothing. The folder does not change, the
-  // watcher has nothing to report, and the node with the full copy says
-  // nothing at all — which is the deadlock a joining machine actually hits.
-  // Measured on two clients: an empty joiner sat at 0 of 3642 files for 60 s.
-  it('answers an empty tree with its own state, though nothing changed', async () => {
-    const io = new IoMem();
-    await io.init();
-    const db = new Db(io);
-    const treeKey = 'fsTree';
-    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-    const bs = new BsMem();
-    await fill(targetDir, POPULATED);
-
-    // sourceDir is left empty — the joiner holds nothing.
-    const emptyRef = await new FsDbAdapter(db, treeKey).storeFsTree(
-      await sourceTree(bs),
-    );
-
-    const socket = new SocketMock();
-    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
-    const sent: string[] = [];
-    const realSend = connector.send.bind(connector);
-    connector.send = (ref: string) => {
-      sent.push(ref);
-      return realSend(ref);
-    };
-
-    const agent = new FsAgent(targetDir, bs, {
-      ...ORIGIN_FIXTURE,
-      timeouts: {
-        debounceMs: 1,
-        processRefRetries: 0,
-        processRefRetryDelayMs: 1,
-        recoveryRetries: 0,
-      },
-    });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    // syncToDb gives the agent a current ref — the state it will answer with.
-    const stopTo = await agent.syncToDb(db, connector, treeKey);
-    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
-      cleanTarget: true,
-    });
-
-    sent.length = 0;
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Nothing was deleted…
-    expect(
-      (await targetFiles()).filter((f) => f.startsWith('f')),
-    ).toHaveLength(POPULATED);
-    // …and the folder is byte-for-byte what it was, so only a deliberate
-    // answer can have put anything on the wire.
-    expect(sent.length).toBeGreaterThan(0);
-    expect(
-      warnSpy.mock.calls.some((c) =>
-        String(c[0]).includes('re-announcing'),
-      ),
-    ).toBe(true);
-
-    stopTo();
-    stopFrom();
-    agent.scanner.stopWatch();
-    errSpy.mockRestore();
-    warnSpy.mockRestore();
-  });
-
-  // Refusing a state is not the same as having consumed it.
-  //
-  // A tree ref is a content hash, so a peer emptied twice re-derives the same
-  // ref both times. If the first refusal leaves it marked "already received",
-  // the connector drops the second before this agent ever sees it — nothing
-  // refuses, nothing answers, and that peer stays empty for good.
-  //
-  // Measured: a client that had already joined and was then emptied sat at 1 of
-  // 3642 files with no refusal logged at all, while a FRESH client — whose
-  // empty ref this node had never seen — was refused, answered, and converged
-  // in eleven seconds.
-  it('answers the same tree again when it comes back', async () => {
-    const io = new IoMem();
-    await io.init();
-    const db = new Db(io);
-    const treeKey = 'fsTree';
-    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-    const bs = new BsMem();
-    await fill(targetDir, POPULATED);
-    const emptyRef = await new FsDbAdapter(db, treeKey).storeFsTree(
-      await sourceTree(bs),
-    );
-
-    const socket = new SocketMock();
-    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
-    const agent = new FsAgent(targetDir, bs, {
-      ...ORIGIN_FIXTURE,
-      timeouts: {
-        debounceMs: 1,
-        processRefRetries: 0,
-        processRefRetryDelayMs: 1,
-        recoveryRetries: 0,
-      },
-    });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const stopTo = await agent.syncToDb(db, connector, treeKey);
-    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
-      cleanTarget: true,
-    });
-
-    // ANSWERS, not refusals. There is nothing left to refuse — an absence
-    // never prunes — so what has to survive the dedup is the ANSWER: this
-    // node telling the emptied peer what it holds. The cooldown is the reason
-    // the two waits are longer than it.
-    const answers = (): number =>
-      warnSpy.mock.calls.filter((c) =>
-        String(c[0]).includes('re-announcing'),
-      ).length;
-
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 400));
-    expect(answers()).toBe(1);
-
-    // The very same ref, exactly as an emptied peer re-derives it.
-    await new Promise((r) => setTimeout(r, REFUSAL_ANSWER_COOLDOWN_MS));
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 400));
-    expect(answers()).toBe(2);
-
-    expect(
-      (await targetFiles()).filter((f) => f.startsWith('f')),
-    ).toHaveLength(POPULATED);
-
-    stopTo();
-    stopFrom();
-    agent.scanner.stopWatch();
-    errSpy.mockRestore();
-    warnSpy.mockRestore();
-  });
-
-  // A connector outlives the agent using it: Node.restartAgent() rebuilds the
-  // agent from the EXISTING transport. A fresh agent must not inherit what the
-  // previous one was told, because those conclusions were about a folder state
-  // it does not have — and on a real fleet that left snapshot-bootstrap red on every
-  // run the suite has ever produced.
-  it('starts deaf to what a previous agent was told', async () => {
-    const io = new IoMem();
-    await io.init();
-    const db = new Db(io);
-    const treeKey = 'fsTree';
-    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-    const bs = new BsMem();
-    await fill(sourceDir, 4, 'peer');
-    const peerRef = await new FsDbAdapter(db, treeKey).storeFsTree(
-      await sourceTree(bs),
-    );
-
-    const socket = new SocketMock();
-    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    // The first agent consumes the ref…
-    const first = new FsAgent(targetDir, bs, {
-      ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
-    });
-    const stopFirst = await first.syncFromDb(db, connector, treeKey, {
-      cleanTarget: true,
-    });
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
-    await new Promise((r) => setTimeout(r, 800));
-    expect((await targetFiles()).filter((f) => f.startsWith('peer'))).toHaveLength(4);
-    stopFirst();
-    first.scanner.stopWatch();
-
-    // …the folder is then lost, and a NEW agent takes over the same connector.
-    for (const f of await targetFiles()) {
-      await rm(join(targetDir, f), { recursive: true, force: true });
-    }
-    const second = new FsAgent(targetDir, bs, {
-      ...ORIGIN_FIXTURE,
-      timeouts: { debounceMs: 1, processRefRetries: 0, recoveryRetries: 0 },
-    });
-    const stopSecond = await second.syncFromDb(db, connector, treeKey, {
-      cleanTarget: true,
-    });
-
-    // The peer re-advertises exactly what it advertised before. Without the
-    // reset this is dropped as already-delivered and the folder stays empty.
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: peerRef });
-    await new Promise((r) => setTimeout(r, 800));
-    expect((await targetFiles()).filter((f) => f.startsWith('peer'))).toHaveLength(4);
-
-    stopSecond();
-    second.scanner.stopWatch();
-    errSpy.mockRestore();
-  });
-
-  // Two nodes can refuse each other, each holding files the other lacks. An
-  // unthrottled answer to every refusal is a loop.
-  it('answers at most once per cooldown', async () => {
-    const io = new IoMem();
-    await io.init();
-    const db = new Db(io);
-    const treeKey = 'fsTree';
-    await db.core.createTableWithInsertHistory(createTreesTableCfg(treeKey));
-
-    const bs = new BsMem();
-    await fill(targetDir, POPULATED);
-    const adapter = new FsDbAdapter(db, treeKey);
-    const emptyRef = await adapter.storeFsTree(await sourceTree(bs));
-    await fill(sourceDir, 1, 'other');
-    const otherSparseRef = await adapter.storeFsTree(await sourceTree(bs));
-
-    const socket = new SocketMock();
-    const connector = new Connector(db, Route.fromFlat(`/${treeKey}+`), socket);
-    const agent = new FsAgent(targetDir, bs, {
-      ...ORIGIN_FIXTURE,
-      timeouts: {
-        debounceMs: 1,
-        processRefRetries: 0,
-        processRefRetryDelayMs: 1,
-        recoveryRetries: 0,
-      },
-    });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const stopTo = await agent.syncToDb(db, connector, treeKey);
-    const stopFrom = await agent.syncFromDb(db, connector, treeKey, {
-      cleanTarget: true,
-    });
-
-    warnSpy.mockClear();
-    socket.emit(connector.events.ref, { o: 'remote-peer', r: emptyRef });
-    await new Promise((r) => setTimeout(r, 300));
-    socket.emit(connector.events.ref, { o: 'other-peer', r: otherSparseRef });
-    await new Promise((r) => setTimeout(r, 300));
-
-    const answers = warnSpy.mock.calls.filter((c) =>
-      String(c[0]).includes('re-announcing'),
-    );
-    expect(answers).toHaveLength(1);
-
-    stopTo();
-    stopFrom();
-    agent.scanner.stopWatch();
-    errSpy.mockRestore();
-    warnSpy.mockRestore();
-  });
-
   // Nothing to answer WITH: an agent that has never pushed has no current ref,
   // and inventing one would be asserting a state it has not established.
   it('says nothing when it has no state of its own to offer', async () => {
@@ -548,9 +223,6 @@ describe('FsAgent — the mass-delete guard', () => {
       ...ORIGIN_FIXTURE,
       timeouts: {
         debounceMs: 1,
-        processRefRetries: 0,
-        processRefRetryDelayMs: 1,
-        recoveryRetries: 0,
       },
     });
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -601,6 +273,50 @@ describe('FsAgent — the mass-delete guard', () => {
     expect(await targetFiles()).toHaveLength(POPULATED);
   });
   // ...........................................................................
+  it('does not record a folder that emptied without the watcher seeing it go', async () => {
+    // The sender's half of the guard. A folder that empties while not one
+    // deletion was seen — a drive that went away, a restore that wiped it —
+    // is not somebody deleting files, and recording it would delete them on
+    // every node. The watcher is stopped here, so the test means the same
+    // thing on every platform: macOS reports a recursive delete as one event
+    // for the folder, Linux as one per file.
+    await fill(targetDir, 12);
+    const io = new IoMem();
+    await io.init();
+    const db = new Db(io);
+    await db.core.createTableWithInsertHistory(createTreesTableCfg('fsTree'));
+    const socket = new SocketMock();
+    const connector = new Connector(db, Route.fromFlat('/fsTree'), socket);
+    const agent = new FsAgent(targetDir, new BsMem(), {
+      ...ORIGIN_FIXTURE,
+      timeouts: { debounceMs: 1 },
+    });
+    const stopTo = await agent.syncToDb(db, connector, 'fsTree');
+    const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
+    try {
+      const own = agent.ownHead as string;
+      agent.scanner.stopWatch();
+      for (const file of await targetFiles()) await rm(join(targetDir, file));
+
+      // A receive records the folder's own work before anything else.
+      socket.emit(stateBeaconEvent(connector.route.flat), { r: own });
+      for (let i = 0; i < 300 && agent.signalsNeedingAction.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const [refusal] = agent.signalsNeedingAction;
+      expect(refusal?.kind).toBe('deletion/refused');
+      expect(refusal?.detail).toContain('12 of 12 files disappeared');
+      expect(refusal?.detail).toContain('The watcher did not see them go');
+      expect(refusal?.paths).toHaveLength(12);
+      expect(agent.ownHead, 'the disappearance was recorded').toBe(own);
+    } finally {
+      stopTo();
+      stopFrom();
+    }
+  });
+
+  // ...........................................................................
   it('reports each refusal where a client can read it', async () => {
     // THE REFUSAL IS A DEFERRED DECISION, AND SOMEBODY HAS TO BE ASKED.
     //
@@ -610,16 +326,17 @@ describe('FsAgent — the mass-delete guard', () => {
     // deletion simply never happens, on every node, and no message will fix
     // that.
     //
-    // Until a client asks the user, the least it can do is SAY SO. The log and
-    // the sync-error file already carry it; neither is readable by a UI on
-    // another machine, and "why did my deletion not arrive" is exactly the
-    // question that UI has to answer. See `README.public.md`, "Known constraints".
+    // Until a client asks the user, the least it can do is SAY SO: a log line
+    // is not readable by a UI on another machine, and "why did my deletion not
+    // arrive" is exactly the question that UI has to answer. A refusal is a
+    // `required` signal. See `README.public.md`, "Known constraints".
     const dir = await mkdtemp(join(tmpdir(), 'fs-agent-refusals-'));
     const agent = new FsAgent(dir);
     try {
-      expect(agent.refusedDeletions, 'a fresh agent has refused nothing').toEqual(
-        [],
-      );
+      expect(
+        agent.signalsNeedingAction,
+        'a fresh agent has refused nothing',
+      ).toEqual([]);
 
       (
         agent as unknown as {
@@ -630,37 +347,17 @@ describe('FsAgent — the mass-delete guard', () => {
             paths: readonly string[],
           ) => void;
         }
-      )._refuseDeletion('bucketSync', 150, 160, ['a.txt', 'b.txt']);
+      )._refuseDeletion('removals', 150, 160, ['a.txt', 'b.txt']);
 
-      const [refusal] = agent.refusedDeletions;
-      expect(refusal.route).toBe('bucketSync');
-      expect(refusal.wouldRemove).toBe(150);
-      expect(refusal.held).toBe(160);
+      const [refusal] = agent.signalsNeedingAction;
+      expect(refusal.kind).toBe('deletion/refused');
+      expect(refusal.action).toBe('required');
       expect(
         refusal.paths,
         'a client has no paths to put in front of the user',
       ).toEqual(['a.txt', 'b.txt']);
-      expect(refusal.atMs).toBeGreaterThan(0);
-
-      // Bounded: a hub that keeps re-announcing the same wipe must not grow
-      // this without limit.
-      for (let i = 0; i < REFUSED_DELETION_LOG_MAX + 5; i++) {
-        (
-          agent as unknown as {
-            _refuseDeletion: (
-              r: string,
-              w: number,
-              h: number,
-              p: readonly string[],
-            ) => void;
-          }
-        )._refuseDeletion('removals', i, 100, []);
-      }
-      expect(agent.refusedDeletions.length).toBe(REFUSED_DELETION_LOG_MAX);
-      // Newest kept, oldest dropped.
-      expect(
-        agent.refusedDeletions[REFUSED_DELETION_LOG_MAX - 1].wouldRemove,
-      ).toBe(REFUSED_DELETION_LOG_MAX + 4);
+      expect(refusal.detail).toContain('150 of 160');
+      expect(agent.signalTotals['deletion/refused']).toBe(1);
     } finally {
       agent.dispose();
       await rm(dir, { recursive: true, force: true });

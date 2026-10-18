@@ -33,7 +33,9 @@ async function main() {
   const serverIo = new IoMem();
   await serverIo.init();
 
-  const server = new Server(route, serverIo, new BsMem());
+  const server = new Server(route, serverIo, new BsMem(), {
+      stamp: { domain: 'test', hub: 'hub' },
+    });
   await server.init();
 
   socketIoServer.on('connection', async (socket) => {
