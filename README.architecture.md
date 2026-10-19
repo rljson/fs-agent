@@ -635,9 +635,50 @@ so a folder that produced two thousand refusals still says so. One signal names
 at most `SIGNAL_PATHS_MAX` (20) paths and counts the rest. `addOnce` keys are
 bounded too (`SIGNAL_ONCE_MAX`); `repair/blocked` is keyed on the **pair** of
 heads it is between. The log is persisted to `SIGNAL_LOG_FILE`
-(`.fsagent-signals.json`) inside the synced folder and read back lazily, without
-firing subscribers. `.sync-errors.log` stays the record of internal failures —
-exceptions, which are not signals.
+(`.fsagent-signals.json`) inside the synced folder, through a staging file and a
+rename, and read back lazily, without firing subscribers. `.sync-errors.log`
+stays the record of internal failures — exceptions, which are not signals.
+
+**A signal's `id` is derived, not counted**: a hash of what it says, with a
+counter only for two signals that say the same thing in one millisecond. A log
+written before ids existed gets the same ids on every read, so a host can key a
+row by one, or remember what a person has seen. A merge conflict names the merge
+(`head`), and a join names where each file it moved went (`copies`).
+
+## The history a host shows, and going back (`src/fs-history.ts`)
+
+A host lists a folder's past from the chain, never from a node's own insert
+rows: those record only the trees that node stored itself, so after a pull the
+newest row is not the state the folder is in.
+
+**The order is a walk, not a sort.** The chain is a graph — two lineages run
+side by side until a merge — and a person reads it a page at a time, so the
+walk keeps a queue and takes the newest waiting entry: by stamp (an
+announcement carries everything below the head it names, so an entry is never
+stamped later than one made on top of it; an unstamped entry has not reached
+the fleet and is newest of all), then within one announcement by the authoring
+node's time, a merge taking the time of the entry it was reached from. And an
+entry is never taken while one made on top of it waits, whatever the keys say.
+The queue is the page's cursor.
+
+**Going back is an edit.** `restoreRevision` records what the folder holds,
+writes the revision with `cleanTarget`, and authors the result on top of the own
+head, so every node follows and nothing leaves the history. Three things make
+that safe:
+
+- a file the scanner deferred — new, or written to while the scan ran — is in
+  no entry yet, and a prune or an overwrite would lose it with no copy
+  anywhere; the restore rescans until nothing is deferred, and gives up as
+  `busy` after `RESTORE_SETTLE_PASSES`;
+- the prune's deletions are recorded as deletions seen, so the authoring guard
+  does not hold back what a person asked for;
+- the mass-delete guard judges before anything is written. Judged after, a
+  refused restore had already overwritten what the tree holds, and the watcher
+  recorded that half as an edit.
+
+A prune with `cleanTarget` touches content only: what the scanner ignores — the
+agent's own state and signal log, `.fsagent-recovered/`, the host's ignore
+list — is in no tree, so no tree's absence can delete it.
 
 ## What grows, and what bounds it
 

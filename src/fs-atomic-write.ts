@@ -41,6 +41,7 @@
 // what a lost watch misses, and nothing picks up a blend.
 // .............................................................................
 
+import { renameSync, unlinkSync, writeFileSync } from 'fs';
 import { open, rename, unlink, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
@@ -94,6 +95,34 @@ export const atomicWriteFile = async (
     } catch {
       // The temp may not exist — the staging write is what usually failed,
       // and an impossible directory fails before anything is staged at all.
+    }
+    throw err;
+  }
+};
+
+/**
+ * {@link atomicWriteFile}, synchronously.
+ *
+ * For the agent's own bookkeeping files — the signal log and the state file —
+ * which are written from places that cannot wait, and which a host reads while
+ * the agent runs. Written in place, a crash between the truncate and the write
+ * left an empty file, and the next start could not read the history it held.
+ * @param filePath - Destination path.
+ * @param content - Bytes to write.
+ */
+export const atomicWriteFileSync = (
+  filePath: string,
+  content: Buffer | string,
+): void => {
+  const tmp = atomicTmpPath(filePath);
+  try {
+    writeFileSync(tmp, content);
+    renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // As above: the staging write is what usually failed.
     }
     throw err;
   }

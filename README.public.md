@@ -253,13 +253,16 @@ waiting on a blob nobody serves would keep this machine from recording its own
 work. A timed-out apply is tried again the next time the hub says its head. A
 large catalogue wants a larger `extract` and `restore` than the defaults.
 
-### `restoreOptions.cleanTarget` — read this before setting it
+### `cleanTarget` — read this before setting it
 
 `cleanTarget: true` makes `restore()` prune anything not in the tree. **The sync
 never uses it**: an apply deletes exactly what an edit descending from this
 machine's state removed, and nothing else. It is honoured only by a direct
 `restore()` or `loadFromDb()` call, where *you* are asserting the tree is the
-whole truth.
+whole truth — and by `restoreRevision`, which is that assertion made safely.
+It prunes content only: what the scanner ignores is never deleted, and a prune
+that would take a large part of the folder is refused before anything is
+written.
 
 ---
 
@@ -353,8 +356,39 @@ once: both versions were kept, and the one that reached the fleet later keeps
 the name. That is the order the hub heard them in, not who edited last — which
 nobody can know without trusting two machines' clocks.
 
+Every signal has an `id`, derived from what it says and the same on every
+read, so a UI can key a row by it. A merge conflict names the merge (`head`);
+a join names where each file it moved went (`copies`).
+
 The full table of kinds and the field reference are in
 [README.api.md § Signals](README.api.md#signals).
+
+## Showing the history, and going back
+
+```ts
+const head = await agent.headInfo(); // where the folder stands, with its stamp
+const page = await agent.history({ limit: 50 }); // newest first
+const next = await agent.history({ cursor: page.cursor });
+const relation = await agent.relationTo(hubHead); // same, behind, ahead, fork
+
+await agent.restoreRevision(page.entries[3].head); // 'restored' | 'unknown' | 'busy'
+```
+
+**The history is the edit chain**, the same order on every node: every edit,
+every merge with both of its parents, whichever machine made it. An entry says
+what it changed and removed, when its author made it, and — once the hub said
+it back — its stamp. A host whose agent runs in another process reads the same
+pages from the store with `readFsHistory(db, treeKey, { from })`, which writes
+nothing.
+
+**Going back makes the folder exactly that revision**, deleting what it lacks,
+and records the result as a new edit that every machine follows. Nothing is
+lost: work not yet recorded is recorded first, the revision being left stays
+in the history, and a file still being written is waited out (`busy` when it
+does not finish). A revision that would delete a large part of the folder is
+refused with a `MassDeleteRefusedError`, before anything is written.
+
+Details in [README.api.md § The history](README.api.md#the-history).
 
 ## Reading what the agent is doing
 
@@ -388,7 +422,8 @@ const tree = await agent.extract();
 // Tree -> folder, additively
 await agent.restore(tree, './elsewhere');
 
-// Tree -> folder, exactly: prune anything not in the tree
+// Tree -> folder, exactly: prune anything not in the tree that the scanner
+// would see
 await agent.restore(tree, './elsewhere', { cleanTarget: true });
 ```
 
@@ -527,7 +562,7 @@ moment after every edit; `diverged` for a long time, with `lastRepair.action`
 | --- | --- |
 | [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, the conflict table, the stamp, the guards |
 | [README.api.md](README.api.md) | every export, grouped by module — the shape, where this document gives the advice |
-| [README.tests.md](README.tests.md) | the 723 scenarios this package ships, by what they prove |
+| [README.tests.md](README.tests.md) | the 770 scenarios this package ships, by what they prove |
 
 Related packages: `@rljson/rljson` (trees), `@rljson/db` (database and
 `Connector`), `@rljson/io` (sockets and storage), `@rljson/bs` (blobs),

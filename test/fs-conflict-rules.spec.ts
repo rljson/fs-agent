@@ -129,6 +129,20 @@ describe('the conflict table, on disk', () => {
       .map(({ signal }) => signal)
       .filter((signal) => signal.paths.includes(path));
 
+  /**
+   * Asserts that every signal about `path` names the merge that raised it, as
+   * the history of the node that said it lists that merge.
+   * @param path - The path.
+   */
+  const namesItsMerge = async (path: string) => {
+    for (const { node, signal } of mesh!.signals) {
+      if (!signal.paths.includes(path)) continue;
+      const page = await mesh!.node(node).agent.history({ limit: 20 });
+      const entry = page.entries.find((e) => e.head === signal.head);
+      expect(entry?.kind, `${node}'s signal names no merge`).toBe('merge');
+    }
+  };
+
   // ...........................................................................
   it('C1: a change that descends from the other side is applied, and is no conflict', async () => {
     const { a, b } = await twoNodes('c1', { 'doc.txt': 'v1' });
@@ -181,9 +195,11 @@ describe('the conflict table, on disk', () => {
       expect(signal).toMatchObject({
         kind: 'conflict/arbitrary',
         action: 'review',
+        decidedBy: 'stamp',
         copyPath: copy,
       });
     }
+    await namesItsMerge('shared.txt');
   });
 
   // ...........................................................................
@@ -250,7 +266,10 @@ describe('the conflict table, on disk', () => {
     for (const signal of signals) {
       expect(signal.kind).toBe('conflict/arbitrary');
       expect(signal.copyPath).toBeUndefined();
+      // A rule decided it — data beats absence — and no stamp was asked.
+      expect(signal.decidedBy).toBe('chain');
     }
+    await namesItsMerge('doc.txt');
   });
 
   // ...........................................................................

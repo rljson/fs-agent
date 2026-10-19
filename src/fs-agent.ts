@@ -8,7 +8,7 @@ import { Bs, BsMem } from '@rljson/bs';
 import { hip } from '@rljson/hash';
 import { ClientId, Route, SyncConfig } from '@rljson/rljson';
 
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync } from 'fs';
 import {
   mkdir,
   readdir,
@@ -24,6 +24,7 @@ import { dirname, join, relative, resolve, sep } from 'path';
 import {
   ATOMIC_TMP_PREFIX,
   atomicWriteFile,
+  atomicWriteFileSync,
   atomicWriteStream,
 } from './fs-atomic-write.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
@@ -42,10 +43,17 @@ import {
   type Introducer,
 } from './fs-merge.ts';
 import {
+  walkFsHistory,
+  type FsHistoryEntry,
+  type FsHistoryOptions,
+  type FsHistoryPage,
+} from './fs-history.ts';
+import {
   receive,
   type AntiEntropyStatus,
   type ReceiveDeps,
   type ReceiveOutcome,
+  type Relation,
 } from './fs-receive.ts';
 import { planAuthoring } from './fs-send.ts';
 import { FsStamps } from './fs-stamps.ts';
@@ -345,6 +353,12 @@ export const STAMP_ASK_MAX_MS = 30_000;
  * intentional.
  */
 export const MASS_DELETE_MAX_RATIO = 0.3;
+
+/**
+ * How many passes {@link FsAgent.restoreRevision} makes over a folder that
+ * holds a file still being written, before it gives up and changes nothing.
+ */
+export const RESTORE_SETTLE_PASSES = 10;
 
 /**
  * A restore that could not put the folder into the state the tree describes.
@@ -696,13 +710,6 @@ export class FsAgent {
   }
 
   /**
-   * Whether this node and the hub agree, and what the anti-entropy has done
-   * about it when they did not. `null` until {@link syncFromDb} runs.
-   *
-   * A divergence that lasts is the one thing a lost message leaves behind, and
-   * until now nothing reported it: this is what a diagnostics view should show.
-   */
-  /**
    * Everything that happened to this folder that a person might care about,
    * oldest first — see {@link FsSignal}.
    *
@@ -752,6 +759,13 @@ export class FsAgent {
     return this._signals.subscribe(listener);
   }
 
+  /**
+   * Whether this node and the hub agree, and what the anti-entropy has done
+   * about it when they did not. `null` until {@link syncFromDb} runs.
+   *
+   * A divergence that lasts is the one thing a lost message leaves behind, and
+   * until now nothing reported it: this is what a diagnostics view should show.
+   */
   get antiEntropyStatus(): AntiEntropyStatus | null {
     return this._hubStatus;
   }
@@ -811,15 +825,19 @@ export class FsAgent {
    * what to emit about.
    * @param recovered - Paths moved aside because the history removed them.
    * @param conflicted - Paths edited here while away and changed elsewhere.
+   * @param copies - Where each moved file went, `path → name`; a path the
+   * join could not move has no entry.
    */
   private _signalJoinOutcome(
     recovered: readonly string[],
     conflicted: readonly string[],
+    copies: Readonly<Record<string, string>>,
   ): void {
     if (recovered.length > 0) {
       this._signal({
         kind: 'join/recovered',
         paths: recovered,
+        copies,
         action: 'review',
         decidedBy: 'chain',
         detail:
@@ -832,6 +850,7 @@ export class FsAgent {
       this._signal({
         kind: 'join/conflicted',
         paths: conflicted,
+        copies,
         action: 'review',
         decidedBy: 'chain',
         detail:
@@ -875,13 +894,19 @@ export class FsAgent {
     }
   }
 
-  /** Writes the signal log, best effort. */
+  /**
+   * Writes the signal log, best effort.
+   *
+   * Through a staging file, because a host reads this file while the agent
+   * writes it, and a crash between truncate and write left an empty file —
+   * which the next start could not parse, so the whole history was dropped and
+   * the next signal overwrote it.
+   */
   private _persistSignals(): void {
     try {
-      writeFileSync(
+      atomicWriteFileSync(
         join(this._rootPath, SIGNAL_LOG_FILE),
         JSON.stringify(this._signals.persisted(), null, 1),
-        'utf-8',
       );
     } catch (err) {
       this._writeSyncError('signals/persist', err);
@@ -1082,26 +1107,27 @@ export class FsAgent {
     // prune files that already existed pre-restore — any file that appears
     // *during* the restore is a fresh user write and must be preserved
     // (protects against the user saving while a restore is in flight).
-    const preRestore = options?.cleanTarget
-      ? await this._collectAllFiles(target)
-      : new Set<string>();
-
-    // Recursively restore from tree structure
-    this._restoreWritten = 0;
-    this._restoreSkipped = 0;
-    this._restorePruned = 0;
-    this._restoreLocked = [];
-    this._restoreUnavailable = [];
-    this._restoreImpossible = [];
-    this._restoreRetyped = 0;
-    await this._restoreTree(
-      tree.rootHash,
-      tree.trees,
-      target,
-      target === this._rootPath,
+    //
+    // And only CONTENT. What the scanner ignores — this agent's own state and
+    // signal log, the set-aside copies a person was pointed to, whatever the
+    // host told it to leave alone — is in no tree, so a tree that lacks it
+    // says nothing about it: never pruned, never counted.
+    const preRestore = new Set(
+      options?.cleanTarget
+        ? [...(await this._collectAllFiles(target))].filter(
+            (file) =>
+              !this._scanner.ignores(relative(target, file).split(sep).join('/')),
+          )
+        : [],
     );
+
     if (options?.cleanTarget) {
       // How much of this folder would the prune take with it?
+      //
+      // Judged BEFORE anything is written, so a refusal leaves the folder
+      // exactly as it was. Judged after, a refused restore had already
+      // overwritten what the tree holds, and the watcher recorded that half as
+      // an edit of its own.
       //
       // Only files that were here BEFORE the restore can be pruned, so that
       // is the population to judge against — a file written during the
@@ -1164,15 +1190,31 @@ export class FsAgent {
           [...preRestore].filter((p) => !expectedFiles.has(p)),
           `The incoming tree has ${expectedFiles.size}.`,
         );
-        // AND THIS ONE THROWS. The restore is mid-flight and its caller has
-        // to know the folder was left alone.
+        // AND THIS ONE THROWS: its caller has to know the folder was left
+        // alone, and nothing has been written yet.
         throw new MassDeleteRefusedError(
           wouldPrune,
           preRestore.size,
           expectedFiles.size,
         );
       }
+    }
 
+    // Recursively restore from tree structure
+    this._restoreWritten = 0;
+    this._restoreSkipped = 0;
+    this._restorePruned = 0;
+    this._restoreLocked = [];
+    this._restoreUnavailable = [];
+    this._restoreImpossible = [];
+    this._restoreRetyped = 0;
+    await this._restoreTree(
+      tree.rootHash,
+      tree.trees,
+      target,
+      target === this._rootPath,
+    );
+    if (options?.cleanTarget) {
       await this._pruneExtraneous(
         target,
         expectedDirs,
@@ -2254,14 +2296,26 @@ export class FsAgent {
    * nothing else will ever tell anybody it stopped working.
    * @param path - The file to move, relative to the root, `/`-separated.
    * @param name - Where to move it, same form.
+   * @param copies - Where each file that WAS moved went, `path → name`: what
+   * the join signal tells a host. A file that could not be moved is left out,
+   * because its own version is gone once the restore overwrites it.
    */
-  private async _setAside(path: string, name: string): Promise<void> {
+  private async _setAside(
+    path: string,
+    name: string,
+    copies: Record<string, string>,
+  ): Promise<void> {
     const from = join(this._rootPath, ...path.split('/'));
     const to = join(this._rootPath, ...name.split('/'));
     await mkdir(dirname(to), { recursive: true });
-    await rename(from, to).catch((err) => {
-      this._writeSyncError(`join/setAside/${path}`, err);
-    });
+    await rename(from, to).then(
+      () => {
+        copies[path] = name;
+      },
+      (err) => {
+        this._writeSyncError(`join/setAside/${path}`, err);
+      },
+    );
   }
 
   // ...........................................................................
@@ -2317,6 +2371,147 @@ export class FsAgent {
   /** The chain entry this node stands on, if any. */
   get ownHead(): string | undefined {
     return this._ownHead;
+  }
+
+  // ...........................................................................
+  // FOR A HOST: where the folder stands, how it got there, and going back.
+  //
+  // Everything a person is shown about a folder's history is read from the
+  // chain, the one order every node agrees on — never from this node's own
+  // insert rows, which miss everything it took from a peer.
+
+  /**
+   * The entry this folder stands on, with its stamp: what a host shows as the
+   * folder's current revision.
+   * @returns The entry, or `undefined` while no sync runs or the folder has no
+   * head yet.
+   */
+  async headInfo(): Promise<FsHistoryEntry | undefined> {
+    const head = this._ownHead;
+    if (head === undefined) return undefined;
+    return (await this.history({ from: head, limit: 1 })).entries[0];
+  }
+
+  /**
+   * One page of the folder's history, newest first: every edit, merge and
+   * root below the own head, whichever node made it — see `fs-history.ts` for
+   * the order.
+   *
+   * A host whose agent runs in another process reads the same pages from the
+   * store with `readFsHistory`.
+   * @param options - Where to start (default: the own head), or the cursor of
+   * the previous page, and how many entries.
+   * @returns The page; empty while no sync runs or the folder has no head.
+   */
+  async history(options: FsHistoryOptions = {}): Promise<FsHistoryPage> {
+    const chain = this._chain;
+    const stamps = this._stamps;
+    if (!chain || !stamps) return { entries: [], missing: [] };
+    return walkFsHistory(
+      {
+        entry: (head) => chain.entry(head),
+        stamp: (head) => stamps.get(head),
+      },
+      { from: this._ownHead, ...options },
+    );
+  }
+
+  /**
+   * How this folder's head stands to another — the hub's, a peer's: the same
+   * (`same`), behind it, ahead of it, forked from it, or not decidable from
+   * what this node can read (`incomplete`).
+   *
+   * Two different heads can hold the same files — after two nodes merged the
+   * same fork, say. Whether they do is a question for the tree refs, not this.
+   * @param head - The other head.
+   * @returns The relation, or `undefined` while no sync runs or the folder has
+   * no head.
+   */
+  async relationTo(head: string): Promise<Relation | undefined> {
+    const own = this._ownHead;
+    if (own === undefined || !this._chain) return undefined;
+    return this._chain.relate(own, head);
+  }
+
+  /**
+   * Puts the folder back to a revision of its history, EXACTLY, and makes that
+   * the newest edit, so every node follows.
+   *
+   * Exactly: what the revision holds is written, and what it lacks is
+   * deleted. An older `restore` or `loadFromDb` of the same tree only adds and
+   * overwrites, so files made after the revision stay and the folder ends up
+   * in a state no revision ever had.
+   *
+   * Nothing is lost by it. Whatever the folder holds beyond its head is
+   * recorded first, and the revision being left stays in the history, from
+   * where it can be restored in turn.
+   *
+   * Rejects while no sync runs or the folder has no head; with a
+   * `MassDeleteRefusedError`, changing nothing, when the revision would delete
+   * a large part of the folder — the guard every prune has; and with a
+   * `RestoreIncompleteError` when a file could not be written, the rest of the
+   * revision in place.
+   * @param head - The revision: a chain entry from {@link history}.
+   * @returns `restored`; `unknown` when this node cannot read the entry or its
+   * tree; `busy` while a file in the folder is still being written — nothing
+   * was changed in either case, and a busy folder can be asked again.
+   */
+  async restoreRevision(
+    head: string,
+  ): Promise<'restored' | 'unknown' | 'busy'> {
+    if (this._ownHead === undefined || !this._chain) {
+      throw new Error(
+        `${this._tag} restoreRevision: no history to restore from — the ` +
+          `folder is not syncing yet`,
+      );
+    }
+    return this._exclusive(() =>
+      this._writing(async () => {
+        if (!(await this._recordFolder())) return 'busy';
+        const target = await this._treeOf(head);
+        if (!target) return 'unknown';
+
+        const content = this._getFileContentMap(target.tree);
+        await this.restore(target.tree, undefined, { cleanTarget: true }).finally(
+          () => {
+            // What the prune removed, a person asked to remove: recorded as a
+            // deletion seen, not one a scan inferred, which the guard would
+            // hold back. A refused restore removed nothing, and marks nothing.
+            for (const path of this._ownContent.keys()) {
+              const full = join(this._rootPath, ...path.split('/'));
+              if (!content.has(path) && !existsSync(full)) {
+                this._watched.add(path);
+              }
+            }
+          },
+        );
+        await this._author(await this._scanner.scanFresh());
+        return 'restored';
+      }),
+    );
+  }
+
+  /**
+   * Records what the folder holds before something writes over it, waiting
+   * out a file the scan will not read yet.
+   *
+   * A pass leaves out a file it has never read and one written to while it
+   * ran, and reads them once they settle — right for a sync, which only ever
+   * adds a later version. A restore overwrites and prunes, and a file no entry
+   * holds yet is somebody's work with no copy anywhere: measured, a file
+   * saved just before a restore was deleted by it.
+   * @returns Whether everything was recorded; `false` while a file is still
+   * being written after {@link RESTORE_SETTLE_PASSES} passes.
+   */
+  private async _recordFolder(): Promise<boolean> {
+    for (let pass = 0; pass < RESTORE_SETTLE_PASSES; pass++) {
+      await this._author(await this._scanner.scanFresh());
+      if (this._scanner.deferred.length === 0) return true;
+      await new Promise((resolve) =>
+        setTimeout(resolve, this._scanner.settleMs + 50),
+      );
+    }
+    return false;
   }
 
   /** When this agent last finished something that may write to the folder. */
@@ -2425,10 +2620,11 @@ export class FsAgent {
     const stampEpochs = (this._stamps as FsStamps).epochs;
     this._writtenEpochs = JSON.stringify(stampEpochs);
     try {
-      writeFileSync(
+      // Staged, like the signal log: an empty state file after a crash read
+      // as no head at all, and the restart joined like a stranger.
+      atomicWriteFileSync(
         join(this._rootPath, AGENT_STATE_FILE),
         JSON.stringify({ ownHead: this._ownHead, stampEpochs }),
-        'utf-8',
       );
     } catch (err) {
       this._writeSyncError('state/write', err);
@@ -2702,16 +2898,18 @@ export class FsAgent {
     });
 
     const taken = new Set<string>([...folder.keys(), ...headContent.keys()]);
+    const copies: Record<string, string> = {};
     for (const path of plan.recover) {
-      await this._setAside(path, `${RECOVERED_DIR}/${recoveredName(path, taken)}`);
-    }
-    for (const path of plan.conflict) {
       await this._setAside(
         path,
-        joinCopyName(path, Date.now(), taken),
+        `${RECOVERED_DIR}/${recoveredName(path, taken)}`,
+        copies,
       );
     }
-    this._signalJoinOutcome(plan.recover, plan.conflict);
+    for (const path of plan.conflict) {
+      await this._setAside(path, joinCopyName(path, Date.now(), taken), copies);
+    }
+    this._signalJoinOutcome(plan.recover, plan.conflict, copies);
 
     await this.restore(joined.tree, undefined, { cleanTarget: false });
     this._setOwn(head, headContent);
@@ -3191,7 +3389,14 @@ export class FsAgent {
         kind: conflict.kind,
         paths: [conflict.path],
         action: conflict.kind === 'collision/type' ? 'required' : 'review',
-        decidedBy: conflict.kind === 'collision/type' ? 'chain' : 'stamp',
+        // Only two versions of one file are ordered by the hub's stamps. A
+        // collision keeps both by rule, and a deletion against an edit keeps
+        // the edit by rule — neither asked a stamp anything.
+        decidedBy:
+          conflict.kind === 'conflict/arbitrary' && conflict.copyPath
+            ? 'stamp'
+            : 'chain',
+        head: entry.head,
         ...(conflict.copyPath ? { copyPath: conflict.copyPath } : {}),
         detail: conflict.copyPath
           ? `two machines changed "${conflict.path}" at once; both versions were kept and the other one is at "${conflict.copyPath}"`

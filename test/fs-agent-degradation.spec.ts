@@ -215,12 +215,15 @@ describe('FsAgent — degradation when a dependency fails', () => {
     // file alone and record it — the restore then overwrites it, which loses
     // less than refusing to join at all.
 
+    // Where each file that WAS moved went: what the join signal reports.
+    let copies: Record<string, string>;
+    beforeEach(() => {
+      copies = {};
+    });
     const setAside = (a: FsAgent, from: string, to: string): Promise<void> =>
-      priv<(f: string, t: string) => Promise<void>>(a, '_setAside').call(
-        a,
-        from,
-        to,
-      );
+      priv<
+        (f: string, t: string, c: Record<string, string>) => Promise<void>
+      >(a, '_setAside').call(a, from, to, copies);
 
     it('records the failure when the file is already gone', async () => {
       await setAside(agent, 'vanished.txt', '.fsagent-recovered/vanished.txt');
@@ -228,6 +231,8 @@ describe('FsAgent — degradation when a dependency fails', () => {
         syncErrors(dir),
         'a file that could not be set aside was not recorded',
       ).toContain('join/setAside/vanished.txt');
+      // And not reported as kept anywhere: there is no copy to point at.
+      expect(copies).toEqual({});
     });
 
     it('records the failure when the destination is a directory', async () => {
@@ -244,6 +249,7 @@ describe('FsAgent — degradation when a dependency fails', () => {
       expect(syncErrors(dir)).toContain('join/setAside/doc.txt');
       // And the file it could not move is still where it was.
       expect(existsSync(join(dir, 'doc.txt'))).toBe(true);
+      expect(copies).toEqual({});
     });
 
     it('moves the file when it CAN, creating the directory on the way', async () => {
@@ -258,6 +264,9 @@ describe('FsAgent — degradation when a dependency fails', () => {
         existsSync(join(dir, '.fsagent-recovered', 'deleted-while-away.txt')),
       ).toBe(true);
       expect(syncErrors(dir)).not.toContain('join/setAside');
+      expect(copies).toEqual({
+        'deleted-while-away.txt': '.fsagent-recovered/deleted-while-away.txt',
+      });
     });
   });
   // ...........................................................................

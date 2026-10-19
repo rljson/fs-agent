@@ -5,7 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import { existsSync } from 'fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,7 @@ import {
   FsAgent,
   MASS_DELETE_MIN_FILES,
   MassDeleteRefusedError,
+  RECOVERED_DIR,
   SYNC_ERROR_FILE,
 } from '../src/fs-agent.ts';
 import { SIGNAL_LOG_FILE } from '../src/fs-signals.ts';
@@ -187,6 +188,56 @@ describe('FsAgent — the mass-delete guard', () => {
     ).rejects.toBeInstanceOf(MassDeleteRefusedError);
     expect(await targetFiles()).toHaveLength(total);
     errSpy.mockRestore();
+  });
+
+  it('writes nothing when it refuses: the guard judges before the restore', async () => {
+    // Judged after, a refused restore had already overwritten what the tree
+    // holds — and the watcher recorded that half as an edit of its own.
+    const bs = new BsMem();
+    const total = 400;
+    await fill(sourceDir, total);
+    await fill(targetDir, total);
+    for (let i = 0; i < 300; i++) await rm(join(sourceDir, `f${i}.txt`));
+    await writeFile(join(sourceDir, 'f399.txt'), 'changed at the source');
+    const tree = await sourceTree(bs);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      new FsAgent(targetDir, bs, ORIGIN_FIXTURE).restore(tree, targetDir, {
+        cleanTarget: true,
+      }),
+    ).rejects.toBeInstanceOf(MassDeleteRefusedError);
+    expect(await readFile(join(targetDir, 'f399.txt'), 'utf8')).toBe(
+      'content-399',
+    );
+    errSpy.mockRestore();
+  });
+
+  it('prunes content only — never what the sync does not see', async () => {
+    // The agent's own log, the copies a join set aside for a person, and what
+    // the host told it to ignore are in no tree, so a tree that lacks them
+    // says nothing about them.
+    const bs = new BsMem();
+    await fill(sourceDir, 3);
+    await fill(targetDir, 3);
+    await writeFile(join(targetDir, 'extra.txt'), 'not in the tree');
+    await writeFile(join(targetDir, SYNC_ERROR_FILE), 'an earlier error');
+    await mkdir(join(targetDir, RECOVERED_DIR), { recursive: true });
+    await writeFile(join(targetDir, RECOVERED_DIR, 'old (recovered).txt'), 'kept');
+    await writeFile(join(targetDir, 'scratch.tmp'), 'ignored by the host');
+    const tree = await sourceTree(bs);
+
+    await new FsAgent(targetDir, bs, {
+      ...ORIGIN_FIXTURE,
+      ignore: ['*.tmp'],
+    }).restore(tree, targetDir, { cleanTarget: true });
+
+    expect(existsSync(join(targetDir, 'extra.txt'))).toBe(false);
+    expect(existsSync(join(targetDir, SYNC_ERROR_FILE))).toBe(true);
+    expect(
+      existsSync(join(targetDir, RECOVERED_DIR, 'old (recovered).txt')),
+    ).toBe(true);
+    expect(existsSync(join(targetDir, 'scratch.tmp'))).toBe(true);
   });
 
   // Emptying a small folder is an ordinary edit. A guard that blocked it would

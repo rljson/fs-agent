@@ -8,7 +8,7 @@ found in the LICENSE file in the root of this package.
 
 # @rljson/fs-agent — API reference
 
-Every symbol the package exports, grouped by what it is for. **46 exports.**
+Every symbol the package exports, grouped by what it is for. **63 exports.**
 
 Most consumers need only the first section. The rest is exported because a host
 builds on it — a scanner to watch a folder, the chain to show a history, an
@@ -19,7 +19,8 @@ to reach for every part.
 | --- | --- |
 | to sync a folder | [The agent](#the-agent) |
 | to know what the agent did | [Signals](#signals) · [Observability](#observability) |
-| the history itself | [The edit chain](#the-edit-chain) |
+| to show a folder's history, or go back to a revision | [The history](#the-history) |
+| the chain underneath | [The edit chain](#the-edit-chain) |
 | to scan, store or restore a folder yourself | [Scanner and adapters](#scanner-and-adapters) |
 | to write into a synced folder | [Utilities](#utilities) |
 | the design behind any of it | [README.architecture.md](README.architecture.md) |
@@ -46,9 +47,13 @@ pass `client.bs`, or use `FsAgent.fromClient`, which wires this correctly.
 | `syncToDb(db, connector, treeKey)` | `Promise<() => void>` | **sending.** Watches the folder, authors an entry per change, announces its head. Returns `stop()` |
 | `syncFromDb(db, connector, treeKey)` | `Promise<() => void>` | **receiving.** Hears the heads the network says and applies, adopts, announces or merges. Returns `stop()` |
 | `ownHead` | `string \| undefined` | the chain entry this folder stands on; persisted in `.fsagent-state.json` |
+| `headInfo()` | `Promise<FsHistoryEntry \| undefined>` | that entry as the history lists it — what it changed, when, and its stamp. See [The history](#the-history) |
+| `history(options?)` | `Promise<FsHistoryPage>` | one page of the folder's history, newest first |
+| `relationTo(head)` | `Promise<Relation \| undefined>` | how this folder's head stands to another: `same`, `behind`, `ahead`, `fork` or `incomplete` |
+| `restoreRevision(head)` | `Promise<'restored' \| 'unknown' \| 'busy'>` | makes the folder exactly that revision, as a new edit every node follows |
 | `dispose()` | `void` | releases the watcher and abandons a pending join |
 | `extract()` | `Promise<FsTree>` | scans the folder into a tree, without storing or announcing it |
-| `restore(tree, targetPath?, options?)` | `Promise<void>` | writes a tree to disk. See [`RestoreOptions`](#interface-restoreoptions) |
+| `restore(tree, targetPath?, options?)` | `Promise<void>` | writes a tree to disk. See [`RestoreOptions`](#interface-restoreoptions) and [the restore errors](#restore-errors) |
 | `storeInDb(db, treeKey, options?)` | `Promise<string>` | scans and stores, returning the tree ref |
 | `loadFromDb(db, treeKey, rootRef, targetPath?, options?)` | `Promise<void>` | fetches a tree by ref and writes it out |
 | `getTree()` | `FsTree \| null` | the last scanned tree |
@@ -125,6 +130,7 @@ a host aggregating several agents can own one and feed it from each `onSignal`.
 
 | field | type | |
 | --- | --- | --- |
+| `id` | `string` | the signal's identity: a hash of what it says, unique within the log, the same on every read. Key a row by it, or remember by it what a person has seen |
 | `kind` | `FsSignalKind` | what happened |
 | `at` | `number` | epoch ms |
 | `paths` | `readonly string[]` | affected paths, sorted, at most `SIGNAL_PATHS_MAX` |
@@ -132,13 +138,15 @@ a host aggregating several agents can own one and feed it from each `onSignal`.
 | `action` | `FsSignalAction` | whether a person has to do something |
 | `decidedBy` | `FsSignalDecidedBy` | who chose the outcome |
 | `copyPath` | `string` | where the version that lost the path was kept |
+| `copies` | `Record<string, string>` | for a join: where each named path's own version went, original → copy. A path the join could not move has none |
+| `head` | `string` | the chain entry the signal belongs to — for a merge conflict, the merge, which `history()` lists |
 | `detail` | `string` | one sentence for a person; never a stack trace |
 
 ### `type FsSignalKind`
 
 | `kind` | `action` | what it means |
 | --- | --- | --- |
-| `conflict/arbitrary` | `review` | two machines changed one file at once, or one deleted what the other edited. Both versions were kept (`copyPath`), or the edit was; which keeps the name follows the order the fleet heard them in |
+| `conflict/arbitrary` | `review` | two machines changed one file at once, or one deleted what the other edited. Both versions were kept (`copyPath`, `decidedBy: 'stamp'`): which keeps the name follows the order the fleet heard them in. Or the edit was (no `copyPath`, `decidedBy: 'chain'`): an edit beats a deletion by rule |
 | `collision/type` | **`required`** | a directory and a file at one path: the directory keeps it, the file is at `copyPath` |
 | `deletion/refused` | **`required`** | a deletion beyond the guard's floors was not made — not authored at the sender, not applied at a receiver |
 | `join/recovered` | `review` | a joining machine moved files the history had removed into `.fsagent-recovered/` |
@@ -159,7 +167,8 @@ refused, so nothing was chosen. None of them compares two machines' clocks.
 
 ### `type FsSignalInput`
 
-What a producer passes before the sink stamps `at` and counts `paths`.
+What a producer passes before the sink stamps `at`, derives `id` and counts
+`paths`.
 
 ### `type FsSignalLog`
 
@@ -180,6 +189,115 @@ The persisted shape: `{ signals, totals }`.
 ### `SIGNAL_ONCE_MAX`
 
 `500` distinct "report once" keys remembered.
+
+---
+
+## The history
+
+**What a host shows about a folder's past, and how it goes back.** Read from
+the edit chain, the one order every node agrees on — not from a node's own
+insert rows, which miss every state it took from a peer.
+
+| member | |
+| --- | --- |
+| `agent.headInfo()` | where the folder stands, as one `FsHistoryEntry` |
+| `agent.history(options?)` | one page, newest first, from the own head or `options.from` |
+| `agent.relationTo(head)` | how the own head stands to another |
+| `agent.restoreRevision(head)` | goes back to a revision, exactly |
+| `readFsHistory(db, treeKey, options)` | the same pages from a store this process does not own |
+
+**The order.** Newest first by stamp — the announcement that first carried an
+entry to the fleet; an entry not stamped yet first of all — then, within one
+announcement, by the authoring node's time. Never an entry above one made on
+top of it. A page continues exactly where the last stopped:
+
+```ts
+let page = await agent.history({ limit: 50 });
+show(page.entries);
+while (page.cursor) {
+  page = await agent.history({ cursor: page.cursor });
+  show(page.entries);
+}
+if (page.missing.length > 0) say('older history is not on this machine');
+```
+
+**Going back.** `restoreRevision(head)` makes the folder exactly that
+revision: what it holds is written, what it lacks is deleted, and the result is
+authored as a new edit, so every node follows and the revision being left stays
+in the history. Work not yet recorded is recorded first, and a file still being
+written is waited out. It returns `unknown` for an entry this node cannot read,
+and `busy` when a file is still being written after the wait. It rejects with a
+`MassDeleteRefusedError` when the revision would delete a large part of the
+folder. In all three cases the folder is unchanged.
+
+### `interface FsHistoryEntry`
+
+An `FsChainEntry` (`head`, `timeId`, `treeRef`, `previous`, `changed`,
+`removed`) and:
+
+| field | type | |
+| --- | --- | --- |
+| `kind` | `'edit' \| 'merge' \| 'root'` | a change one node made; two lineages joined (`previous` names both); where a lineage began |
+| `at` | `number` | when the authoring node made the edit, epoch ms by **its** clock. Absent for a merge and a root, which carry no time |
+| `stamp` | `RefStamp` | the announcement that first carried it to the fleet, as this node learned it — the order no clock decides. Absent until this node learned it |
+
+Two entries with one `treeRef` hold the same files — a restore, or two merges
+of one fork.
+
+### `interface FsHistoryOptions`
+
+`from` — the entry to start from (the agent defaults it to its own head);
+`cursor` — the previous page's, which wins over `from`; `limit` — entries per
+page, default `FS_HISTORY_PAGE` (50), at most 500.
+
+### `interface FsHistoryPage`
+
+`entries`, newest first; `cursor`, absent when nothing is left (opaque — pass it
+back as it came); `missing`, entries named as a `previous` that this node cannot
+read, below which nothing can be listed.
+
+### `readFsHistory(db, treeKey, options)`
+
+The history from a database this process does not own — the store of an agent
+running in another process, opened read-only. Writes nothing: no table is
+created, and stamps are absent when their table is.
+
+### `walkFsHistory(source, options)` · `interface FsHistorySource`
+
+The walk underneath both, over any source that can read an entry
+(`entry(head)`) and its stamp (`stamp(head)`).
+
+### `readFsStamps(db, treeKey)`
+
+Every stamp a route's entries carry, read without writing: `Map<entry, RefStamp>`.
+
+### `FS_HISTORY_PAGE`
+
+`50` — a page's size when the caller does not say.
+
+### `type Relation`
+
+`{ verdict: 'same' | 'behind' | 'ahead' | 'incomplete' }` or
+`{ verdict: 'fork'; base }`. `incomplete`: an entry could not be read, so a
+fork cannot be told from a lag. Two different heads can hold the same files;
+compare their tree refs for that.
+
+### `type ReceiveOutcome`
+
+What receiving one head made a node do: `no-head`, `in-sync`, `applied`,
+`refused`, `announced`, `adopted`, `merged`, `deferred` or `blocked`.
+
+### Restore errors
+
+A restore that could not finish rejects with a `RestoreIncompleteError`:
+
+| class | |
+| --- | --- |
+| `MassDeleteRefusedError` | the prune would delete a large part of the folder (`wouldPrune`, `totalFiles`, `incomingFiles`). Judged before anything is written: the folder is unchanged |
+| `PartialRestoreError` | files another process holds open; everything else was written |
+| `BlobUnavailableError` | content no reachable store serves yet |
+| `UnwritablePathError` | a path this filesystem rejects |
+| `DiskFullError` | no space left |
 
 ---
 
@@ -324,6 +442,11 @@ produce bytes nobody wrote — measured at 1 520 blended pairs in 2 000.
 ### `atomicWriteFile(path, content)`
 
 Writes to a temporary file beside the target and renames it into place.
+
+### `atomicWriteFileSync(path, content)`
+
+The same, synchronously — for a small file that must be on disk before the
+caller returns. The agent writes its signal log and state file through it.
 
 ### `atomicWriteStream(path, stream)`
 

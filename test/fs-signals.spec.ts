@@ -101,6 +101,106 @@ describe('FsSignals', () => {
   });
 
   // ...........................................................................
+  describe('identity', () => {
+    // A host keys a row by the id, and remembers by it what a person has
+    // already seen — so the id must name the event, the same on every read.
+
+    it('derives the id from what the signal says', () => {
+      const one = new FsSignals().add(aSignal({ at: 7, paths: ['a.txt'] }));
+      const again = new FsSignals().add(aSignal({ at: 7, paths: ['a.txt'] }));
+      const other = new FsSignals().add(aSignal({ at: 7, paths: ['b.txt'] }));
+
+      expect(one.id).toMatch(/^[0-9a-f]{16}$/);
+      expect(again.id).toBe(one.id);
+      expect(other.id).not.toBe(one.id);
+    });
+
+    it('keeps two signals that say the same thing at once apart', () => {
+      // A refusal raised twice in one millisecond is two events, and two rows.
+      const signals = new FsSignals();
+      const input = aSignal({ at: 7, copyPath: 'a (conflicted copy).txt' });
+      const [first, second, third] = [1, 2, 3].map(() => signals.add(input));
+
+      expect(second.id).toBe(`${first.id}.2`);
+      expect(third.id).toBe(`${first.id}.3`);
+    });
+
+    it('gives a log written before ids the same ids on every read', () => {
+      const legacy = {
+        signals: [
+          { kind: 'join/recovered', at: 1, paths: ['x.txt'], pathCount: 1, action: 'review' },
+          { kind: 'join/recovered', at: 1, paths: ['x.txt'], pathCount: 1, action: 'review' },
+        ],
+        totals: {},
+      };
+      const read = () => {
+        const restored = new FsSignals();
+        restored.restore(JSON.parse(JSON.stringify(legacy)));
+        return restored.all.map((s) => s.id);
+      };
+
+      const ids = read();
+      expect(read()).toEqual(ids);
+      expect(ids[1]).toBe(`${ids[0]}.2`);
+      // And the id a signal would have been given when it was recorded.
+      expect(ids[0]).toBe(
+        new FsSignals().add({
+          kind: 'join/recovered',
+          at: 1,
+          paths: ['x.txt'],
+          action: 'review',
+        }).id,
+      );
+    });
+
+    it('keeps the id a log already carries', () => {
+      const restored = new FsSignals();
+      restored.restore({
+        signals: [
+          { id: 'kept', kind: 'join/recovered', at: 1, paths: [], pathCount: 0, action: 'review' },
+        ],
+        totals: {},
+      });
+      expect(restored.all[0].id).toBe('kept');
+    });
+  });
+
+  // ...........................................................................
+  describe('where each path went', () => {
+    it('keeps the copies of the paths it names, and only those', () => {
+      // The cap bounds the signal; a copy of a path it no longer names could
+      // not be explained.
+      const paths = Array.from(
+        { length: SIGNAL_PATHS_MAX + 5 },
+        (_, i) => `f${String(i).padStart(2, '0')}.txt`,
+      );
+      const copies = Object.fromEntries(
+        paths.map((path) => [path, `.fsagent-recovered/${path}`]),
+      );
+      const signal = new FsSignals().add(aSignal({ paths, copies }));
+
+      expect(Object.keys(signal.copies ?? {})).toEqual(signal.paths);
+      expect(signal.copies?.['f00.txt']).toBe('.fsagent-recovered/f00.txt');
+    });
+
+    it('leaves a path without a copy out', () => {
+      // A file the join could not move has no copy to point at.
+      const signal = new FsSignals().add(
+        aSignal({ paths: ['moved.txt', 'stuck.txt'], copies: { 'moved.txt': 'm.txt' } }),
+      );
+      expect(signal.copies).toEqual({ 'moved.txt': 'm.txt' });
+    });
+
+    it('carries no copies when none of its paths has one', () => {
+      const signal = new FsSignals().add(
+        aSignal({ paths: ['mine.txt'], copies: { 'other.txt': 'o.txt' } }),
+      );
+      expect(signal).not.toHaveProperty('copies');
+      expect(new FsSignals().add(aSignal())).not.toHaveProperty('copies');
+    });
+  });
+
+  // ...........................................................................
   describe('what a person still has to do', () => {
     it('separates `required` from everything already dealt with', () => {
       // THE FIELD THE OTHER SURFACES NEVER CARRIED. "Both versions kept" and

@@ -254,25 +254,37 @@ describe('FsAgent — the signal channel', () => {
       agent: FsAgent,
       recovered: string[],
       conflicted: string[],
+      copies: Record<string, string> = {},
     ): void =>
       (
         agent as unknown as {
-          _signalJoinOutcome(r: readonly string[], c: readonly string[]): void;
+          _signalJoinOutcome(
+            r: readonly string[],
+            c: readonly string[],
+            copies: Readonly<Record<string, string>>,
+          ): void;
         }
-      )._signalJoinOutcome(recovered, conflicted);
+      )._signalJoinOutcome(recovered, conflicted, copies);
 
     it('says which files were moved aside, and where', () => {
       // A restored backup. The files are not deleted — they go into
       // `.fsagent-recovered/` — but a folder that quietly grows that directory
       // is unexplainable from outside the machine.
       const agent = anAgent();
-      joined(agent, ['old/a.txt', 'old/b.txt'], []);
+      joined(agent, ['old/a.txt', 'old/b.txt'], [], {
+        'old/a.txt': '.fsagent-recovered/old/a (recovered).txt',
+        'old/b.txt': '.fsagent-recovered/old/b (recovered).txt',
+      });
 
       const [signal] = agent.signals;
       expect(signal.kind).toBe('join/recovered');
       expect(signal.action).toBe('review');
       expect(signal.paths).toEqual(['old/a.txt', 'old/b.txt']);
       expect(signal.detail).toContain('.fsagent-recovered');
+      expect(signal.copies).toEqual({
+        'old/a.txt': '.fsagent-recovered/old/a (recovered).txt',
+        'old/b.txt': '.fsagent-recovered/old/b (recovered).txt',
+      });
     });
 
     it('says which files were edited while away', () => {
@@ -287,10 +299,18 @@ describe('FsAgent — the signal channel', () => {
 
     it('reports both buckets separately when both happened', () => {
       const agent = anAgent();
-      joined(agent, ['gone.txt'], ['mine.txt']);
+      joined(agent, ['gone.txt'], ['mine.txt'], {
+        'gone.txt': '.fsagent-recovered/gone (recovered).txt',
+        'mine.txt': 'mine (conflicted copy 2026-10-19 101500 local).txt',
+      });
       expect(agent.signals.map((s) => s.kind)).toEqual([
         'join/recovered',
         'join/conflicted',
+      ]);
+      // Each names where ITS files went, and only those.
+      expect(agent.signals.map((s) => s.copies)).toEqual([
+        { 'gone.txt': '.fsagent-recovered/gone (recovered).txt' },
+        { 'mine.txt': 'mine (conflicted copy 2026-10-19 101500 local).txt' },
       ]);
     });
 

@@ -1,6 +1,74 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.1]
+
+### For a host: the history, and going back
+
+**What a host can do now.** It can show where a folder stands, list how it
+got there, and put it back to any earlier revision. Everything is read from the
+edit chain, the order every node agrees on.
+
+- `agent.headInfo()` — the entry the folder stands on: what it changed and
+  removed, when its author made it, and the stamp the hub gave it.
+- `agent.history({ from, cursor, limit })` — the folder's history, newest
+  first, a page at a time. It lists every edit and every merge (with both
+  parents), whichever machine made it, and names the entries this node cannot
+  read (`missing`).
+- `agent.relationTo(head)` — `same`, `behind`, `ahead`, `fork` or
+  `incomplete`, against the hub's head or a peer's.
+- `agent.restoreRevision(head)` — makes the folder **exactly** that revision
+  and records the result as a new edit, which every node follows.
+  - Work not yet recorded is recorded first, and a file still being written is
+    waited out: `busy` when it is still being written after ten passes.
+  - `unknown` for an entry this node cannot read.
+  - Rejects with a `MassDeleteRefusedError` when the revision would delete a
+    large part of the folder.
+  - In all three cases nothing is changed.
+- `readFsHistory(db, treeKey, options)` — the same pages, read from a store
+  that another process owns, for a host whose agent runs in a child process.
+  It writes nothing. `readFsStamps` and `walkFsHistory` are the parts it is
+  made of.
+- Newly exported: `Relation`, `ReceiveOutcome`, `atomicWriteFileSync`, and the
+  restore errors (`RestoreIncompleteError`, `MassDeleteRefusedError`,
+  `PartialRestoreError`, `BlobUnavailableError`, `UnwritablePathError`,
+  `DiskFullError`).
+
+**Why.** A host could only show `<treeKey>InsertHistory`, the trees a node
+stored itself. A node that took its state from a peer stored none, so after a
+pull the newest row was not the state the folder was in. And the only way back
+was `loadFromDb(ref)`, which adds and overwrites: files made after the revision
+stayed, the folder ended up in a state no revision ever had, and no other node
+followed.
+
+### Signals a host can key and explain
+
+- Every signal has an `id`: a hash of what it says, unique within the log, and
+  the same on every read. A log written before ids existed is given the same
+  ids each time it is read.
+- `join/recovered` and `join/conflicted` say where each moved file went
+  (`copies`, original → copy). A file the join could not move has no entry.
+- A merge's conflicts name the merge (`head`), which `history()` lists.
+- A deletion against an edit (the edit is kept) is now `decidedBy: 'chain'`.
+  It said `'stamp'`, although no stamp decides it: the edit always wins.
+- The signal log and the state file are written through a staging file and a
+  rename. Before, a crash between the truncate and the write left an empty
+  file. The next start could not read it, so the whole signal history was
+  dropped, and a node with an empty state file joined like a stranger.
+
+### Fixed: `restore({ cleanTarget: true })`
+
+- **It pruned files the sync never sees.** That included the agent's own state
+  and signal log, `.sync-errors.log`, the copies in `.fsagent-recovered/` that
+  a person had been pointed to, and everything on the host's ignore list.
+  Those are in no tree, so a tree that lacks them says nothing about them. The
+  prune now touches content only, and the mass-delete guard counts content
+  only.
+- **The mass-delete guard judged after the restore had written.** A refused
+  restore had already overwritten what the tree holds, and the watcher then
+  recorded that half-restored state as an edit. The guard now judges before
+  anything is written, so a refusal leaves the folder as it was.
+
+The sync's own apply never used `cleanTarget` and is unaffected.
 
 ### Releases go through gg
 
