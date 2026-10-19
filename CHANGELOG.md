@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Releases go through gg
+
+**What changed for contributors.** The CI no longer publishes:
+`.github/workflows/publish.yml` is disabled, and a release happens only when
+the owner runs `gg one do publish`, which merges first and uploads only what
+`main` holds (`--merge-only` merges without a release). CLAUDE.md describes
+the whole workflow through gg — `gg one do create ticket`, `gg one do
+commit`, `gg one do push`, `gg one do publish`. The scripts gg replaces —
+`create-branch.js`, `push-branch.js`, `wait-for-pr.js`, `publish-to-npm.js`,
+`add-version-tag.js` — are removed, and CHANGELOG entries go under
+`## [Unreleased]` until gg names the version.
+
+**What was wrong.** The section that collected every release up to 0.0.80
+was still headed `## [Unreleased]`. gg keeps unreleased sections at the top
+and releases them, so the next `gg one do publish` would have shipped those
+old entries as new. It is headed by the releases it describes now.
+
 ## [0.2.0]
 
 **No compatibility with 0.1.x.** A machine on 0.2.0 and one on an older release
@@ -398,7 +417,7 @@ pulls. Before that release it returned a deserialised `{}` over any real socket 
  18-23 s. the known-constraints register records what this does and does not fix: the
  divergence is repaired, the choice of winner is still arrival order.
 
-## [Unreleased]
+## [0.0.80] and earlier — released before every version had a heading
 
 ### Changed
 
