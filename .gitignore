@@ -41,3 +41,11 @@ Thumbs.db
 # Specs that name their own temp root leak it when a teardown loses a race;
 # an untracked folder here is what makes `git add -A` dangerous in this repo.
 /test-temp-*/
+
+# gg: the local ticket marker written by `gg one do create ticket`
+ticket.json
+.gg/publish_config.json
+.gg/publish_state.json
+.gg/gg-publish.json
+.gg/pubspec_overrides_backup.yaml
+.gg/pnpm_workspace_backup.yaml
