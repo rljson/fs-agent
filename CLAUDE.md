@@ -61,13 +61,14 @@ stays local (gitignored).
    the checks `gg one do commit` runs before it commits. Fix all errors before
    moving on.
 
-### Version and CHANGELOG belong to gg
+### Version and CHANGELOG
 
-Never bump `package.json` by hand and never write a version heading into
-`CHANGELOG.md`. Entries go under `## [Unreleased]`; `gg one do publish` asks
-for the increment (patch / minor / major), bumps the version and turns
-`## [Unreleased]` into the release heading. A heading that already names the
-next version makes the publish refuse.
+Never bump `package.json` by hand: `gg one do publish` asks for the increment
+(patch / minor / major) and bumps the version. gg writes nothing into
+`CHANGELOG.md` in a TypeScript repository, so the entry is prose written by
+hand: under the version the release will carry (the current version plus
+the increment named when handing over), or under `## [Unreleased]` for a
+change merged with `--merge-only`, which the next release then renames.
 
 ---
 
@@ -75,6 +76,11 @@ next version makes the publish refuse.
 
 Every repository chore runs through **gg** in single-repo mode (`gg one …`);
 there is no gg ticket workspace. The CI publishes nothing.
+
+The skills the rljson DNA installs in `.claude/skills` (`/ticket`, `/commit`,
+`/push`, `/publish`, `/cleanup`) are written for gg's ticket workspace
+(`gg do …` from `~/dev`). There is none here: use the `gg one …` commands
+below instead.
 
 ```bash
 # 1. Start clean
@@ -86,11 +92,11 @@ gg one do create ticket <branch-name> -m "<what the ticket does>"
 # 3. Update deps when the ticket needs it (verify eslint stays on 9.x)
 gg one do upgrade deps && pnpm ls eslint
 
-# 4. Develop, write tests, update docs and CHANGELOG (## [Unreleased])
+# 4. Develop, write tests, update docs and CHANGELOG (see Version and CHANGELOG)
 
 # 5. Commit every ≤5-file logical unit. Runs lint, tsc, eslint and the tests
-#    at 100% coverage, commits only when all are green, records the result
-#    in .gg/gg.json and adds the message to CHANGELOG.md (--no-log: does not)
+#    at 100% coverage, commits only when all are green and records the result
+#    in .gg/gg.json
 gg one do commit -m "<what this step does>"
 
 # 6. Push
@@ -112,7 +118,7 @@ gg one do publish --merge-only   # merge only: no version, no npm, no tag
 | Command | What it does |
 |---|---|
 | `gg one do create ticket <branch> -m "…"` | Creates the ticket branch, carries uncommitted changes over, writes the local `ticket.json` |
-| `gg one can commit` / `gg one do commit -m "…"` | Lint, `tsc`, eslint, tests at 100% coverage; commits only when green; records `.gg/gg.json`; logs the message under `## [Unreleased]` unless `--no-log` |
+| `gg one can commit` / `gg one do commit -m "…"` | Lint, `tsc`, eslint, tests at 100% coverage; commits only when green; records `.gg/gg.json` |
 | `gg one can push` / `gg one do push` | Checks / pushes the feature branch |
 | `gg one can publish` | Whether the branch can be released |
 | `gg one do publish [--merge-only]` | **Owner only.** See Publish Workflow |
@@ -251,9 +257,9 @@ Tests require `cross-env NODE_OPTIONS=--max-old-space-size=8192` for heap-intens
 
 - **Releases happen only through gg, run by the owner.** The CI publishes
   nothing (`.github/workflows/publish.yml.disabled`). Claude prepares the
-  branch — committed and pushed through gg, CHANGELOG under
-  `## [Unreleased]` — and hands over. It never runs `gg one do publish` and
-  never writes versions or tags by hand.
+  branch — committed and pushed through gg, CHANGELOG written — and hands
+  over, naming the increment the CHANGELOG assumes. It never runs
+  `gg one do publish` and never writes versions or tags by hand.
 - **gg merges before it uploads.** `gg one do publish` merges the feature
   branch into `main` first (an auto-merge pull request) and uploads to npm
   only once that merge went through, so what reaches npm is what `main`
@@ -280,7 +286,8 @@ declaring a version they did not run. Each cost half a day.*
    `pnpm-lock.yaml`, `pnpm install`.
 2. Everything committed and pushed through gg: `gg one did commit` and
    `gg one did push` are green.
-3. The release's CHANGELOG entries sit under `## [Unreleased]`.
+3. `CHANGELOG.md` names the version the release will carry, and the
+   hand-over names the increment that produces it.
 4. `gg one can publish` is green.
 
 ### Merge & publish — the owner runs it

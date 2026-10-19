@@ -11,13 +11,18 @@ the owner runs `gg one do publish`, which merges first and uploads only what
 the whole workflow through gg — `gg one do create ticket`, `gg one do
 commit`, `gg one do push`, `gg one do publish`. The scripts gg replaces —
 `create-branch.js`, `push-branch.js`, `wait-for-pr.js`, `publish-to-npm.js`,
-`add-version-tag.js` — are removed, and CHANGELOG entries go under
-`## [Unreleased]` until gg names the version.
+`add-version-tag.js` — are removed.
+
+**The rljson DNA.** fs-agent carries it now, like server, io, db and network:
+the skills in `.claude/skills`, the guides under `doc/guides`, and the Quick
+Check workflow, which fails a push whose state was not committed through gg
+(`gg one did commit`). `test/dna/dna.spec.ts` keeps the generated files as the
+DNA ships them.
 
 **What was wrong.** The section that collected every release up to 0.0.80
-was still headed `## [Unreleased]`. gg keeps unreleased sections at the top
-and releases them, so the next `gg one do publish` would have shipped those
-old entries as new. It is headed by the releases it describes now.
+was still headed `## [Unreleased]`, although everything in it shipped long
+ago, and this entry adds a real `## [Unreleased]` above it. It is headed by
+the releases it describes now.
 
 ## [0.2.0]
 

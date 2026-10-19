@@ -56,9 +56,9 @@ gg one do commit -m "Compare goldens based on json and not strings"
 ```
 
 Runs lint, `tsc`, eslint and the tests at 100 % coverage and commits only when
-all of them are green. The message lands in `CHANGELOG.md` under
-`## [Unreleased]` (`--no-log` keeps it out). `gg one can commit` runs the same
-checks without committing.
+all of them are green. `gg one can commit` runs the same checks without
+committing. gg writes nothing into `CHANGELOG.md` here: the entry is written
+by hand.
 
 ## Push
 
