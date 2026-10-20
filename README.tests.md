@@ -8,7 +8,7 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**67 files, 771 scenarios, 100 % coverage on statements, branches, functions and
+**67 files, 776 scenarios, 100 % coverage on statements, branches, functions and
 lines.** 770 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 771 does
+This document says what the suite actually proves, because the number 776 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -406,7 +406,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 771 above.
+loop are counted as they run. They sum to the 776 above.
 
 ### Mesh tier
 
@@ -416,7 +416,7 @@ loop are counted as they run. They sum to the 771 above.
 | `mesh/fs-mesh-field-defects.spec.ts` | 11 | F1–F11, field defects reduced in process |
 | `mesh/fs-mesh-matrix.spec.ts` | 9 | the scenario matrix at mesh tier (L7, L8, I7, I7b, I10, J4+J5, J6, J9 ×2) |
 | `mesh/fs-mesh-invariants.spec.ts` | 7 | invariants over the route, not the destination |
-| `mesh/fs-mesh-wiped-and-reverted.spec.ts` | 6 | a node comes back empty, or holding an older copy |
+| `mesh/fs-mesh-wiped-and-reverted.spec.ts` | 7 | a node comes back empty, or holding an older copy |
 | `mesh/fs-mesh-catchup-cost.spec.ts` | 2 | coming back does not cost what you missed |
 | `fs-conflict-rules.spec.ts` | 8 | the conflict table C1–C6 on disks, and C3 before a stamp is known |
 | `fs-agent-history.spec.ts` | 12 | the history a host shows — a pull, a merge, one order — and going back to a revision exactly |
@@ -447,7 +447,7 @@ loop are counted as they run. They sum to the 771 above.
 | `fs-relate.spec.ts` | 11 | same / behind / ahead / fork / incomplete |
 | `fs-merge.spec.ts` | 22 | `merge3` — the conflict table by example — and copy naming |
 | `fs-stamps.spec.ts` | 11 | where each version reached the fleet, derived from payloads |
-| `fs-send.spec.ts` | 9 | the sender answers for its edits (`planAuthoring`) |
+| `fs-send.spec.ts` | 13 | the sender answers for its edits, and a refusal holds its files (`planAuthoring`) |
 | `fs-collect-removals.spec.ts` | 26 | the removal walk, and `lastEditOf` |
 | `fs-edit-chain.spec.ts` | 16 | the chain |
 | `fs-plan-join.spec.ts` | 9 | joining, decided before anything is written |

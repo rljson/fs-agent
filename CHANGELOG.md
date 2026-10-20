@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.2]
+
+### A refusal holds its files until they are back
+
+**What was wrong, and how it looked.** Files that disappear while the agent is
+down, beyond the floors, are refused: nothing is recorded, every other node
+keeps them. But when they come back one at a time — a backup copied in, a drive
+that reconnects — the disappearance shrinks, and at a hundred files (or 30 %)
+the floors no longer applied. The files still to come were then recorded as
+deleted, and every node deleted them while the copy was still running. A copy
+that stopped half-way left them deleted everywhere. Measured: 300 files gone,
+210 copied back, and both peers fell to 210.
+
+**What now works.** The files a refusal held back stay held while any of them
+is still gone, however few are left. A held file is let go once it is back,
+once the head no longer has it, or once the watcher sees it deleted after it
+came back. Nothing changes for a node that has refused nothing. The hold lives
+in memory: after a restart the floors judge what is gone afresh, as before.
+
 ## [0.2.1]
 
 ### For a host: the history, and going back

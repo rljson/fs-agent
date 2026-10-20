@@ -24,7 +24,15 @@ export interface AuthoringQuestion {
   maxRatio: number;
   /** A folder holding more than this may not end up with this many or fewer. */
   allGoneMinFiles: number;
+  /**
+   * Paths an earlier refusal held back. While any of them is still gone, the
+   * disappearance is still refused, however few of its files are left.
+   */
+  heldBack?: ReadonlySet<string>;
 }
+
+/** Nothing held back. */
+const NOTHING_HELD: ReadonlySet<string> = new Set();
 
 /** What {@link planAuthoring} decided. */
 export type AuthoringPlan =
@@ -47,10 +55,18 @@ export type AuthoringPlan =
  * - the watcher did not see them go, so a person deleting files while the
  *   agent runs is an ordinary edit;
  * - it is large: more than `minFiles` and more than `maxRatio` of the folder,
- *   or a folder of more than `allGoneMinFiles` left with that many or fewer.
+ *   or a folder of more than `allGoneMinFiles` left with that many or fewer —
+ *   or it is still part of a disappearance an earlier refusal held back.
  *
  * A few files deleted while the agent was down stay below the floors and are
  * authored like any other edit.
+ *
+ * **A refusal holds its files until they are back.** A refused folder that
+ * fills up again one file at a time — a backup copied in, a drive coming back
+ * — shrinks below the floors part-way, and without the hold the files still
+ * to come would be authored as deleted, on every node, while they are being
+ * copied. A held file is let go when it is back, when the head no longer has
+ * it, or when the watcher sees it deleted after it came back.
  * @param q - The folder, the head, and the floors.
  * @returns `unchanged`, `author` with the delta against the head, or
  *   `refused` with the files that disappeared.
@@ -92,7 +108,9 @@ export const planAuthoring = (q: AuthoringQuestion): AuthoringPlan => {
     disappeared.length > 0 &&
     held > q.allGoneMinFiles &&
     remaining <= q.allGoneMinFiles;
+  const heldBack = q.heldBack ?? NOTHING_HELD;
+  const stillHeld = disappeared.some((path) => heldBack.has(path));
 
-  if (mass || allGone) return { kind: 'refused', disappeared, held };
+  if (mass || allGone || stillHeld) return { kind: 'refused', disappeared, held };
   return { kind: 'author', changed: changed.sort(), removed: removed.sort() };
 };

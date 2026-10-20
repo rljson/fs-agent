@@ -2333,6 +2333,12 @@ export class FsAgent {
   private _ownContent: ReadonlyMap<string, string> = new Map();
   /** Paths the watcher saw deleted since the own head was authored. */
   private readonly _watched = new Set<string>();
+  /**
+   * What the last refusal held back and is still gone. A refusal holds its
+   * files until they are back — see `planAuthoring`. In memory only: after a
+   * restart the floors judge what is gone afresh, as before.
+   */
+  private _heldBack: ReadonlySet<string> = new Set();
   /** Every chain entry's stamp, as this node learned it. */
   private _stamps?: FsStamps;
   /** The route this agent syncs, once a sync started. */
@@ -2723,9 +2729,10 @@ export class FsAgent {
       minFiles: MASS_DELETE_MIN_FILES,
       maxRatio: MASS_DELETE_MAX_RATIO,
       allGoneMinFiles: ALL_GONE_MIN_FILES,
+      heldBack: this._heldBack,
     });
-    if (plan.kind === 'unchanged') return;
     if (plan.kind === 'refused') {
+      this._heldBack = new Set(plan.disappeared);
       this._refuseDeletion(
         'author',
         plan.disappeared.length,
@@ -2736,6 +2743,9 @@ export class FsAgent {
       );
       return;
     }
+    // Nothing a refusal held back is still gone.
+    this._heldBack = new Set();
+    if (plan.kind === 'unchanged') return;
 
     // A removal is honest only about a file that is really gone. A scan can
     // lag behind the disk — a file it has not read yet is skipped until it

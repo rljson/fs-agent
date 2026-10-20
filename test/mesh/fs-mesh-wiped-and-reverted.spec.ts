@@ -338,6 +338,78 @@ describe('a node comes back empty, or holding an older copy', () => {
   }, 180_000);
 
   // ...........................................................................
+  // A refusal holds its files until they are back.
+  //
+  // Found by an integration run (2026-10-20) and measured here: 300 files gone
+  // while the agent was down, then a backup copied back ten at a time. The
+  // guard refused at 300, at 200, at 110 — and at 100 the floors no longer
+  // applied: the hundred files still to come were authored as deleted, and
+  // both peers fell to 220 before the copy brought them back. A copy that
+  // stops half-way would have left them deleted on every machine. Copied in
+  // two steps below (210, then the rest), so the window is not left to timing:
+  // without the hold, both peers fall to 210 on every run.
+  it('files gone while the agent was down and copied back: the peers lose none on the way', async () => {
+    const COUNT = 300;
+    mesh = await buildFsMesh({
+      root: root('copyback'),
+      names: ['A', 'B', 'LOST'],
+      seed: async (folders) => {
+        for (const folder of Object.values(folders)) {
+          for (let i = 0; i < COUNT; i++) {
+            await writeFile(join(folder, `doc-${i}.txt`), `content ${i}`);
+          }
+        }
+      },
+    });
+    expect((await mesh.converged({ timeoutMs: 60_000 })).converged).toBe(true);
+
+    // Down, its documents deleted (its own bookkeeping stays), up again.
+    const lost = mesh.node('LOST');
+    lost.down();
+    for (const entry of await readdir(lost.folder)) {
+      if (!entry.startsWith('.')) {
+        await rm(join(lost.folder, entry), { force: true });
+      }
+    }
+    await lost.up();
+    await sleep(2_000);
+
+    // The peers are watched through the whole copy, not only at its end.
+    const lowest = { A: COUNT, B: COUNT };
+    const poll = setInterval(() => {
+      for (const name of ['A', 'B'] as const) {
+        void mesh!
+          .node(name)
+          .files()
+          .then((held) => {
+            lowest[name] = Math.min(lowest[name], held.length);
+          });
+      }
+    }, 50);
+    try {
+      // Copied back in two steps, with time to author in between: after the
+      // first, 90 are still to come — under the 100-file floor and the 30 %
+      // ratio, which is where the guard used to let go.
+      const copy = async (from: number, to: number) => {
+        for (let i = from; i < to; i++) {
+          await writeFile(join(lost.folder, `doc-${i}.txt`), `content ${i}`);
+        }
+      };
+      await copy(0, 210);
+      await sleep(3_000);
+      await copy(210, COUNT);
+      const result = await mesh.converged({ timeoutMs: 60_000 });
+      expect(result.converged, whyNot(result)).toBe(true);
+    } finally {
+      clearInterval(poll);
+    }
+    expect(lowest, 'a peer lost files while the copy ran').toEqual({
+      A: COUNT,
+      B: COUNT,
+    });
+  }, 180_000);
+
+  // ...........................................................................
   it('one rename does not look like a mass deletion', async () => {
     // Nextcloud keeps this as its own case (`testSingleFileRenamed`) for the
     // same reason it is here: a guard that fires on ordinary work stops the
