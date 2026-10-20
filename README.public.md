@@ -562,7 +562,7 @@ moment after every edit; `diverged` for a long time, with `lastRepair.action`
 | --- | --- |
 | [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, the conflict table, the stamp, the guards |
 | [README.api.md](README.api.md) | every export, grouped by module — the shape, where this document gives the advice |
-| [README.tests.md](README.tests.md) | the 770 scenarios this package ships, by what they prove |
+| [README.tests.md](README.tests.md) | the 771 scenarios this package ships, by what they prove |
 
 Related packages: `@rljson/rljson` (trees), `@rljson/db` (database and
 `Connector`), `@rljson/io` (sockets and storage), `@rljson/bs` (blobs),

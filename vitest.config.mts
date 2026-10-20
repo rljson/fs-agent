@@ -15,7 +15,10 @@ export default defineConfig(({ mode }) => {
       globals: true,
       environment: 'node',
       setupFiles: ['./test/setup/test-setup.ts'],
-      include: ['**/test/**/*.spec.ts'],
+      // `*.test.ts` too: gg generates `test/fs_agent_version.test.ts` beside
+      // the version file it writes, and a test that never runs leaves that
+      // file uncovered.
+      include: ['**/test/**/*.spec.ts', '**/test/**/*.test.ts'],
       testTimeout: 30000, // 30 seconds for slow tests
       hookTimeout: 30000, // 30 seconds for setup/teardown hooks
 

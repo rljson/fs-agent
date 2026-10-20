@@ -70,6 +70,14 @@ followed.
 
 The sync's own apply never used `cleanTarget` and is unaffected.
 
+### Tooling
+
+gg's publish raised the toolchain to the versions the other rljson packages
+already run: TypeScript 6, vitest 5, vite 8 and eslint 10. It also writes
+`src/fs_agent_version.ts`, which `test/fs_agent_version.test.ts` keeps in step
+with `package.json`; vitest now runs `*.test.ts` as well as `*.spec.ts`, so that
+file is covered like any other.
+
 ### Releases go through gg
 
 **What changed for contributors.** The CI no longer publishes:

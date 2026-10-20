@@ -8,8 +8,8 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**66 files, 770 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 769 must pass; one is committed inverted, and §2.11 says which and why.
+**67 files, 771 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 770 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 770 does
+This document says what the suite actually proves, because the number 771 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -35,7 +35,7 @@ index is at the end.
 | --- | --- | --- |
 | **mesh** | a real `Server`, real sockets (`createSocketPair`), real watchers, real files on disk, two to four nodes, with cuts, heals, mutes, deafenings and stopped processes | 12 |
 | **client–server** | two or three clients and a real hub, each suite run **twice** — once over `SocketMock`, once over a real socket.io server configured at production's 50 MB limit | 6 |
-| **unit / decision** | one agent, or a pure function with no filesystem and no clock | 54 |
+| **unit / decision** | one agent, or a pure function with no filesystem and no clock | 55 |
 
 A decision-tier test proves a RULE. It does not prove the rule is ever
 reached, and the difference has cost this package real defects: every decision
@@ -406,7 +406,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 770 above.
+loop are counted as they run. They sum to the 771 above.
 
 ### Mesh tier
 
@@ -488,3 +488,4 @@ loop are counted as they run. They sum to the 770 above.
 | `example.spec.ts` | 1 | the README example, against a golden |
 | `setup/goldens.spec.ts` | 1 | the golden mechanism itself |
 | `dna/dna.spec.ts` | 1 | the files the rljson DNA generates are as it ships them |
+| `fs_agent_version.test.ts` | 1 | the version file gg writes agrees with `package.json` |
