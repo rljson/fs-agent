@@ -40,6 +40,8 @@
 // hides the scale of what it dropped is worse than no cap.
 // .............................................................................
 
+import { createHash } from 'crypto';
+
 /** What a {@link FsSignal} is about. */
 export type FsSignalKind =
   /**
@@ -82,6 +84,14 @@ export type FsSignalAction =
 
 /** One thing that happened to a folder, in a form a program can act on. */
 export interface FsSignal {
+  /**
+   * This signal's identity: a hash of what happened, unique within the log.
+   *
+   * Derived rather than counted, so a log written before ids existed gets the
+   * same ids on every read, and a host can key a row, or remember what a
+   * person has seen, by it.
+   */
+  id: string;
   /** What happened. */
   kind: FsSignalKind;
   /** When, epoch ms. */
@@ -102,6 +112,21 @@ export interface FsSignal {
   decidedBy?: FsSignalDecidedBy;
   /** Where the version that lost the path was kept, when one was. */
   copyPath?: string;
+  /**
+   * For a signal about several paths, where each one's own version went:
+   * original → copy. Only for the paths in {@link paths}.
+   *
+   * `join/conflicted` keeps a machine's edit beside the network's version, and
+   * `join/recovered` moves a file the history removed into
+   * `.fsagent-recovered/`; without this a host could name the files but not
+   * show where they went.
+   */
+  copies?: Readonly<Record<string, string>>;
+  /**
+   * The chain entry this belongs to, when it belongs to one — for a merge
+   * conflict, the merge. A host can show the signal next to that revision.
+   */
+  head?: string;
   /** The edit this belongs to, when it belongs to one. */
   timeId?: string;
   /** One sentence for a person. Never a stack trace. */
@@ -140,8 +165,8 @@ export interface FsSignalLog {
   totals: Record<string, number>;
 }
 
-/** What a signal says before the sink stamps and bounds it. */
-export type FsSignalInput = Omit<FsSignal, 'at' | 'paths' | 'pathCount'> & {
+/** What a signal says before the sink stamps, identifies and bounds it. */
+export type FsSignalInput = Omit<FsSignal, 'id' | 'at' | 'paths' | 'pathCount'> & {
   /** The affected paths; sorted, capped and counted by the sink. */
   paths: readonly string[];
   /** Overrides the clock, for a test that needs a fixed stamp. */
@@ -168,12 +193,16 @@ export class FsSignals {
    */
   add(input: FsSignalInput): FsSignal {
     const paths = [...input.paths].sort();
-    const signal: FsSignal = {
-      ...input,
+    const kept = paths.slice(0, SIGNAL_PATHS_MAX);
+    const { copies, ...rest } = input;
+    const unidentified: Omit<FsSignal, 'id'> = {
+      ...rest,
       at: input.at ?? Date.now(),
-      paths: paths.slice(0, SIGNAL_PATHS_MAX),
+      paths: kept,
       pathCount: paths.length,
+      ...FsSignals._keptCopies(copies, kept),
     };
+    const signal: FsSignal = { id: this._uniqueId(unidentified), ...unidentified };
     this._signals.push(signal);
     // The cap drops the OLDEST, because a folder in trouble produces signals
     // faster than anybody reads them and the newest are the ones that still
@@ -264,7 +293,14 @@ export class FsSignals {
     if (Array.isArray(log.signals)) {
       for (const entry of log.signals) {
         if (!FsSignals._isSignal(entry)) continue;
-        this._signals.push(entry);
+        // A log written before ids existed is given them now, derived from
+        // what each signal says, so every read of one log names its signals
+        // alike.
+        this._signals.push(
+          typeof entry.id === 'string' && entry.id !== ''
+            ? entry
+            : { ...entry, id: this._uniqueId(entry) },
+        );
       }
       while (this._signals.length > SIGNAL_LOG_MAX) this._signals.shift();
     }
@@ -275,6 +311,58 @@ export class FsSignals {
         }
       }
     }
+  }
+
+  /**
+   * The copies of the paths a signal kept, or nothing.
+   *
+   * The cap bounds the signal, and a copy of a path the signal no longer names
+   * could not be explained; an empty map is left out rather than kept.
+   * @param copies - Original → copy, as the caller gave it.
+   * @param kept - The paths the signal names.
+   * @returns The `copies` field to spread, if any.
+   */
+  private static _keptCopies(
+    copies: Readonly<Record<string, string>> | undefined,
+    kept: readonly string[],
+  ): Pick<FsSignal, 'copies'> {
+    if (!copies) return {};
+    const named = kept.filter((path) =>
+      Object.prototype.hasOwnProperty.call(copies, path),
+    );
+    return named.length === 0
+      ? {}
+      : { copies: Object.fromEntries(named.map((path) => [path, copies[path]])) };
+  }
+
+  /**
+   * An id for a signal: a hash of what it says, made unique within the log.
+   *
+   * Two signals that say the same thing in the same millisecond are possible —
+   * a refusal raised twice at once — and must still be two rows, so a repeat
+   * gets a counter rather than the same id.
+   * @param signal - The signal, without its id.
+   * @returns The id.
+   */
+  private _uniqueId(signal: Omit<FsSignal, 'id'>): string {
+    const base = createHash('sha256')
+      .update(
+        JSON.stringify([
+          signal.kind,
+          signal.at,
+          signal.paths,
+          signal.pathCount,
+          signal.copyPath ?? '',
+          signal.detail ?? '',
+        ]),
+      )
+      .digest('hex')
+      .slice(0, 16);
+    let id = base;
+    for (let n = 2; this._signals.some((kept) => kept.id === id); n++) {
+      id = `${base}.${n}`;
+    }
+    return id;
   }
 
   /**

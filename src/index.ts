@@ -18,8 +18,14 @@ export {
   type FsSignalLog,
 } from './fs-signals.ts';
 export {
+  BlobUnavailableError,
+  DiskFullError,
   FsAgent,
+  MassDeleteRefusedError,
+  PartialRestoreError,
+  RestoreIncompleteError,
   SYNC_ERROR_FILE,
+  UnwritablePathError,
   type FsAgentOptions,
   type RestoreOptions,
   type TimeoutConfig,
@@ -28,14 +34,29 @@ export {
   ATOMIC_TMP_PREFIX,
   atomicTmpPath,
   atomicWriteFile,
+  atomicWriteFileSync,
   atomicWriteStream,
 } from './fs-atomic-write.ts';
+export {
+  FS_HISTORY_PAGE,
+  readFsHistory,
+  walkFsHistory,
+  type FsHistoryEntry,
+  type FsHistoryOptions,
+  type FsHistoryPage,
+  type FsHistorySource,
+} from './fs-history.ts';
+export { readFsStamps } from './fs-stamps.ts';
 export {
   compileIgnore,
   globToRegExp,
   type IgnoreMatcher,
 } from './fs-ignore.ts';
-export type { AntiEntropyStatus } from './fs-receive.ts';
+export type {
+  AntiEntropyStatus,
+  ReceiveOutcome,
+  Relation,
+} from './fs-receive.ts';
 export {
   createFsChainTables,
   FS_EDIT_ACTION,

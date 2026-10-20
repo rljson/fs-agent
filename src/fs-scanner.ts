@@ -296,6 +296,24 @@ export class FsScanner {
   }
 
   /**
+   * The files the last pass left out because they were not finished yet —
+   * seen for the first time, or written to while it ran. A later pass reads
+   * them once they settle.
+   * @returns Relative paths, `/`-separated.
+   */
+  get deferred(): readonly string[] {
+    return this._unsettledDuringScan;
+  }
+
+  /**
+   * How long a file has to be quiet before a pass reads it.
+   * @returns Milliseconds.
+   */
+  get settleMs(): number {
+    return this._options.settleMs as number;
+  }
+
+  /**
    * When the pass that produced {@link tree} began — 0 before the first. A
    * caller that wrote to the folder tells from it whether that pass could have
    * read its write half-done.
@@ -915,11 +933,10 @@ export class FsScanner {
     // Create directory tree node. The root's name is normalised to '.' (the
     // mount-point folder name is environment-specific and would otherwise make
     // the root hash folder-dependent, breaking shared cross-client refs).
+    // `split` always yields a last segment, and a relative path built here
+    // never ends in a separator, so the name is never empty.
     const dirName =
-      relativePath === '.'
-        ? '.'
-        : /* v8 ignore next -- @preserve */
-          relativePath.split('/').pop() || '';
+      relativePath === '.' ? '.' : (relativePath.split('/').pop() as string);
 
     const dirMeta: FsNodeMeta = {
       name: dirName,
@@ -1030,6 +1047,16 @@ export class FsScanner {
     isDirectory?: boolean,
   ): boolean {
     return this._ignoreMatcher.ignores(relativePath, isDirectory);
+  }
+
+  /**
+   * Whether the sync never sees a path: the ignore list, as the scan applies
+   * it.
+   * @param relativePath - Relative to the root, either separator.
+   * @returns `true` when no tree of this folder can hold the path.
+   */
+  ignores(relativePath: string): boolean {
+    return this._shouldIgnorePath(relativePath);
   }
 
   async watch(): Promise<void> {

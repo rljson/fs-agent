@@ -8,22 +8,22 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**63 files, 723 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 722 must pass; one is committed inverted, and §2.11 says which and why.
+**67 files, 771 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 770 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
 pnpm test        # vitest --coverage --no-file-parallelism, then eslint
 ```
 
-`--no-file-parallelism` is not a preference. **Thirty-three of these files**
+`--no-file-parallelism` is not a preference. **Thirty-four of these files**
 drive a real `Server`, a real socket pair or the mesh harness — with real
 watchers and real timers; run in parallel they fight over the cores and invent
 failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 723 does
+This document says what the suite actually proves, because the number 771 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -33,9 +33,9 @@ index is at the end.
 
 | tier | what it is | files |
 | --- | --- | --- |
-| **mesh** | a real `Server`, real sockets (`createSocketPair`), real watchers, real files on disk, two to four nodes, with cuts, heals, mutes, deafenings and stopped processes | 11 |
+| **mesh** | a real `Server`, real sockets (`createSocketPair`), real watchers, real files on disk, two to four nodes, with cuts, heals, mutes, deafenings and stopped processes | 12 |
 | **client–server** | two or three clients and a real hub, each suite run **twice** — once over `SocketMock`, once over a real socket.io server configured at production's 50 MB limit | 6 |
-| **unit / decision** | one agent, or a pure function with no filesystem and no clock | 52 |
+| **unit / decision** | one agent, or a pure function with no filesystem and no clock | 55 |
 
 A decision-tier test proves a RULE. It does not prove the rule is ever
 reached, and the difference has cost this package real defects: every decision
@@ -190,7 +190,7 @@ receive side stops reporting.
 
 ### 2.6b That a host application is told what happened
 
-`fs-signals.spec.ts` (34) tests the sink with no filesystem at all, which is
+`fs-signals.spec.ts` (41) tests the sink with no filesystem at all, which is
 what lets it assert the awkward parts directly: the cap dropping the oldest, the
 per-kind counters surviving that drop, a listener that throws not costing the
 next one its notification, and a persisted log coming back from a shape nobody
@@ -212,8 +212,35 @@ agent that does something to a user's folder, asserting the **fields** rather
 than that something was emitted. A signal with the right kind and the wrong
 `action` is worse than no signal, because it gets filtered into silence.
 
+The sink also derives each signal's `id`, and the same ids again from a log
+written before ids existed; two signals saying the same thing in one
+millisecond stay two. A join's `copies` keep only the paths the signal names.
+
 The mass-delete guard tests and the mesh harness's `mesh.conflicts` collector
 read the signal channel too: there is no other surface left to assert.
+
+### 2.6c That a host can show the history, and go back
+
+`fs-history.spec.ts` (22) walks chains written by hand, because the orders that
+matter are the ones a running fleet produces rarely: both sides of a fork that
+reached the fleet in one announcement, a stamp that disagrees with the graph, a
+merge below a merge. Each states the whole order it expects, and one rule
+outranks every key: an entry is never listed above one made on top of it.
+Pages are asserted to continue exactly where the last stopped, across a fork
+too, and the read-only reader is asserted to leave the store byte for byte as
+it found it.
+
+`fs-agent-history.spec.ts` (12) is the same on a running mesh. A pull and a
+merge are in the history, in one order on both nodes. And `restoreRevision`
+makes a folder exactly a revision, as an edit the other node follows. Its
+guards each have a case:
+
+- a file saved a moment before is recorded first rather than pruned. This is
+  the case that found the settle rule hiding a brand-new file from the restore;
+- a file still being written makes the restore `busy`, not lossy;
+- the agent's own log and the set-aside copies survive the prune;
+- a revision that would empty the folder is refused before anything is
+  written.
 
 ### 2.7 That a node claims only what it changed
 
@@ -379,7 +406,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 723 above.
+loop are counted as they run. They sum to the 771 above.
 
 ### Mesh tier
 
@@ -392,6 +419,7 @@ loop are counted as they run. They sum to the 723 above.
 | `mesh/fs-mesh-wiped-and-reverted.spec.ts` | 6 | a node comes back empty, or holding an older copy |
 | `mesh/fs-mesh-catchup-cost.spec.ts` | 2 | coming back does not cost what you missed |
 | `fs-conflict-rules.spec.ts` | 8 | the conflict table C1–C6 on disks, and C3 before a stamp is known |
+| `fs-agent-history.spec.ts` | 12 | the history a host shows — a pull, a merge, one order — and going back to a revision exactly |
 | `fs-editor-patterns.spec.ts` | 6 | how real programs save |
 | `fs-chain-crosses-the-wire.spec.ts` | 3 | the chain crosses the wire |
 | `field-repro.spec.ts` | 3 | reported failures, reproduced verbatim |
@@ -423,19 +451,20 @@ loop are counted as they run. They sum to the 723 above.
 | `fs-collect-removals.spec.ts` | 26 | the removal walk, and `lastEditOf` |
 | `fs-edit-chain.spec.ts` | 16 | the chain |
 | `fs-plan-join.spec.ts` | 9 | joining, decided before anything is written |
-| `fs-agent-mass-delete-guard.spec.ts` | 12 | refusing a deletion that looks like a loss, and reporting it |
+| `fs-agent-mass-delete-guard.spec.ts` | 14 | refusing a deletion that looks like a loss — before anything is written — and reporting it; a prune never touches what the scanner ignores |
 | `fs-agent-anti-entropy.spec.ts` | 7 | receiving what the hub says |
 | `fs-agent-stale-reconnect.spec.ts` | 14 | a peer reconnecting with a stale tree |
 | `fs-agent-no-laundering.spec.ts` | 8 | a node does not re-advertise what it adopted |
 | `fs-agent-authorship.spec.ts` | 4 | a node claims only what it changed |
 | `fs-divergence-is-content.spec.ts` | 2 | a divergence is a difference in CONTENT |
 | `fs-ref-vs-content.spec.ts` | 6 | ref identity vs content identity |
-| `fs-agent-concurrent-write.spec.ts` | 9 | two writes of one path must not blend — 200 rounds per assertion |
+| `fs-agent-concurrent-write.spec.ts` | 12 | two writes of one path must not blend — 200 rounds per assertion — and the synchronous writer the bookkeeping uses |
 | `fs-agent-incremental-restore.spec.ts` | 8 | a restore writes only what changed |
 | `fs-agent-locked-file.spec.ts` | 8 | a file held open by another process |
 | `fs-agent-blob-stream.spec.ts` | 3 | a restore streams the blob |
 | `fs-agent-signals.spec.ts` | 19 | one case per thing the agent signals, asserting the fields |
-| `fs-signals.spec.ts` | 34 | the signal sink: the cap, the counters, and a log read from a hostile folder |
+| `fs-signals.spec.ts` | 41 | the signal sink: the cap, the counters, ids, and a log read from a hostile folder |
+| `fs-history.spec.ts` | 22 | the history walk: its order on hand-written chains, pages, cursors, and the read-only reader |
 | `fs-ignore.spec.ts` | 28 | glob ignore patterns, and every legacy prefix |
 | `fs-blob-adapter.spec.ts` | 26 | file ↔ blob |
 | `fs-db-adapter.spec.ts` | 6 | storing a tree with its predecessors |
@@ -458,3 +487,5 @@ loop are counted as they run. They sum to the 723 above.
 | `fs-agent-own-echo.spec.ts` | 1 | its own advertisement echoed back |
 | `example.spec.ts` | 1 | the README example, against a golden |
 | `setup/goldens.spec.ts` | 1 | the golden mechanism itself |
+| `dna/dna.spec.ts` | 1 | the files the rljson DNA generates are as it ships them |
+| `fs_agent_version.test.ts` | 1 | the version file gg writes agrees with `package.json` |

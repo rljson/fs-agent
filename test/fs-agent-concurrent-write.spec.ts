@@ -32,7 +32,7 @@
 // outcome is whichever rename lands last — a complete version either way.
 // .............................................................................
 
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -41,6 +41,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ATOMIC_TMP_PREFIX,
   atomicWriteFile,
+  atomicWriteFileSync,
   atomicWriteStream,
 } from '../src/fs-atomic-write.ts';
 
@@ -135,6 +136,48 @@ describe('atomicWriteFile', () => {
     const missing = join(dir, 'no-such-dir', 'x.txt');
     await expect(atomicWrite(missing, 'x')).rejects.toThrow();
     expect(await readdir(dir), 'something was left behind').toEqual([]);
+  });
+});
+
+// ...........................................................................
+describe('atomicWriteFileSync', () => {
+  // The agent's own bookkeeping — the signal log, the state file — goes
+  // through this. Written in place, a crash between the truncate and the write
+  // left an empty file, and the next start could not read what it held.
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'fs-agent-atomic-sync-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const staged = async () =>
+    (await readdir(dir)).filter((n) => n.startsWith(ATOMIC_TMP_PREFIX));
+
+  it('replaces the content, and leaves no staging file behind', async () => {
+    const file = join(dir, 'log.json');
+    atomicWriteFileSync(file, 'a long first version');
+    atomicWriteFileSync(file, Buffer.from('short'));
+    expect(await readFile(file, 'utf8')).toBe('short');
+    expect(await staged(), 'a staging file survived the write').toEqual([]);
+  });
+
+  it('fails loudly when the directory does not exist, and stages nothing', async () => {
+    expect(() => atomicWriteFileSync(join(dir, 'no-such-dir', 'x'), 'x')).toThrow();
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('removes its staging file when the rename fails', async () => {
+    // A directory where the file belongs: the staging write succeeds and the
+    // rename cannot.
+    const occupied = join(dir, 'occupied');
+    await mkdir(occupied);
+    await writeFile(join(occupied, 'inside.txt'), 'somebody else\'s');
+    expect(() => atomicWriteFileSync(occupied, 'x')).toThrow();
+    expect(await staged(), 'a failed write left its staging file').toEqual([]);
   });
 });
 

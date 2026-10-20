@@ -45,6 +45,28 @@ const stampTableCfg = (key: string): TableCfg =>
     ],
   }) as unknown as TableCfg;
 
+/**
+ * Every stamp a route's chain entries carry, read without writing — for a host
+ * that opened another process's store read-only.
+ * @param db - The database holding the chain.
+ * @param treeKey - The route's trees table key.
+ * @returns Entry → stamp; empty when the table does not exist.
+ */
+export const readFsStamps = async (
+  db: Db,
+  treeKey: string,
+): Promise<Map<string, RefStamp>> => {
+  const table = `${treeKey}EditStamps`;
+  const stamps = new Map<string, RefStamp>();
+  if (!(await db.core.hasTable(table))) return stamps;
+  const dump = await db.core.dumpTable(table);
+  // An entry's second row, once a walk below it went on, repeats its stamp.
+  for (const { entry, domain, epoch, hub, n } of dump[table]._data as StampRow[]) {
+    stamps.set(entry, { domain, epoch, hub, n });
+  }
+  return stamps;
+};
+
 // .............................................................................
 /**
  * The stamp of every chain entry, as this node learned it.
