@@ -466,7 +466,9 @@ rewriting a whole catalogue.
   files and 30 % of the folder, or all but ten) gone without the watcher seeing
   it. That is the shape of a failed mount or a wiped drive, never of a person,
   so nothing is recorded and a `deletion/refused` signal asks somebody to
-  decide. **Delete large amounts with the client running.**
+  decide. The refusal holds those files until they are back, so a backup
+  copied in file by file is never half-recorded as deleted. **Delete large
+  amounts with the client running.**
 
 ---
 
@@ -562,7 +564,7 @@ moment after every edit; `diverged` for a long time, with `lastRepair.action`
 | --- | --- |
 | [README.architecture.md](README.architecture.md) | the design: why references rather than payloads, the edit chain, the conflict table, the stamp, the guards |
 | [README.api.md](README.api.md) | every export, grouped by module — the shape, where this document gives the advice |
-| [README.tests.md](README.tests.md) | the 771 scenarios this package ships, by what they prove |
+| [README.tests.md](README.tests.md) | the 776 scenarios this package ships, by what they prove |
 
 Related packages: `@rljson/rljson` (trees), `@rljson/db` (database and
 `Connector`), `@rljson/io` (sockets and storage), `@rljson/bs` (blobs),

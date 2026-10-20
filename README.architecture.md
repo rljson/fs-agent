@@ -521,6 +521,14 @@ never of a person: nothing is authored, the folder keeps its head, and
 renamed while the agent was down, and a few files deleted while it was down are
 all ordinary edits.
 
+A refusal holds its files until they are back. A refused folder that fills up
+again one file at a time — a backup copied in, a drive reconnecting — shrinks
+below the floors part-way, and the files still to come would otherwise be
+authored as deleted while they are being copied. So what a refusal held back
+stays refused while any of it is gone; a held file is let go when it is back,
+when the head no longer has it, or when the watcher sees it deleted after it
+came back.
+
 ### At the receiver
 
 An apply that would **lose** more than the same floors — content the target tree

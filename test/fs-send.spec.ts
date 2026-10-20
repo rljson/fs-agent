@@ -21,12 +21,14 @@ const ask = (
   head: Map<string, string>,
   folder: Map<string, string>,
   watched: string[] = [],
+  heldBack?: Iterable<string>,
 ): ReturnType<typeof planAuthoring> =>
   planAuthoring({
     head,
     folder,
     watched: new Set(watched),
     ...FLOORS,
+    ...(heldBack === undefined ? {} : { heldBack: new Set(heldBack) }),
   } satisfies AuthoringQuestion);
 
 describe('planAuthoring — the sender answers for its edits', () => {
@@ -104,5 +106,50 @@ describe('planAuthoring — the sender answers for its edits', () => {
     expect(ask(files(8), new Map()).kind).toBe('author');
     const head = files(40);
     expect(ask(head, new Map(), [...head.keys()]).kind).toBe('author');
+  });
+});
+
+describe('planAuthoring — a refusal holds its files until they are back', () => {
+  // 300 files gone while the agent was down, then a backup copied back one
+  // file at a time. The refusal is right at 300 and still right at 120 — but
+  // at 100 the floors no longer apply, and the files still to come would be
+  // authored as deleted on every node, while they are being copied.
+  const head = files(300);
+  const refusal = ask(head, new Map()) as { kind: 'refused'; disappeared: string[] };
+
+  it('holds what a refusal held back, however few of its files are left', () => {
+    expect(refusal.kind).toBe('refused');
+    const folder = files(280);
+    // Without the hold: twenty files under every floor, authored as deleted.
+    expect(ask(head, folder)).toMatchObject({ kind: 'author' });
+    expect(ask(head, folder, [], refusal.disappeared)).toMatchObject({
+      kind: 'refused',
+      disappeared: Array.from({ length: 20 }, (_, i) => `f${280 + i}.txt`).sort(),
+    });
+  });
+
+  it('lets a file go once it is back, and a person may then delete it', () => {
+    expect(ask(head, files(300), [], refusal.disappeared).kind).toBe('unchanged');
+    const folder = files(300);
+    folder.delete('f7.txt');
+    expect(ask(head, folder, ['f7.txt'], refusal.disappeared)).toMatchObject({
+      kind: 'author',
+      removed: ['f7.txt'],
+    });
+  });
+
+  it('lets a file go that the head no longer has', () => {
+    // The network deleted the last ten while this node waited.
+    const smaller = files(290);
+    expect(ask(smaller, files(290), [], refusal.disappeared).kind).toBe('unchanged');
+    expect(ask(smaller, files(285), [], refusal.disappeared).kind).toBe('refused');
+  });
+
+  it('holds nothing it was not given — the floors decide, as before', () => {
+    const folder = files(298);
+    expect(ask(head, folder, [], [])).toMatchObject({ kind: 'author' });
+    expect(ask(head, folder, [], ['not-a-file-here.txt'])).toMatchObject({
+      kind: 'author',
+    });
   });
 });
