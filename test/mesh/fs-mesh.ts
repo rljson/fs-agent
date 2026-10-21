@@ -146,6 +146,26 @@ const isBookkeeping = (name: string): boolean =>
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Resolves once an agent has finished what it was doing when it was stopped:
+ * a receive under way, and the scan inside it.
+ * @param agent - The agent.
+ */
+const idle = async (agent: FsAgent): Promise<void> => {
+  const inside = agent as unknown as {
+    _receiving?: Promise<void>;
+    _lock: Promise<void>;
+  };
+  const scanner = agent.scanner as unknown as {
+    _activeScan: Promise<unknown> | null;
+    _pendingScan: Promise<unknown> | null;
+  };
+  await inside._receiving?.catch(() => undefined);
+  await inside._lock;
+  await scanner._pendingScan?.catch(() => undefined);
+  await scanner._activeScan?.catch(() => undefined);
+};
+
 // .............................................................................
 /** One participant in the mesh. */
 export interface FsMeshNode {
@@ -470,6 +490,8 @@ export const buildFsMesh = async (opts: {
   // ------ the nodes ------
   const nodes: FsMeshNode[] = [];
   const stops: Array<() => void> = [];
+  /** Every agent started, a restarted node's earlier ones included. */
+  const agents: FsAgent[] = [];
   const clients: Client[] = [];
 
   // A NODE, BUILT ON DEMAND.
@@ -586,6 +608,7 @@ export const buildFsMesh = async (opts: {
     // survives exactly as it does on disk, and the new agent has to work out
     // what the folder did behind its back.
     let liveAgent = new FsAgent(folder, client.bs, { ...agentOptions, ignore });
+    agents.push(liveAgent);
     let liveStops: Array<() => void> = [];
     const start = async () => {
       liveStops = [
@@ -624,6 +647,7 @@ export const buildFsMesh = async (opts: {
       up: async (options) => {
         if (options?.ignore !== undefined) ignore = options.ignore;
         liveAgent = new FsAgent(folder, client.bs, { ...agentOptions, ignore });
+        agents.push(liveAgent);
         await start();
       },
       get isCut() {
@@ -825,6 +849,15 @@ export const buildFsMesh = async (opts: {
   const stop = async () => {
     for (const s of stops) s();
     for (const n of nodes) n.agent.scanner.stopWatch();
+    // WHAT WAS UNDER WAY FINISHES BEFORE THE FOLDERS GO.
+    //
+    // Every beacon starts a receive and every receive scans, so one is nearly
+    // always running. Stopping ends what comes next, not what is under way: a
+    // scan of a folder being removed reports vanished entries, and a log that
+    // lands while the test worker is closing fails the whole run after every
+    // test in it passed. Bounded, so a read blocked on a peer going away
+    // cannot hold the teardown.
+    await Promise.race([Promise.all(agents.map(idle)), sleep(5_000)]);
     for (const c of clients) await c.tearDown();
     await server.tearDown();
     await rm(opts.root, { recursive: true, force: true, maxRetries: 10 });
