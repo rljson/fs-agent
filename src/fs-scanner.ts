@@ -291,6 +291,11 @@ export class FsScanner {
     this._scanCachePath = options.scanCachePath;
   }
 
+  /** The ignore list this scanner applies, in order, as it was given. */
+  get ignore(): readonly string[] {
+    return this._options.ignore as string[];
+  }
+
   get tree(): FsTree | null {
     return this._tree;
   }
@@ -1053,10 +1058,22 @@ export class FsScanner {
    * Whether the sync never sees a path: the ignore list, as the scan applies
    * it.
    * @param relativePath - Relative to the root, either separator.
+   * @param isDirectory - Whether the path is a directory, when known.
    * @returns `true` when no tree of this folder can hold the path.
    */
-  ignores(relativePath: string): boolean {
-    return this._shouldIgnorePath(relativePath);
+  ignores(relativePath: string, isDirectory?: boolean): boolean {
+    return this._shouldIgnorePath(relativePath, isDirectory);
+  }
+
+  /**
+   * Whether a scan leaves a path out: the path, or a directory above it — see
+   * {@link IgnoreMatcher.excludes}.
+   * @param relativePath - Relative to the root, either separator.
+   * @param isDirectory - Whether the path is a directory.
+   * @returns `true` when no scan of this folder holds the path.
+   */
+  excludes(relativePath: string, isDirectory: boolean): boolean {
+    return this._ignoreMatcher.excludes(relativePath, isDirectory);
   }
 
   async watch(): Promise<void> {

@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.2.3]
+
+### What a node ignores, it carries
+
+**What was wrong, and how it looked.** Every node has its own ignore list, and
+a tree does not say which list made it. A node authored its edits from its scan
+alone, so every edit left out the paths it ignored — and a path an edit leaves
+out is a deletion. With one pattern added on one node of three:
+
+- that node authored nothing ever again. A removal waits until the scan agrees
+  the file is gone, and a scan that ignores the file never does;
+- incoming trees were written into the paths it ignored, over its own copies;
+- a node whose head did not name the files yet deleted them on every node with
+  its next edit, and a merge on such a node did the same.
+
+**What now works.** A node never touches a path it ignores:
+
+- its edits and merges carry what its head holds there — other nodes'
+  versions, unchanged — so nothing it ignores is deleted anywhere and no other
+  node's version is taken back;
+- an apply, a merge or a restore neither writes nor deletes there, and the
+  mass-delete guard counts only what the folder holds;
+- an entry it ignores is never removed to make room for a peer's file or folder
+  of the same name: the path is reported as unwritable instead.
+
+Adding a pattern means the files stay where they are, on every machine, and stop
+syncing from this one. **Removing one** makes the node join those paths as a
+joining folder does: what it never received arrives, a version of its own that
+differs is kept as a conflicted copy (`join/conflicted`), and one the network
+deleted goes to `.fsagent-recovered/`. Until a file has arrived — the node
+started offline, say — it is carried and never announced as deleted. For that,
+`.fsagent-state.json` now records the ignore list the folder is in step with.
+
+Nodes whose lists agree carry nothing: every tree is the scan's own, as before.
+
+**Also.** A stopped receive side hears nothing any more. A connector keeps its
+callbacks past `tearDown`, so an agent stopped and replaced in the same process
+went on applying every head it heard, beside its successor.
+
+**For a host.** `IgnoreMatcher.excludes(path, isDirectory)` and
+`FsScanner.excludes` say whether a scan leaves a path out — the path, or a
+directory above it — and `FsScanner.ignore` is the list a scanner applies.
+`FsScanner.ignores` takes `isDirectory`. The README's pattern examples are
+corrected: a trailing or leading `/` does not anchor (`build/` is every folder
+named `build`), an `!` line cannot rescue a file inside an ignored folder, and a
+plain name is case-sensitive.
+
 ## [0.2.2]
 
 ### A refusal holds its files until they are back

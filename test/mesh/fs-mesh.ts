@@ -251,8 +251,10 @@ export interface FsMeshNode {
    *
    * The chain survives, exactly as it does on disk, so the restarted agent has
    * to reconcile its own history against whatever the folder now holds.
+   * @param options - `ignore`: the restarted agent's ignore list, as a person
+   *   editing it between two runs leaves it. Kept for later restarts.
    */
-  up(): Promise<void>;
+  up(options?: { ignore?: string[] }): Promise<void>;
 }
 
 // .............................................................................
@@ -427,6 +429,11 @@ export const buildFsMesh = async (opts: {
    * reached the fleet first.
    */
   stamping?: boolean;
+  /**
+   * `FsAgentOptions.ignore` per node, by name. A node not named has no list
+   * beyond the agent's own bookkeeping.
+   */
+  ignore?: Record<string, string[]>;
 }): Promise<FsMesh> => {
   const treeKey = opts.treeKey ?? 'sharedTree';
   const names = opts.names ?? ['A', 'B'];
@@ -562,6 +569,8 @@ export const buildFsMesh = async (opts: {
       // at a network that already HAS a history, which is `mesh.join`.
       joinWaitMs: opts.joinWaitMs ?? 0,
     };
+    // Per node, and per run of it: a restart can come back with another one.
+    let ignore = opts.ignore?.[name];
 
     // A NODE THAT CAN BE STOPPED AND STARTED AGAIN.
     //
@@ -576,7 +585,7 @@ export const buildFsMesh = async (opts: {
     // same folder, with the same database and blob store. So the chain
     // survives exactly as it does on disk, and the new agent has to work out
     // what the folder did behind its back.
-    let liveAgent = new FsAgent(folder, client.bs, agentOptions);
+    let liveAgent = new FsAgent(folder, client.bs, { ...agentOptions, ignore });
     let liveStops: Array<() => void> = [];
     const start = async () => {
       liveStops = [
@@ -612,8 +621,9 @@ export const buildFsMesh = async (opts: {
         liveStops = [];
         liveAgent.scanner.stopWatch();
       },
-      up: async () => {
-        liveAgent = new FsAgent(folder, client.bs, agentOptions);
+      up: async (options) => {
+        if (options?.ignore !== undefined) ignore = options.ignore;
+        liveAgent = new FsAgent(folder, client.bs, { ...agentOptions, ignore });
         await start();
       },
       get isCut() {

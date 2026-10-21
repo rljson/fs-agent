@@ -68,6 +68,7 @@ hang and an unbounded list is tomorrow's memory ceiling.
 | what a host application is told | [One channel for everything](#one-channel-for-everything-that-happened-srcfs-signalsts) |
 | why a half-written file does not go out | [A Copy in Progress](#a-copy-in-progress-does-not-reach-the-wire-fsscanner-the-settle-rule) |
 | which files are skipped | [Ignore Matching](#ignore-matching-srcfs-ignorets) |
+| what a node does with paths it ignores | [Carrying what a node does not see](#carrying-what-a-node-does-not-see-srcfs-carryts) |
 | what 0.2.0 removed | [Removed in 0.2.0](#removed-in-020) |
 | the signature of anything named here | [README.api.md](README.api.md) |
 
@@ -779,9 +780,55 @@ fire — a defect this package has already had.
 The matcher is compiled once per agent, because a scan of a real catalogue asks
 this question once per file.
 
-**Tested by** `test/fs-ignore.spec.ts` (28), whose first block is one case per
+**Tested by** `test/fs-ignore.spec.ts` (32), whose first block is one case per
 pattern that appears in the shipped configuration or in the agent's own list —
 that being the half which can break a running fleet.
+
+## Carrying what a node does not see (`src/fs-carry.ts`)
+
+Every node has its own ignore list, and a tree does not say which list made
+it. An edit authored from the scan alone leaves out every path its author
+ignores, and the chain reads a missing path as a deletion. Measured with one
+pattern added on one node of three: that node authored nothing ever again — a
+removal waits until the scan agrees the file is gone, and a scan that ignores
+the file never does — and incoming trees were written into the paths it
+ignored. A node whose head did not name the files yet deleted them everywhere
+with its next edit.
+
+So a node never touches a path it ignores:
+
+- **Authoring** grafts onto the scan what the own head holds at those paths
+  (`graftTree`). The graft is the tree the scanner builds for a folder that
+  holds them, node for node and ref for ref — a test scans a folder twice,
+  once with a narrower list, and the graft of the difference gives the full
+  scan's root hash.
+- **Applying** neither writes nor deletes there, and the guard counts only what
+  the folder holds (`_applyContent`).
+- **Merging** carries the version the merge kept, from whichever side; a copy a
+  conflict made at such a path is written and carried (`_mergeCarried`).
+- **Restoring** into the own folder skips those paths, and never removes an
+  entry the node ignores to make room for one of another kind (`_makeRoomFor`):
+  that path is reported as unwritable instead.
+
+`_carried` holds the own head's nodes at those paths. It is recomputed from the
+head's tree whenever the head changes (`carriedNodes`, which walks the tree as
+the scanner walks the folder), and it is empty while the lists agree — then
+every tree is the scan's own and nothing above changes.
+
+**A pattern removed** makes the node see paths it never wrote. Authored as they
+stand, a file it never received would be deleted everywhere and a version of
+its own would overwrite the network's. So the state file records the list the
+folder is in step with, and a restart with another list joins those paths
+(`_uncover`, with `planJoin`): a version of its own goes aside as a conflicted
+copy, one the history removed goes to `.fsagent-recovered/`, and the head's
+version is fetched with every head the node hears (`_takeUncovered`) and
+carried until it is in the folder. The record moves to the new list once
+nothing is missing, so a restart in between takes it up again.
+
+**Tested by** `test/fs-carry.spec.ts` (10), `test/fs-agent-ignored-paths.spec.ts`
+and `test/mesh/fs-mesh-ignore-lists.spec.ts` (5): a pattern added on one node,
+different lists from the start, a pattern removed, removed while offline, and a
+merge — every one of which fails on 0.2.2.
 
 ## Removed in 0.2.0
 

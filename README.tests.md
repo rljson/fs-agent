@@ -8,22 +8,22 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**67 files, 776 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 770 must pass; one is committed inverted, and §2.11 says which and why.
+**70 files, 807 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 801 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
 pnpm test        # vitest --coverage --no-file-parallelism, then eslint
 ```
 
-`--no-file-parallelism` is not a preference. **Thirty-four of these files**
+`--no-file-parallelism` is not a preference. **Thirty-five of these files**
 drive a real `Server`, a real socket pair or the mesh harness — with real
 watchers and real timers; run in parallel they fight over the cores and invent
 failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 776 does
+This document says what the suite actually proves, because the number 807 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -268,6 +268,25 @@ Also here: `fs-ref-vs-content.spec.ts` — identical content written at differen
 times gives **one** ref and one content map. mtime is deliberately not part of
 content identity: while it was, the same bytes gave a different ref per machine.
 
+### 2.7b That a node's ignore list is its own
+
+A tree does not say which list made it, so a path one node ignores is, to the
+others, a path its edits leave out — a deletion. `mesh/fs-mesh-ignore-lists.spec.ts`
+changes one node's list and checks the fleet: a pattern added deletes nothing
+anywhere and the node keeps syncing; lists that differ from the start move
+nothing either way; a pattern removed takes the network's version first and
+keeps the node's own beside it; removed while offline, nothing the node could
+not fetch is announced as deleted; a merge carries what the merging node
+ignores, and both sides make the same merge. All five fail on 0.2.2 — the
+first because the node never authors again.
+
+Under them, `fs-carry.spec.ts` scans one folder twice, once with a narrower
+list, and requires the graft of the difference to give the full scan's root
+hash: a carried path costs nothing in ref identity. `fs-agent-ignored-paths.spec.ts`
+holds the single-node rules — a restore into the folder skips what it ignores
+and never removes an ignored entry to make room — and the guard: a node whose
+visible files all vanished is refused however many it carries.
+
 ### 2.8 That a hostile or broken filesystem breaks only itself
 
 | suite | what it survives |
@@ -406,7 +425,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 776 above.
+loop are counted as they run. They sum to the 807 above.
 
 ### Mesh tier
 
@@ -417,6 +436,7 @@ loop are counted as they run. They sum to the 776 above.
 | `mesh/fs-mesh-matrix.spec.ts` | 9 | the scenario matrix at mesh tier (L7, L8, I7, I7b, I10, J4+J5, J6, J9 ×2) |
 | `mesh/fs-mesh-invariants.spec.ts` | 7 | invariants over the route, not the destination |
 | `mesh/fs-mesh-wiped-and-reverted.spec.ts` | 7 | a node comes back empty, or holding an older copy |
+| `mesh/fs-mesh-ignore-lists.spec.ts` | 5 | per-node ignore lists: a pattern added, lists that differ, a pattern removed — online and offline — and a merge |
 | `mesh/fs-mesh-catchup-cost.spec.ts` | 2 | coming back does not cost what you missed |
 | `fs-conflict-rules.spec.ts` | 8 | the conflict table C1–C6 on disks, and C3 before a stamp is known |
 | `fs-agent-history.spec.ts` | 12 | the history a host shows — a pull, a merge, one order — and going back to a revision exactly |
@@ -465,7 +485,9 @@ loop are counted as they run. They sum to the 776 above.
 | `fs-agent-signals.spec.ts` | 19 | one case per thing the agent signals, asserting the fields |
 | `fs-signals.spec.ts` | 41 | the signal sink: the cap, the counters, ids, and a log read from a hostile folder |
 | `fs-history.spec.ts` | 22 | the history walk: its order on hand-written chains, pages, cursors, and the read-only reader |
-| `fs-ignore.spec.ts` | 28 | glob ignore patterns, and every legacy prefix |
+| `fs-ignore.spec.ts` | 32 | glob ignore patterns, every legacy prefix, and what a scan leaves out |
+| `fs-carry.spec.ts` | 10 | what a node does not see, it carries: the graft is the scanner's own tree |
+| `fs-agent-ignored-paths.spec.ts` | 12 | what a node ignores it neither writes, deletes nor makes room over; the guard counts the folder; the list a restart compares |
 | `fs-blob-adapter.spec.ts` | 26 | file ↔ blob |
 | `fs-db-adapter.spec.ts` | 6 | storing a tree with its predecessors |
 | `blob-io.spec.ts` | 5 | storing a file as a blob |
