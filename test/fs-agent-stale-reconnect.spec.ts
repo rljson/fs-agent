@@ -288,7 +288,10 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     const stopFrom = await agent.syncFromDb(db, connector, 'fsTree');
     const state = () =>
       JSON.parse(readFileSync(join(targetDir, AGENT_STATE_FILE), 'utf-8'));
-    expect(state()).toEqual({ ownHead: agent.ownHead, stampEpochs: {} });
+    // And the ignore list the folder is in step with, which a restart with
+    // another list compares against.
+    const ignore = [...agent.scanner.ignore];
+    expect(state()).toEqual({ ownHead: agent.ownHead, stampEpochs: {}, ignore });
 
     // Its own head, said back by a hub of epoch 7.
     connector.simulateIncoming(agent.ownHead as string, undefined, {
@@ -300,6 +303,7 @@ describe('FsAgent — a peer that reconnects with a stale tree', () => {
     expect(state()).toEqual({
       ownHead: agent.ownHead,
       stampEpochs: { office: 7 },
+      ignore,
     });
 
     stopTo();

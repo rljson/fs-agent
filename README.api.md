@@ -378,6 +378,9 @@ Scans and watches a folder. `scan()` reads it into an `FsTree`; `scanFresh()`
 returns a pass that started after the call, sharing one with anyone else asking
 meanwhile — what a caller that acts on the folder must use. `watch()`,
 `stopWatch()`, `pauseWatch()`, `onChange(cb)`, `knownFile(path)`.
+`ignore` is the list it applies; `ignores(path, isDirectory?)` and
+`excludes(path, isDirectory)` answer for one path, as
+[`IgnoreMatcher`](#interface-ignorematcher) does.
 
 ### `interface FsScanOptions`
 
@@ -465,8 +468,8 @@ ignores.
 
 Compiles ignore patterns into a matcher once: globs (`*`, `?`, `**`, folders
 with `/`, `!` exceptions with last-match-wins), case-insensitive. A pattern with
-no glob characters keeps its old prefix meaning — `~$`, `.~lock.` and
-`ATOMIC_TMP_PREFIX` depend on it.
+no glob characters keeps its old prefix meaning, case-sensitive as before —
+`~$`, `.~lock.` and `ATOMIC_TMP_PREFIX` depend on it.
 
 ### `globToRegExp(pattern)`
 
@@ -474,8 +477,13 @@ One glob as a regular expression.
 
 ### `interface IgnoreMatcher`
 
-`{ ignores(relativePath, isDirectory?): boolean }` — `isDirectory` when known,
-because a directory-only pattern needs it.
+`{ ignores(relativePath, isDirectory?), excludes(relativePath, isDirectory) }`.
+
+- `ignores` — what the list says about the path itself. Pass `isDirectory`
+  when known, because a directory-only pattern needs it.
+- `excludes` — whether a scan leaves the path out: the path, or a directory
+  above it. A scan does not descend into an ignored directory, so a path
+  below one is excluded even where an `!` line would rescue it.
 
 ---
 

@@ -228,6 +228,15 @@ export interface IgnoreMatcher {
    * @returns True when the sync must not see this path.
    */
   ignores(relativePath: string, isDirectory?: boolean): boolean;
+  /**
+   * Whether a scan leaves the path out: the path itself, or a directory above
+   * it. A scan does not descend into an ignored directory, so nothing below
+   * one is ever seen, whatever a later `!` line says about it.
+   * @param relativePath - Path relative to the sync root, either separator.
+   * @param isDirectory - Whether the path is a directory.
+   * @returns True when no scan of the folder holds this path.
+   */
+  excludes(relativePath: string, isDirectory: boolean): boolean;
 }
 
 /**
@@ -250,18 +259,32 @@ export const compileIgnore = (
     if (rule !== undefined) rules.push(rule);
   }
 
-  return {
-    ignores: (relativePath: string, isDirectory?: boolean): boolean => {
-      const path = normalise(relativePath);
-      if (path === '') return false;
-      const segments = path.split('/').filter((s) => s !== '');
-      let ignored = false;
-      for (const rule of rules) {
-        if (ruleMatches(rule, path, segments, isDirectory)) {
-          ignored = !rule.negated;
-        }
+  const ignores = (relativePath: string, isDirectory?: boolean): boolean => {
+    const path = normalise(relativePath);
+    if (path === '') return false;
+    const segments = path.split('/').filter((s) => s !== '');
+    let ignored = false;
+    for (const rule of rules) {
+      if (ruleMatches(rule, path, segments, isDirectory)) {
+        ignored = !rule.negated;
       }
-      return ignored;
+    }
+    return ignored;
+  };
+
+  return {
+    ignores,
+    excludes: (relativePath: string, isDirectory: boolean): boolean => {
+      const segments = normalise(relativePath)
+        .split('/')
+        .filter((s) => s !== '');
+      // Each directory above it, as the scan meets them on its way down.
+      let above = '';
+      for (const segment of segments.slice(0, -1)) {
+        above = above === '' ? segment : `${above}/${segment}`;
+        if (ignores(above, true)) return true;
+      }
+      return ignores(relativePath, isDirectory);
     },
   };
 };

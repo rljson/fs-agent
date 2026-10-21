@@ -6,7 +6,7 @@
 
 import { Bs, BsMem } from '@rljson/bs';
 import { hip } from '@rljson/hash';
-import { ClientId, Route, SyncConfig } from '@rljson/rljson';
+import { ClientId, Route, SyncConfig, Tree } from '@rljson/rljson';
 
 import { appendFileSync, existsSync, readFileSync } from 'fs';
 import {
@@ -28,6 +28,7 @@ import {
   atomicWriteStream,
 } from './fs-atomic-write.ts';
 import { FsBlobAdapter } from './fs-blob-adapter.ts';
+import { carriedNodes, fileNode, graftTree } from './fs-carry.ts';
 import { FsDbAdapter, StoreFsTreeOptions } from './fs-db-adapter.ts';
 import {
   FsSignals,
@@ -35,6 +36,7 @@ import {
   type FsSignal,
   } from './fs-signals.ts';
 import { ALL_GONE_MIN_FILES, FsEditChain, planJoin } from './fs-edit-chain.ts';
+import { compileIgnore } from './fs-ignore.ts';
 import {
   DIR_MARKER,
   joinCopyName,
@@ -332,6 +334,16 @@ const REPAIR_ACTION: Record<
   deferred: 'blocked',
   blocked: 'blocked',
 };
+
+/**
+ * Whether two ignore lists are the same list: the same patterns in the same
+ * order — order decides what a `!` line rescues.
+ * @param a - One list.
+ * @param b - The other.
+ * @returns True when they are equal.
+ */
+const sameList = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((pattern, i) => pattern === b[i]);
 
 /**
  * How often one head is received again because the folder moved under its
@@ -671,6 +683,7 @@ export class FsAgent {
       ],
       bs: this._bs,
     });
+    this._ignoreOnRecord = this._scanner.ignore;
     this._adapter = new FsBlobAdapter(this._bs);
   }
 
@@ -827,11 +840,14 @@ export class FsAgent {
    * @param conflicted - Paths edited here while away and changed elsewhere.
    * @param copies - Where each moved file went, `path → name`; a path the
    * join could not move has no entry.
+   * @param why - `away`: the machine joined the network; `ignore`: it sees
+   * paths again that its ignore list had left out.
    */
   private _signalJoinOutcome(
     recovered: readonly string[],
     conflicted: readonly string[],
     copies: Readonly<Record<string, string>>,
+    why: 'away' | 'ignore' = 'away',
   ): void {
     if (recovered.length > 0) {
       this._signal({
@@ -854,8 +870,11 @@ export class FsAgent {
         action: 'review',
         decidedBy: 'chain',
         detail:
-          `${conflicted.length} file(s) were edited on this machine while it ` +
-          `was away and also changed on the network; both versions were kept`,
+          why === 'away'
+            ? `${conflicted.length} file(s) were edited on this machine while it ` +
+              `was away and also changed on the network; both versions were kept`
+            : `${conflicted.length} file(s) this machine had left out of the ` +
+              `sync differ from the network's; both versions were kept`,
       });
     }
   }
@@ -1363,9 +1382,19 @@ export class FsAgent {
         this._restoreImpossible.push(meta.relativePath);
         return;
       }
+      if (this._leavesOut(meta, isOwnRoot)) return;
       const filePath = join(targetPath, meta.relativePath);
       // A directory may be sitting where this file belongs.
-      await this._makeRoomFor(filePath, 'file');
+      if (
+        !(await this._makeRoomFor(
+          filePath,
+          'file',
+          isOwnRoot ? meta.relativePath : undefined,
+        ))
+      ) {
+        this._restoreImpossible.push(meta.relativePath);
+        return;
+      }
 
       /* v8 ignore else -- @preserve */
       if (meta.blobId) {
@@ -1587,14 +1616,23 @@ export class FsAgent {
         this._restoreImpossible.push(meta.relativePath);
         return;
       }
+      if (this._leavesOut(meta, isOwnRoot)) return;
       const dirPath =
         meta.relativePath === '.'
           ? targetPath
           : join(targetPath, meta.relativePath);
       // And a file may be sitting where this directory belongs. Never for the
       // root itself, which is the folder being restored into.
-      if (meta.relativePath !== '.') {
-        await this._makeRoomFor(dirPath, 'directory');
+      if (
+        meta.relativePath !== '.' &&
+        !(await this._makeRoomFor(
+          dirPath,
+          'directory',
+          isOwnRoot ? meta.relativePath : undefined,
+        ))
+      ) {
+        this._restoreImpossible.push(meta.relativePath);
+        return;
       }
 
       await mkdir(dirPath, { recursive: true });
@@ -1706,7 +1744,10 @@ export class FsAgent {
    * followed to decide what to remove.
    * @param path - Where the node is to be written.
    * @param want - What the tree says should be there.
-   * @returns Whether something had to be removed.
+   * @param relativePath - The path in the folder, when restoring into this
+   *   node's own: an entry there this node ignores is never removed.
+   * @returns Whether the place is free for the node now; `false` when an
+   *   entry this node ignores holds it.
    */
   /**
    * Whether a path the prune is about to delete is actually the expected file
@@ -1742,14 +1783,42 @@ export class FsAgent {
     return same;
   }
 
+  /**
+   * Whether a restore leaves a node out: what this node does not see, it does
+   * not write into its folder — a directory with everything below it. Another
+   * node's version of such a path is carried in its edits, never put on its
+   * disk. Anywhere else a tree is just a tree.
+   * @param meta - The node's meta.
+   * @param isOwnRoot - Whether the restore writes into this node's folder.
+   * @returns True when the node is not to be written.
+   */
+  private _leavesOut(meta: FsNodeMeta, isOwnRoot: boolean): boolean {
+    return (
+      isOwnRoot &&
+      meta.relativePath !== '.' &&
+      this._scanner.ignores(meta.relativePath, meta.type === 'directory')
+    );
+  }
+
   private async _makeRoomFor(
     path: string,
     want: 'file' | 'directory',
+    relativePath?: string,
   ): Promise<boolean> {
     const existing = await lstat(path).catch(() => undefined);
-    if (existing === undefined) return false;
+    if (existing === undefined) return true;
     const isDir = existing.isDirectory();
-    if (isDir === (want === 'directory')) return false;
+    if (isDir === (want === 'directory')) return true;
+    // What is there is something this node does not see — a folder its
+    // ignore list leaves out, say. It is not the tree's to remove, so the
+    // tree's version cannot be written here.
+    if (relativePath !== undefined && this._scanner.excludes(relativePath, isDir)) {
+      console.warn(
+        `${this._tag} restore: "${path}" is a ${isDir ? 'directory' : 'file'} ` +
+          `this node ignores and the tree says ${want} — left as it is`,
+      );
+      return false;
+    }
     await rm(path, { recursive: true, force: true });
     this._restoreRetyped++;
     console.warn(
@@ -2339,6 +2408,26 @@ export class FsAgent {
    * restart the floors judge what is gone afresh, as before.
    */
   private _heldBack: ReadonlySet<string> = new Set();
+  /**
+   * The own head's nodes at the paths this node does not see — see
+   * `fs-carry.ts`. Carried into every edit it authors; an apply neither writes
+   * nor deletes them. Empty while the head names nothing this node ignores.
+   */
+  private _carried: ReadonlyMap<string, Tree> = new Map();
+  /**
+   * Paths this node sees again since a pattern left its ignore list, whose
+   * version the own head holds is not in the folder yet. Carried until it is —
+   * see {@link FsAgent._uncover}.
+   */
+  private readonly _uncovered = new Set<string>();
+  /** A restart found its ignore list changed, and `_uncover` has not run. */
+  private _uncoverDue = false;
+  /**
+   * The ignore list the state file records: the one the folder is in step
+   * with. It becomes the scanner's list once nothing a change of the list
+   * uncovered is still missing.
+   */
+  private _ignoreOnRecord: readonly string[] = [];
   /** Every chain entry's stamp, as this node learned it. */
   private _stamps?: FsStamps;
   /** The route this agent syncs, once a sync started. */
@@ -2597,13 +2686,36 @@ export class FsAgent {
    * @returns The head, or `undefined`.
    */
   private _persistedHead(): string | undefined {
+    const state = this._persistedState();
+    return typeof state?.ownHead === 'string' && state.ownHead !== ''
+      ? state.ownHead
+      : undefined;
+  }
+
+  /**
+   * The ignore list `.fsagent-state.json` records, if it records one — the
+   * list the folder was in step with when this node last ran.
+   * @returns The list, or `undefined`.
+   */
+  private _persistedIgnore(): string[] | undefined {
+    const ignore = this._persistedState()?.ignore;
+    return Array.isArray(ignore) &&
+      ignore.every((pattern) => typeof pattern === 'string')
+      ? ignore
+      : undefined;
+  }
+
+  /**
+   * `.fsagent-state.json`, read.
+   * @returns What it holds, or `undefined` when it cannot be read.
+   */
+  private _persistedState():
+    | { ownHead?: unknown; ignore?: unknown }
+    | undefined {
     try {
-      const state = JSON.parse(
+      return JSON.parse(
         readFileSync(join(this._rootPath, AGENT_STATE_FILE), 'utf-8'),
-      ) as { ownHead?: unknown };
-      return typeof state?.ownHead === 'string' && state.ownHead !== ''
-        ? state.ownHead
-        : undefined;
+      ) as { ownHead?: unknown; ignore?: unknown } | undefined;
     } catch {
       return undefined;
     }
@@ -2613,15 +2725,50 @@ export class FsAgent {
    * Makes `head` this node's head, and remembers it across a restart.
    * @param head - The chain entry.
    * @param content - The tree it names, `path → blob`.
+   * @param carried - Its nodes at the paths this node does not see.
    */
-  private _setOwn(head: string, content: ReadonlyMap<string, string>): void {
+  private _setOwn(
+    head: string,
+    content: ReadonlyMap<string, string>,
+    carried: ReadonlyMap<string, Tree>,
+  ): void {
     this._ownHead = head;
     this._ownContent = content;
+    this._carried = carried;
+    // A path the network removed is nothing to wait for any more.
+    for (const path of this._uncovered) {
+      if (!content.has(path)) this._uncovered.delete(path);
+    }
+    if (this._uncovered.size === 0 && !this._uncoverDue) {
+      this._ignoreOnRecord = this._scanner.ignore;
+    }
     this._partiallyApplied.clear();
     this._writeState();
   }
 
-  /** Writes {@link AGENT_STATE_FILE}: the own head and the stamp epochs. */
+  /**
+   * What a head's tree holds at the paths this node does not see: those its
+   * ignore list leaves out, and those it sees again and does not hold yet.
+   * @param tree - The tree.
+   * @returns The nodes, by path.
+   */
+  private _carriedOf(tree: FsTree): Map<string, Tree> {
+    const carried = carriedNodes(tree, (path, isDirectory) =>
+      this._scanner.ignores(path, isDirectory),
+    );
+    if (this._uncovered.size > 0) {
+      for (const node of tree.trees.values()) {
+        const path = (node.meta as unknown as FsNodeMeta).relativePath;
+        if (this._uncovered.has(path)) carried.set(path, node);
+      }
+    }
+    return carried;
+  }
+
+  /**
+   * Writes {@link AGENT_STATE_FILE}: the own head, the stamp epochs, and the
+   * ignore list the folder is in step with.
+   */
   private _writeState(): void {
     const stampEpochs = (this._stamps as FsStamps).epochs;
     this._writtenEpochs = JSON.stringify(stampEpochs);
@@ -2630,7 +2777,11 @@ export class FsAgent {
       // as no head at all, and the restart joined like a stranger.
       atomicWriteFileSync(
         join(this._rootPath, AGENT_STATE_FILE),
-        JSON.stringify({ ownHead: this._ownHead, stampEpochs }),
+        JSON.stringify({
+          ownHead: this._ownHead,
+          stampEpochs,
+          ignore: this._ignoreOnRecord,
+        }),
       );
     } catch (err) {
       this._writeSyncError('state/write', err);
@@ -2697,12 +2848,15 @@ export class FsAgent {
   // Sending
 
   /**
-   * Authors an edit for the folder as `tree` describes it, if it moved past
-   * the own head and the edit is honest — see `planAuthoring`.
-   * @param tree - The folder, as just scanned.
+   * Authors an edit for the folder as `scanned` describes it, if it moved past
+   * the own head and the edit is honest — see `planAuthoring`. The paths this
+   * node does not see are carried as the own head holds them.
+   * @param scanned - The folder, as just scanned.
    */
-  private async _author(tree: FsTree): Promise<void> {
+  private async _author(scanned: FsTree): Promise<void> {
     if (this._joinWait || !this._route || !this._chain) return;
+    // What this node does not see, its edit holds as its head holds it.
+    const { tree, carried } = graftTree(scanned, this._carried);
     const folder = this._getFileContentMap(tree);
 
     if (this._ownHead === undefined) {
@@ -2711,20 +2865,27 @@ export class FsAgent {
       if (folder.size === 0) return;
       const treeRef = await this._storeTree(tree);
       const root = await this._chain.append({ treeRef, previous: [] });
-      this._setOwn(root.head, folder);
+      this._setOwn(root.head, folder, carried);
       this._watched.clear();
       this._announceOwn();
       return;
     }
 
+    // What a cut-short apply wrote counts as unchanged: it is not this
+    // node's work, and claiming it would make it the author.
+    const head =
+      this._partiallyApplied.size === 0
+        ? this._ownContent
+        : new Map([...this._ownContent, ...this._partiallyApplied]);
+    // What it carries is unchanged by construction, and not in the folder:
+    // the guard below judges what the folder holds.
+    const seen = (content: ReadonlyMap<string, string>) =>
+      carried.size === 0
+        ? content
+        : new Map([...content].filter(([path]) => !carried.has(path)));
     const plan = planAuthoring({
-      folder,
-      // What a cut-short apply wrote counts as unchanged: it is not this
-      // node's work, and claiming it would make it the author.
-      head:
-        this._partiallyApplied.size === 0
-          ? this._ownContent
-          : new Map([...this._ownContent, ...this._partiallyApplied]),
+      folder: seen(folder),
+      head: seen(head),
       watched: this._watched,
       minFiles: MASS_DELETE_MIN_FILES,
       maxRatio: MASS_DELETE_MAX_RATIO,
@@ -2765,7 +2926,7 @@ export class FsAgent {
       removed: plan.removed,
       previous: [this._ownHead],
     });
-    this._setOwn(entry.head, folder);
+    this._setOwn(entry.head, folder, carried);
     this._watched.clear();
     this._announceOwn();
   }
@@ -2810,8 +2971,26 @@ export class FsAgent {
     const persisted = this._persistedHead();
     const resumed = persisted !== undefined && (await this._treeOf(persisted));
     if (resumed) {
-      this._setOwn(persisted as string, this._getFileContentMap(resumed.tree));
-      await this._exclusive(() => this._author(initial));
+      // Restarted with another ignore list: the folder is in step with the
+      // one recorded until `_uncover` has looked at what that uncovered.
+      const recorded = this._persistedIgnore();
+      if (recorded !== undefined && !sameList(recorded, this._scanner.ignore)) {
+        this._ignoreOnRecord = recorded;
+        this._uncoverDue = true;
+      }
+      this._setOwn(
+        persisted as string,
+        this._getFileContentMap(resumed.tree),
+        this._carriedOf(resumed.tree),
+      );
+      await this._exclusive(async () => {
+        const moved =
+          this._uncoverDue &&
+          (await this._writing(() =>
+            this._uncover(persisted as string, resumed.tree, initial),
+          ));
+        await this._author(moved ? await this._scanner.scanFresh() : initial);
+      });
       this._announceOwn();
     } else if (this._joinWaitMs > 0) {
       this._startJoinWait();
@@ -2922,9 +3101,127 @@ export class FsAgent {
     this._signalJoinOutcome(plan.recover, plan.conflict, copies);
 
     await this.restore(joined.tree, undefined, { cleanTarget: false });
-    this._setOwn(head, headContent);
+    this._setOwn(head, headContent, this._carriedOf(joined.tree));
     await this._author(await this._scanner.scanFresh());
     this._announceOwn();
+  }
+
+  /**
+   * Joins the paths this node sees again: a pattern left its ignore list
+   * since it last ran.
+   *
+   * While a path was ignored, this node neither wrote it nor deleted it, so
+   * the folder can lack what the head holds there, or hold a version of its
+   * own that never went anywhere. Authored as they stand, the first would
+   * delete the network's files and the second overwrite them. So these paths
+   * are joined as a joining folder is (`planJoin`): a version of this node's
+   * own is set aside as a copy, one the history removed goes to
+   * {@link RECOVERED_DIR}, one the history never named is new work — and the
+   * head's version is written, and carried until it is there.
+   * @param head - The own head.
+   * @param headTree - Its tree.
+   * @param folderTree - The folder, as just scanned.
+   * @returns Whether anything in the folder was moved aside.
+   */
+  private async _uncover(
+    head: string,
+    headTree: FsTree,
+    folderTree: FsTree,
+  ): Promise<boolean> {
+    const was = compileIgnore(this._ignoreOnRecord);
+    const seenAgain = (content: ReadonlyMap<string, string>) =>
+      new Map(
+        [...content].filter(
+          ([path, value]) =>
+            !this._carried.has(path) && was.excludes(path, value === DIR_MARKER),
+        ),
+      );
+    const folder = this._getFileContentMap(folderTree);
+    const inHead = seenAgain(this._ownContent);
+    const inFolder = seenAgain(folder);
+
+    let changed = false;
+    if (inHead.size > 0 || inFolder.size > 0) {
+      const walk = await (this._chain as FsEditChain)
+        .collectRemovals(head, undefined)
+        .catch(() => undefined);
+      const plan = planJoin({
+        haveHead: true,
+        head: inHead,
+        folder: inFolder,
+        removedEver: new Set(walk?.complete ? walk.removed : []),
+      });
+      const taken = new Set<string>([...folder.keys(), ...this._ownContent.keys()]);
+      const copies: Record<string, string> = {};
+      for (const path of plan.recover) {
+        await this._setAside(
+          path,
+          `${RECOVERED_DIR}/${recoveredName(path, taken)}`,
+          copies,
+        );
+      }
+      for (const path of plan.conflict) {
+        await this._setAside(path, joinCopyName(path, Date.now(), taken), copies);
+      }
+      this._signalJoinOutcome(plan.recover, plan.conflict, copies, 'ignore');
+      for (const path of [...plan.write, ...plan.conflict]) {
+        this._uncovered.add(path);
+      }
+      this._carried = this._carriedOf(headTree);
+      changed = plan.recover.length + plan.conflict.length > 0;
+    }
+    // The head's versions are fetched with the next head this node hears,
+    // which a node starting offline only does once it can fetch anything.
+    this._uncoverDue = false;
+    if (this._uncovered.size === 0) this._ignoreOnRecord = this._scanner.ignore;
+    this._writeState();
+    return changed;
+  }
+
+  /**
+   * Writes the head's version of every path `_uncover` is waiting for that is
+   * not in the folder — and stops carrying each one that is, whichever
+   * version: a file somebody saved there meanwhile is their work, and the
+   * next edit says so.
+   *
+   * Asked again with every head this node hears, so a version that could not
+   * be fetched — this node started offline — arrives once it can be.
+   */
+  private async _takeUncovered(): Promise<void> {
+    if (this._uncovered.size === 0) return;
+    const there = (path: string) =>
+      lstat(join(this._rootPath, ...path.split('/'))).then(
+        () => true,
+        () => false,
+      );
+    const missing: string[] = [];
+    for (const path of this._uncovered) {
+      if (!(await there(path))) missing.push(path);
+    }
+    if (missing.length > 0) {
+      try {
+        const own = await this._treeOf(this._ownHead as string);
+        if (!own) throw new Error('the own head cannot be read');
+        await this._restorePaths(own.tree, missing);
+      } catch (err) {
+        // What arrived is let go below; the rest waits for the next head.
+        this._writeSyncError('uncover', err);
+      }
+    }
+
+    const arrived = new Set<string>();
+    for (const path of this._uncovered) {
+      if (await there(path)) arrived.add(path);
+    }
+    if (arrived.size === 0) return;
+    for (const path of arrived) this._uncovered.delete(path);
+    this._carried = new Map(
+      [...this._carried].filter(([path]) => !arrived.has(path)),
+    );
+    if (this._uncovered.size === 0) {
+      this._ignoreOnRecord = this._scanner.ignore;
+      this._writeState();
+    }
   }
 
   // ...........................................................................
@@ -3067,7 +3364,10 @@ export class FsAgent {
     const chain = this._chain as FsEditChain;
     return {
       ownHead: () => this._ownHead,
-      flushLocal: async () => this._author(await this._scanner.scanFresh()),
+      flushLocal: async () => {
+        await this._takeUncovered();
+        await this._author(await this._scanner.scanFresh());
+      },
       relate: (ours, theirs) => chain.relate(ours, theirs),
       treeRefOf: async (head) => (await chain.entry(head))?.treeRef,
       applyBehind: (head) => this._applyBehind(head),
@@ -3091,7 +3391,7 @@ export class FsAgent {
    * @param head - The head.
    */
   private async _adopt(head: string): Promise<void> {
-    this._setOwn(head, this._ownContent);
+    this._setOwn(head, this._ownContent, this._carried);
   }
 
   /**
@@ -3114,14 +3414,17 @@ export class FsAgent {
     const theirs = await this._treeOf(head);
     if (!theirs) return 'refused';
     const target = this._getFileContentMap(theirs.tree);
-    const applied = await this._applyContent(target, (paths) =>
-      this._restorePaths(theirs.tree, paths),
+    const carried = this._carriedOf(theirs.tree);
+    const applied = await this._applyContent(
+      target,
+      (paths) => this._restorePaths(theirs.tree, paths),
+      carried,
     );
     if (applied === 'moved') {
       this._receiveAgain(head);
       return 'refused';
     }
-    this._setOwn(head, target);
+    this._setOwn(head, target, carried);
     if (applied === 'kept') await this._author(await this._scanner.scanFresh());
     return 'applied';
   }
@@ -3134,31 +3437,45 @@ export class FsAgent {
    * — content `target` holds nowhere else — is not made. Everything else is,
    * and the files kept become this node's work, so the folder never holds a
    * state the chain does not describe.
+   * The paths this node does not see are neither written nor deleted, and
+   * the guard counts only what the folder holds.
    * @param target - Where the folder should end up, `path → blob`.
    * @param write - Writes the given paths' `target` versions.
+   * @param carried - `target`'s nodes at the paths this node does not see.
    * @returns `applied`; `kept` when the guard kept files `target` lacks;
    *   `moved` when the folder had moved past the own head.
    */
   private async _applyContent(
     target: ReadonlyMap<string, string>,
     write: (paths: readonly string[]) => Promise<void>,
+    carried: ReadonlyMap<string, Tree>,
   ): Promise<'applied' | 'kept' | 'moved'> {
     const own = this._ownContent;
     const landed = this._partiallyApplied;
+    const anyCarried = this._carried.size > 0 || carried.size > 0;
+    const seen = (p: string) =>
+      !anyCarried || (!this._carried.has(p) && !carried.has(p));
     const writes = [...target.keys()].filter(
-      (p) => target.get(p) !== own.get(p) && target.get(p) !== landed.get(p),
+      (p) =>
+        target.get(p) !== own.get(p) && target.get(p) !== landed.get(p) && seen(p),
     );
-    const deletes = [...own.keys()].filter((p) => !target.has(p));
+    const deletes = [...own.keys()].filter((p) => !target.has(p) && seen(p));
 
     const isFile = (v: string | undefined) => v !== undefined && v !== DIR_MARKER;
-    const held = [...own.values()].filter(isFile).length;
+    const filesIn = (content: ReadonlyMap<string, string>): string[] => {
+      const blobs: string[] = [];
+      for (const [p, v] of content) if (isFile(v) && seen(p)) blobs.push(v);
+      return blobs;
+    };
+    const held = filesIn(own).length;
     const deletedFiles = deletes.filter((p) => isFile(own.get(p)));
-    const stillThere = new Set([...target.values()].filter(isFile));
+    const targetFiles = filesIn(target);
+    const stillThere = new Set(targetFiles);
     const lost = deletedFiles.filter((p) => !stillThere.has(own.get(p) as string));
     const keep = new Set(
       (lost.length > MASS_DELETE_MIN_FILES && lost.length / held > MASS_DELETE_MAX_RATIO) ||
         (lost.length > 0 && held > ALL_GONE_MIN_FILES &&
-          [...target.values()].filter(isFile).length <= ALL_GONE_MIN_FILES)
+          targetFiles.length <= ALL_GONE_MIN_FILES)
         ? lost
         : [],
     );
@@ -3363,25 +3680,33 @@ export class FsAgent {
       return 'deferred';
     }
 
-    const applied = await this._applyContent(outcome.merged, async (paths) => {
-      const fromTheirs = paths.filter((p) => outcome.merged.get(p) === theirContent.get(p));
-      if (fromTheirs.length > 0) await this._restorePaths(theirTree.tree, fromTheirs);
-      // Not taken from theirs: a conflicted copy, which is always a file.
-      for (const path of paths.filter((p) => !fromTheirs.includes(p))) {
-        const blob = outcome.merged.get(path) as string;
-        const full = join(this._rootPath, ...path.split('/'));
-        await mkdir(dirname(full), { recursive: true });
-        await FsAgent._atomicWriteFile(full, await this._adapter.getFileContent(blob));
-        const st = await stat(full);
-        this._scanner.noteWrite(path, blob, st.size, st.mtime.getTime());
-      }
-    });
+    const theirCarried = this._carriedOf(theirTree.tree);
+    const applied = await this._applyContent(
+      outcome.merged,
+      async (paths) => {
+        const fromTheirs = paths.filter((p) => outcome.merged.get(p) === theirContent.get(p));
+        if (fromTheirs.length > 0) await this._restorePaths(theirTree.tree, fromTheirs);
+        // Not taken from theirs: a conflicted copy, which is always a file.
+        for (const path of paths.filter((p) => !fromTheirs.includes(p))) {
+          const blob = outcome.merged.get(path) as string;
+          const full = join(this._rootPath, ...path.split('/'));
+          await mkdir(dirname(full), { recursive: true });
+          await FsAgent._atomicWriteFile(full, await this._adapter.getFileContent(blob));
+          const st = await stat(full);
+          this._scanner.noteWrite(path, blob, st.size, st.mtime.getTime());
+        }
+      },
+      theirCarried,
+    );
     if (applied === 'moved') {
       this._receiveAgain(theirs);
       return 'refused';
     }
 
-    const merged = await this._scanner.scanFresh();
+    const { tree: merged, carried } = graftTree(
+      await this._scanner.scanFresh(),
+      await this._mergeCarried(outcome.merged, theirContent, theirCarried),
+    );
     const mergedContent = this._getFileContentMap(merged);
     const treeRef = await this._storeTree(merged);
     const touched = [...new Set([...mergedContent.keys(), ...ours.keys(), ...theirContent.keys()])];
@@ -3393,7 +3718,7 @@ export class FsAgent {
       removed: touched.filter((p) => !mergedContent.has(p)).sort(),
       timeId: `0:${(hip({ previous, treeRef, _hash: '' }) as { _hash: string })._hash}`,
     });
-    this._setOwn(entry.head, mergedContent);
+    this._setOwn(entry.head, mergedContent, carried);
     for (const conflict of outcome.conflicts) {
       this._signal({
         kind: conflict.kind,
@@ -3418,6 +3743,44 @@ export class FsAgent {
   }
 
   /**
+   * What a merge's result holds at the paths this node does not see: the node
+   * of whichever side's version it kept there — and, for a copy a conflict
+   * made at such a path, a node for the version the copy keeps, which the
+   * merge wrote like any other copy.
+   * @param merged - The merge's result, `path → blob`.
+   * @param theirs - The forked head's content.
+   * @param theirCarried - Its nodes at the paths this node does not see.
+   * @returns The nodes to carry, by path.
+   */
+  private async _mergeCarried(
+    merged: ReadonlyMap<string, string>,
+    theirs: ReadonlyMap<string, string>,
+    theirCarried: ReadonlyMap<string, Tree>,
+  ): Promise<Map<string, Tree>> {
+    const ours = this._ownContent;
+    const carried = new Map<string, Tree>();
+    for (const [path, value] of merged) {
+      const yours = theirCarried.get(path);
+      const mine = this._carried.get(path);
+      if (yours && value === theirs.get(path)) {
+        carried.set(path, yours);
+      } else if (mine && value === ours.get(path)) {
+        carried.set(path, mine);
+      } else if (
+        !ours.has(path) &&
+        !theirs.has(path) &&
+        this._scanner.excludes(path, false)
+      ) {
+        const st = await stat(join(this._rootPath, ...path.split('/'))).catch(
+          () => undefined,
+        );
+        if (st?.isFile()) carried.set(path, fileNode(path, value, st.size));
+      }
+    }
+    return carried;
+  }
+
+  /**
    * Hears the network: announcements, the stamps of this node's own, and the
    * hub's state beacon.
    * @param db - The route's database.
@@ -3436,8 +3799,12 @@ export class FsAgent {
     connector.resetReceived?.();
 
     const generation = ++this._receivers;
+    // A connector keeps its callbacks past `tearDown`, so a stopped receive
+    // side went on applying every head it heard — beside the one started
+    // after it, on the same folder, with whatever options it had.
+    let listening = true;
     connector.listen(async (ref, _predecessors, info) => {
-      this._hear(ref, info?.stamp);
+      if (listening) this._hear(ref, info?.stamp);
     });
     const offStamp = connector.onStamp((ref, stamp) =>
       this._recordStamp(ref, stamp),
@@ -3448,6 +3815,7 @@ export class FsAgent {
     for (const event of events) connector.socket.on(event, beacon);
 
     return () => {
+      listening = false;
       offStamp();
       for (const event of events) connector.socket.off(event, beacon);
       connector.tearDown();

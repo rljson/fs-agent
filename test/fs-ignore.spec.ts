@@ -229,6 +229,41 @@ describe('compileIgnore', () => {
       expect(ignore.ignores('$money-2026.csv')).toBe(true);
     });
   });
+
+  // ...........................................................................
+  describe('what a scan leaves out', () => {
+    // `excludes` answers for one path what the scan's walk answers for the
+    // folder: an agent deciding what it must not touch asks about a path in a
+    // tree, without walking down to it.
+
+    it('leaves out what the list ignores', () => {
+      const ignore = compileIgnore(['*.bak']);
+      expect(ignore.excludes('docs/old.bak', false)).toBe(true);
+      expect(ignore.excludes('docs/new.txt', false)).toBe(false);
+      expect(ignore.excludes('docs', true)).toBe(false);
+    });
+
+    it('leaves out everything below an ignored directory', () => {
+      const ignore = compileIgnore(['build/']);
+      expect(ignore.excludes('build', true)).toBe(true);
+      expect(ignore.excludes('build/sub/out.js', false)).toBe(true);
+      expect(ignore.excludes('src/build/out.js', false)).toBe(true);
+      expect(ignore.excludes('src/app/out.js', false)).toBe(false);
+      // A FILE of that name is not a directory the pattern names.
+      expect(ignore.excludes('build', false)).toBe(false);
+    });
+
+    it('cannot rescue a path below an ignored directory, as the scan cannot', () => {
+      // The matcher answers the rule; the scan never gets that far.
+      const ignore = compileIgnore(['build/', '!build/keep.txt']);
+      expect(ignore.ignores('build/keep.txt', false)).toBe(false);
+      expect(ignore.excludes('build/keep.txt', false)).toBe(true);
+    });
+
+    it('never leaves out the root', () => {
+      expect(compileIgnore(['*']).excludes('.', true)).toBe(false);
+    });
+  });
 });
 
 // ...........................................................................

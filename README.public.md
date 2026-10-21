@@ -277,7 +277,7 @@ the path and the pattern.
 | `?` | one character within one segment |
 | `**` | crosses separators. A leading `**/` also matches at the root, so `**/tmp` means `tmp` anywhere |
 | `/` in the pattern | matches the whole path, **anchored at the folder root** — `build/out.txt` is the top-level one, not every `build` |
-| trailing `/` | names a directory, and covers its contents |
+| trailing `/` | names a directory, and covers its contents. It does not anchor, and neither does a leading `/`: `build/` and `/build/` are every folder named `build`, at any depth |
 | leading `!` | an exception, rescuing what an earlier line ignored |
 
 **Order matters: the last matching line decides.** `['*.log', '!keep.log']`
@@ -290,7 +290,7 @@ Blank lines and `#` comments are allowed.
 
 **A pattern containing none of `*`, `?`, `/` or `\`, not starting with `!` and
 not ending with `/` keeps its older meaning: equal to, or a prefix of, any path
-segment.**
+segment — and, as before, case-sensitive.**
 
 That is deliberate and load-bearing, not politeness to old configuration files.
 `~$` is Word's lock-file prefix and `.~lock.` is LibreOffice's — neither is a
@@ -303,9 +303,9 @@ ignore: [
   'node_modules',    // prefix: also matches anything starting with it
   '~$',              // every Word lock file
   '*.log',           // every log file, at any depth
-  'build/',          // the top-level build folder and its contents
+  '!important.log',  // ...except this one
+  'build/',          // every folder named build, and its contents
   '**/tmp',          // tmp anywhere
-  '!build/keep.txt', // ...except this one
 ]
 ```
 
@@ -317,7 +317,33 @@ import { compileIgnore } from '@rljson/fs-agent';
 
 const matcher = compileIgnore(patterns);
 matcher.ignores('src/server.log'); // true
+matcher.excludes('build/keep.txt', false); // true: no scan looks inside build/
 ```
+
+### When nodes' lists differ, or change
+
+Each node's list is its own, and a tree does not say which list made it. So
+a path a node ignores is one it never touches:
+
+- **Nothing it ignores is written** into its folder, and nothing it ignores is
+  deleted from it — not by a peer's edit, not by a merge, not by a restore.
+- **Its edits carry those paths** as its head holds them: other nodes' versions,
+  unchanged. A node's ignore list never deletes anything on another node, and
+  never takes another node's version back.
+- **Adding a pattern** — the files stay where they are, on every machine, and
+  stop syncing from this one. Its own copy stays as it is.
+- **Removing a pattern** — the node takes the network's version first, as a
+  joining folder does: what it never received arrives, a version of its own
+  that differs is kept beside it as a conflicted copy, and one the network
+  deleted is moved to `.fsagent-recovered/`. Until a file has arrived — the
+  node started offline, say — it is carried, never announced as deleted.
+- **A folder it ignores is never removed to make room** for a peer's file of
+  the same name, or the other way round: that path is reported as unwritable
+  (`path/unwritable`) and left as it is.
+
+The list is read once, at start: a change takes a restart. The agent records
+the list in `.fsagent-state.json`, which is how it knows on the next start
+which paths it sees again.
 
 ---
 
