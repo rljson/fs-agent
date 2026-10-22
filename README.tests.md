@@ -9,7 +9,7 @@ found in the LICENSE file in the root of this package.
 # The test suite, as a document
 
 **70 files, 807 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 801 must pass; one is committed inverted, and §2.11 says which and why.
+lines.** 806 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
