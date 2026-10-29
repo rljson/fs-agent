@@ -30,20 +30,20 @@
   "devDependencies": {
     "@rljson/dna-rljson": "0.2.0",
     "@rljson/server": "0.0.77",
-    "@tssuite/helix-js": "0.5.0",
-    "@types/node": "^26.6.5",
-    "@typescript-eslint/eslint-plugin": "^8.72.0",
-    "@typescript-eslint/parser": "^8.72.0",
+    "@tssuite/helix-js": "0.5.1",
+    "@types/node": "^26.6.6",
+    "@typescript-eslint/eslint-plugin": "^8.72.1",
+    "@typescript-eslint/parser": "^8.72.1",
     "@vitest/coverage-v8": "^5.0.5",
     "cross-env": "^10.1.0",
     "eslint": "~10.13.0",
-    "eslint-plugin-jsdoc": "^65.4.0",
+    "eslint-plugin-jsdoc": "^65.4.2",
     "eslint-plugin-tsdoc": "^0.5.4",
     "globals": "^17.13.0",
     "jsdoc": "^4.0.5",
     "read-pkg": "^10.1.0",
     "typescript": "~6.0.3",
-    "typescript-eslint": "^8.72.0",
+    "typescript-eslint": "^8.72.1",
     "vite": "^8.3.5",
     "vite-node": "^6.0.0",
     "vite-plugin-dts": "^5.1.2",
@@ -64,16 +64,7 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
-    ],
-    "overrides": {
-      "@rljson/bs": "0.0.29",
-      "@rljson/db": "0.1.1",
-      "@rljson/hash": "0.0.19",
-      "@rljson/io": "0.0.85",
-      "@rljson/json": "0.0.23",
-      "@rljson/rljson": "0.0.86",
-      "@rljson/server": "0.0.76"
-    }
+    ]
   },
   "packageManager": "pnpm@10.11.0"
 }
