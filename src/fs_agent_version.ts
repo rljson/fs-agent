@@ -2,4 +2,4 @@
 // Kept in sync by test/fs_agent_version.spec.ts.
 
 /** The version of the `@rljson/fs-agent` package. */
-export const fsAgentVersion = '0.2.4';
+export const fsAgentVersion = '0.2.5';
