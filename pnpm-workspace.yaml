@@ -5,3 +5,9 @@
 overrides:
   "@rljson\/server": link:./.gg/ts_links/@rljson/server
   "@rljson\/network": link:./.gg/ts_links/@rljson/network
+  "@rljson\/bs": link:./.gg/ts_links/@rljson/bs
+  "@rljson\/rljson": link:./.gg/ts_links/@rljson/rljson
+  "@rljson\/db": link:./.gg/ts_links/@rljson/db
+  "@rljson\/io": link:./.gg/ts_links/@rljson/io
+  "@rljson\/validate": link:./.gg/ts_links/@rljson/validate
+  "@rljson\/converter": link:./.gg/ts_links/@rljson/converter
