@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@rljson/network': link:./.gg/ts_links/@rljson/network
   '@rljson/bs': link:./.gg/ts_links/@rljson/bs
   '@rljson/server': link:./.gg/ts_links/@rljson/server
 
