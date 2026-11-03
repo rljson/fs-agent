@@ -4,13 +4,17 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@rljson/bs': link:./.gg/ts_links/@rljson/bs
+  '@rljson/server': link:./.gg/ts_links/@rljson/server
+
 importers:
 
   .:
     dependencies:
       '@rljson/bs':
-        specifier: 0.0.32
-        version: 0.0.32
+        specifier: link:.gg/ts_links/@rljson/bs
+        version: link:.gg/ts_links/@rljson/bs
       '@rljson/db':
         specifier: 0.1.4
         version: 0.1.4
@@ -37,8 +41,8 @@ importers:
         specifier: ^0.3.2
         version: 0.3.2
       '@rljson/server':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: link:.gg/ts_links/@rljson/server
+        version: link:.gg/ts_links/@rljson/server
       '@tssuite/helix-js':
         specifier: 0.5.1
         version: 0.5.1
@@ -447,10 +451,6 @@ packages:
   '@oxc-project/types@0.156.0':
     resolution: {integrity: sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==}
 
-  '@rljson/bs@0.0.32':
-    resolution: {integrity: sha512-EdvgaYLIVfVyY8KDdecBEe5bBnsJU+o1d1ArncEgsi9gFjfl53wl4UOeszeLyoG4wL2gu+w3QhWXrn3d9EwDEQ==}
-    engines: {node: '>=22.14.0'}
-
   '@rljson/db@0.1.4':
     resolution: {integrity: sha512-X7e1+dkmriI5hTqBXasI7pdKUvyYK2g93oyyWcZVpF3oRuuMUP/4rPS7vSCiyYEVIMU/JFXY57X3+dERXdrspg==}
     engines: {node: '>=22.14.0'}
@@ -475,16 +475,8 @@ packages:
     resolution: {integrity: sha512-ViYo8zx0z/SomjpS2f+xK+tS7HTwZI1HzRarHpXO3spVjpaF+GKCa7HgDXoV/Wc+zsliDzo8wz7S5NFb0yZaow==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/network@0.0.28':
-    resolution: {integrity: sha512-RR3GtBYbKbpTpVwGTmjuEtKYZlljNYztbNCP3NsIKnLmwLGpHcA5YBU1V0KYLrhtFVwsvx895vQNRKOMlqlNXg==}
-    engines: {node: '>=22.14.0'}
-
   '@rljson/rljson@0.0.89':
     resolution: {integrity: sha512-NWlkVtGR6uZ8f4tc/HWJGrgtmPPOxofPFD2U2WwK640SdS2Ua5kpmEYf1A926ujf+FrXlX2348/27SXXla+Kbw==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/server@0.1.0':
-    resolution: {integrity: sha512-nDAFp5p2ivrIu0xeO2nCl18To1RDeEF0Wz1NTTi5nZ4JJNXl9GW1Rm6Lpxeylud5n5gcUwRW+Doz6dWb1qQptQ==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/validate@0.0.15':
@@ -2374,12 +2366,6 @@ snapshots:
 
   '@oxc-project/types@0.156.0': {}
 
-  '@rljson/bs@0.0.32':
-    dependencies:
-      '@rljson/hash': 0.0.21
-      '@rljson/json': 0.0.23
-      '@rljson/rljson': 0.0.89
-
   '@rljson/db@0.1.4':
     dependencies:
       '@rljson/hash': 0.0.21
@@ -2417,23 +2403,11 @@ snapshots:
 
   '@rljson/json@0.0.23': {}
 
-  '@rljson/network@0.0.28': {}
-
   '@rljson/rljson@0.0.89':
     dependencies:
       '@rljson/hash': 0.0.21
       '@rljson/json': 0.0.23
       nanoid: 6.0.2
-
-  '@rljson/server@0.1.0':
-    dependencies:
-      '@rljson/bs': 0.0.32
-      '@rljson/db': 0.1.4
-      '@rljson/hash': 0.0.21
-      '@rljson/io': 0.0.88
-      '@rljson/json': 0.0.23
-      '@rljson/network': 0.0.28
-      '@rljson/rljson': 0.0.89
 
   '@rljson/validate@0.0.15':
     dependencies:
