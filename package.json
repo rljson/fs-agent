@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@rljson/dna-rljson": "^0.3.2",
-    "@rljson/server": "0.1.0",
+    "@rljson/server": "0.2.0",
     "@tssuite/helix-js": "0.5.1",
     "@types/node": "^26.6.6",
     "@typescript-eslint/eslint-plugin": "^8.72.1",
@@ -37,7 +37,7 @@
     "@vitest/coverage-v8": "^5.1.0",
     "cross-env": "^10.1.0",
     "eslint": "~10.14.0",
-    "eslint-plugin-jsdoc": "^65.4.2",
+    "eslint-plugin-jsdoc": "^65.4.3",
     "eslint-plugin-tsdoc": "^0.5.4",
     "globals": "^17.14.0",
     "jsdoc": "^4.0.5",
@@ -52,7 +52,7 @@
     "vitest-dom": "^0.1.1"
   },
   "dependencies": {
-    "@rljson/bs": "0.0.32",
+    "@rljson/bs": "0.1.1",
     "@rljson/db": "0.1.4",
     "@rljson/hash": "0.0.21",
     "@rljson/io": "0.0.88",
