@@ -23,7 +23,6 @@ import { dirname, join, relative, resolve, sep } from 'path';
 
 import {
   ATOMIC_TMP_PREFIX,
-  atomicWriteFile,
   atomicWriteFileSync,
   atomicWriteStream,
 } from './fs-atomic-write.ts';
@@ -951,23 +950,6 @@ export class FsAgent {
   }
 
   /**
-   * Writes a file through a staging file and a rename.
-   *
-   * Kept as a thin named wrapper because the restore path reads as a pair with
-   * {@link FsAgent._atomicWriteStream}. The rule, and the byte-level
-   * corruption that made it a rule on every platform rather than on Windows
-   * only, are in `fs-atomic-write.ts`.
-   * @param filePath - Destination path
-   * @param content - Bytes to write
-   */
-  private static async _atomicWriteFile(
-    filePath: string,
-    content: Buffer | string,
-  ): Promise<void> {
-    return atomicWriteFile(filePath, content);
-  }
-
-  /**
    * Whether this error came from reading the blob rather than writing the file.
    *
    * The two have different answers. A blob that cannot be fetched costs one
@@ -991,8 +973,9 @@ export class FsAgent {
   /**
    * Writes a file from a stream, holding one chunk at a time.
    *
-   * The twin of {@link FsAgent._atomicWriteFile} — temp and rename on every
-   * platform, for the same reasons — but never materialising the whole file. A
+   * Temp and rename on every platform — the rule, and the byte-level
+   * corruption that made it a rule, are in `fs-atomic-write.ts` — and never
+   * materialising the whole file. A
    * 500 MB file used to cost 500 MB of Buffer on the receiving agent, another
    * copy in the socket parser, and — on the serving hub — the same again. That
    * is the shape that exhausted a cloud relay: memory that is work in flight
@@ -3691,7 +3674,7 @@ export class FsAgent {
           const blob = outcome.merged.get(path) as string;
           const full = join(this._rootPath, ...path.split('/'));
           await mkdir(dirname(full), { recursive: true });
-          await FsAgent._atomicWriteFile(full, await this._adapter.getFileContent(blob));
+          await FsAgent._atomicWriteStream(full, await this._bs.getBlobStream(blob));
           const st = await stat(full);
           this._scanner.noteWrite(path, blob, st.size, st.mtime.getTime());
         }

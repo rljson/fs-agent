@@ -1,0 +1,37 @@
+// @license
+// Copyright (c) rljson
+//
+// Use of this source code is governed by terms that can be
+// found in the LICENSE file in the root of this package.
+
+{
+  // The package name, as declared in pubspec.yaml / package.json.
+  "name": "@rljson/fs-agent",
+
+  // 1-2 sentence summary about this repo.
+  "summary": "Keeps a folder the same on several machines: scans, edit chain, hub relays; file content as Bs blobs.",
+
+  // 1-3 bullet points: the problem space.
+  "domain": [
+    "folder scan, watcher, scan cache",
+    "edit chain: authoring, receiving, merging, conflict copies",
+    "restore and conflict copies streamed block by block"
+  ],
+
+  // The repos this one depends on and the repos depending on it.
+  // Keep the reason or the API behind each entry, not just the name.
+  "interfaces": {
+    // "<repo-a>": "why / API"
+    "uses": {
+      "bs": "Bs (setBlob, getBlobStream)",
+      "db": "Db, Connector, trees",
+      "io": "Io",
+      "hash": "tree hashing",
+      "rljson": "types",
+      "server": "test: Client, Server over Socket.IO"
+    },
+
+    // "<repo-b>": "why / API"
+    "usedBy": {}
+  }
+}

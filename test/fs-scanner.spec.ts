@@ -10,7 +10,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
 
-import { FsScanner, STUCK_PAUSE_MS } from '../src/fs-scanner.ts';
+import {
+  FsScanner,
+  SCAN_CACHE_VERSION,
+  STUCK_PAUSE_MS,
+} from '../src/fs-scanner.ts';
 
 
 describe('FsScanner', () => {
@@ -1191,6 +1195,28 @@ describe('FsScanner', () => {
       const paths = cache.entries.map((e: [string, unknown]) => e[0]);
       expect(paths).toContain('b.txt');
       expect(paths).not.toContain('a.txt');
+    });
+
+    it('discards a cache of an older version and stores every file again', async () => {
+      // A cache written before the blob store kept blocks names blobs the
+      // store no longer holds. Reusing them would announce blobs nobody can
+      // fetch, so the first scan after the upgrade reads every file again.
+      await writeFile(join(testDir, 'a.txt'), 'hello');
+      const first = new FsScanner(testDir, { scanCachePath: cachePath });
+      await first.scan();
+      const current = JSON.parse(await readFile(cachePath, 'utf8'));
+      expect(current.version).toBe(SCAN_CACHE_VERSION);
+      await writeFile(
+        cachePath,
+        JSON.stringify({ ...current, version: SCAN_CACHE_VERSION - 1 }),
+      );
+
+      const bs = new BsMem();
+      const setBlob = vi.spyOn(bs, 'setBlob');
+      const scanner = new FsScanner(testDir, { bs, scanCachePath: cachePath });
+      await scanner.scan();
+      expect(setBlob).toHaveBeenCalledTimes(1);
+      expect(await bs.blobExists(current.entries[0][1].blobId)).toBe(true);
     });
 
     it('tolerates a corrupt or incompatible cache file (cold scan)', async () => {

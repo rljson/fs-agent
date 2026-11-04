@@ -134,6 +134,17 @@ export const DEFAULT_SETTLE_MS = 100;
 /** How many of this process's own writes the scanner remembers. */
 const OWN_WRITES_MAX = 10_000;
 
+/**
+ * The format of a persisted scan cache. A cache of any other version is
+ * discarded, and the next scan reads and stores every file once.
+ *
+ * A cached blobId is only worth reusing while the blob store still holds that
+ * blob. Version 2 came with a blob store that keeps blobs as blocks in a new
+ * layout: a node coming up with an older cache would announce blobs its store
+ * no longer holds, and nobody could fetch them until each file changed again.
+ */
+export const SCAN_CACHE_VERSION = 2;
+
 export interface FsScanOptions {
   /** Patterns to ignore (glob patterns) */
   ignore?: string[];
@@ -990,9 +1001,13 @@ export class FsScanner {
     try {
       const raw = await readFile(this._scanCachePath, 'utf8');
       const parsed = JSON.parse(raw) as {
+        version?: number;
         entries?: [string, { mtime: number; size: number; blobId: string }][];
       };
-      if (Array.isArray(parsed.entries)) {
+      if (
+        parsed.version === SCAN_CACHE_VERSION &&
+        Array.isArray(parsed.entries)
+      ) {
         this._blobCache = new Map(parsed.entries);
       }
     } catch {
@@ -1008,7 +1023,7 @@ export class FsScanner {
     /* v8 ignore next -- @preserve: only called when scanCachePath is set */
     if (!this._scanCachePath) return;
     const body = JSON.stringify({
-      version: 1,
+      version: SCAN_CACHE_VERSION,
       entries: [...this._blobCache.entries()],
     });
     const tmp = `${this._scanCachePath}.${Date.now().toString(36)}.tmp`;
