@@ -15,6 +15,15 @@
   cached blobId is only worth reusing while the blob store still holds that
   blob, and a store that keeps blobs as blocks in a new layout does not hold
   the old ones.
+- **A safety rescan does not start while one is running.** The timer fires
+  every five seconds whatever a scan costs; during a 400 MB copy seven ticks
+  joined one scan and each reported the same drift — seven log lines and
+  seven notifications for one change.
+- **A file the scanner cannot open keeps its last version** instead of failing
+  the whole scan: locked by a program copying it (`EBUSY`), or not readable
+  (`EPERM`, `EACCES`). Every other change of the folder goes on; the file is
+  read again by the next scan and reported once, not on every scan. A scan
+  without a watcher still fails for it, since nothing would come back for it.
 
 ### CLAUDE.md keeps this repo's own rules
 

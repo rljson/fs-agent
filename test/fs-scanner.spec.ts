@@ -755,6 +755,39 @@ describe('FsScanner', () => {
       expect(changes).toContain('safety-rescan');
     });
 
+    it('reports a drift once, however many ticks fall into one rescan', async () => {
+      // The timer fires every five seconds whatever a scan costs. During a
+      // 400 MB copy on the lab, seven ticks joined one scan and each then
+      // reported the same drift: seven lines in one millisecond, seven
+      // notifications for one change.
+      await writeFile(join(testDir, 'a.txt'), 'a');
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => {
+        changes.push(c.type);
+      });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await writeFile(join(testDir, 'missed.txt'), 'missed');
+      await Promise.all([
+        runRescan(scanner),
+        runRescan(scanner),
+        runRescan(scanner),
+      ]);
+
+      expect(changes).toEqual(['safety-rescan']);
+      expect(
+        warn.mock.calls.filter((c) => String(c[0]).includes('detected drift')),
+      ).toHaveLength(1);
+      warn.mockRestore();
+
+      // The next tick runs again.
+      await writeFile(join(testDir, 'later.txt'), 'later');
+      await runRescan(scanner);
+      expect(changes).toEqual(['safety-rescan', 'safety-rescan']);
+    });
+
     it('still reports drift while paused — a stuck pause must not silence it', async () => {
       // This asserted the opposite until v0.0.19, and that was the bug: the
       // pause taken on socket disconnect is released only by the matching
