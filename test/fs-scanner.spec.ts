@@ -10,7 +10,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BsMem } from '@rljson/bs';
 
-import { FsScanner, STUCK_PAUSE_MS } from '../src/fs-scanner.ts';
+import {
+  FsScanner,
+  SCAN_CACHE_VERSION,
+  STUCK_PAUSE_MS,
+} from '../src/fs-scanner.ts';
 
 
 describe('FsScanner', () => {
@@ -751,6 +755,39 @@ describe('FsScanner', () => {
       expect(changes).toContain('safety-rescan');
     });
 
+    it('reports a drift once, however many ticks fall into one rescan', async () => {
+      // The timer fires every five seconds whatever a scan costs. During a
+      // 400 MB copy on the lab, seven ticks joined one scan and each then
+      // reported the same drift: seven lines in one millisecond, seven
+      // notifications for one change.
+      await writeFile(join(testDir, 'a.txt'), 'a');
+      const scanner = new FsScanner(testDir);
+      await scanner.scan();
+      const changes: string[] = [];
+      scanner.onChange((c) => {
+        changes.push(c.type);
+      });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await writeFile(join(testDir, 'missed.txt'), 'missed');
+      await Promise.all([
+        runRescan(scanner),
+        runRescan(scanner),
+        runRescan(scanner),
+      ]);
+
+      expect(changes).toEqual(['safety-rescan']);
+      expect(
+        warn.mock.calls.filter((c) => String(c[0]).includes('detected drift')),
+      ).toHaveLength(1);
+      warn.mockRestore();
+
+      // The next tick runs again.
+      await writeFile(join(testDir, 'later.txt'), 'later');
+      await runRescan(scanner);
+      expect(changes).toEqual(['safety-rescan', 'safety-rescan']);
+    });
+
     it('still reports drift while paused — a stuck pause must not silence it', async () => {
       // This asserted the opposite until v0.0.19, and that was the bug: the
       // pause taken on socket disconnect is released only by the matching
@@ -1191,6 +1228,28 @@ describe('FsScanner', () => {
       const paths = cache.entries.map((e: [string, unknown]) => e[0]);
       expect(paths).toContain('b.txt');
       expect(paths).not.toContain('a.txt');
+    });
+
+    it('discards a cache of an older version and stores every file again', async () => {
+      // A cache written before the blob store kept blocks names blobs the
+      // store no longer holds. Reusing them would announce blobs nobody can
+      // fetch, so the first scan after the upgrade reads every file again.
+      await writeFile(join(testDir, 'a.txt'), 'hello');
+      const first = new FsScanner(testDir, { scanCachePath: cachePath });
+      await first.scan();
+      const current = JSON.parse(await readFile(cachePath, 'utf8'));
+      expect(current.version).toBe(SCAN_CACHE_VERSION);
+      await writeFile(
+        cachePath,
+        JSON.stringify({ ...current, version: SCAN_CACHE_VERSION - 1 }),
+      );
+
+      const bs = new BsMem();
+      const setBlob = vi.spyOn(bs, 'setBlob');
+      const scanner = new FsScanner(testDir, { bs, scanCachePath: cachePath });
+      await scanner.scan();
+      expect(setBlob).toHaveBeenCalledTimes(1);
+      expect(await bs.blobExists(current.entries[0][1].blobId)).toBe(true);
     });
 
     it('tolerates a corrupt or incompatible cache file (cold scan)', async () => {

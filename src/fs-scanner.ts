@@ -134,6 +134,17 @@ export const DEFAULT_SETTLE_MS = 100;
 /** How many of this process's own writes the scanner remembers. */
 const OWN_WRITES_MAX = 10_000;
 
+/**
+ * The format of a persisted scan cache. A cache of any other version is
+ * discarded, and the next scan reads and stores every file once.
+ *
+ * A cached blobId is only worth reusing while the blob store still holds that
+ * blob. Version 2 came with a blob store that keeps blobs as blocks in a new
+ * layout: a node coming up with an older cache would announce blobs its store
+ * no longer holds, and nobody could fetch them until each file changed again.
+ */
+export const SCAN_CACHE_VERSION = 2;
+
 export interface FsScanOptions {
   /** Patterns to ignore (glob patterns) */
   ignore?: string[];
@@ -203,6 +214,10 @@ export class FsScanner {
   private _missedChangesDuringPause: boolean = false;
   /** Periodic full-rescan timer that catches events the native watcher drops. */
   private _safetyTimer: ReturnType<typeof setInterval> | null = null;
+  /** Whether a safety rescan is running; a tick meanwhile is skipped. */
+  private _safetyRescanRunning = false;
+  /** Files that could not be opened, reported once until they can be. */
+  private readonly _locked = new Set<string>();
   /** When the current pause began, or null when not paused. */
   private _pausedAt: number | null = null;
 
@@ -801,10 +816,24 @@ export class FsScanner {
               // handler can recognise and skip it, rather than burying the code
               // in a message string and killing the whole scan.
               if (FsScanner._isVanished(error)) throw error;
+              // Locked — Windows refuses to open a file while a program
+              // copies or holds it. Failing the scan for it stopped every
+              // other change of the folder for as long as the copy ran. It
+              // keeps the version the last scan read, and is read again by
+              // the next scan: the watcher event of the copy closing it, or
+              // the safety rescan. Not a deferral that comes back after
+              // `settleMs`: a file a program keeps open for hours would
+              // rescan the folder several times a second.
+              if (this._watcher !== null && FsScanner._isLocked(error)) {
+                this._reportLocked(childRelPath, error);
+                this._keepPrevious(childRelPath, trees, childTrees, childRefs);
+                continue;
+              }
               throw new Error(
                 `Failed to read file "${childRelPath}": ${error instanceof Error ? error.message : String(error)}`,
               );
             }
+            this._locked.delete(childRelPath);
 
             let blobProps;
             try {
@@ -990,9 +1019,13 @@ export class FsScanner {
     try {
       const raw = await readFile(this._scanCachePath, 'utf8');
       const parsed = JSON.parse(raw) as {
+        version?: number;
         entries?: [string, { mtime: number; size: number; blobId: string }][];
       };
-      if (Array.isArray(parsed.entries)) {
+      if (
+        parsed.version === SCAN_CACHE_VERSION &&
+        Array.isArray(parsed.entries)
+      ) {
         this._blobCache = new Map(parsed.entries);
       }
     } catch {
@@ -1008,7 +1041,7 @@ export class FsScanner {
     /* v8 ignore next -- @preserve: only called when scanCachePath is set */
     if (!this._scanCachePath) return;
     const body = JSON.stringify({
-      version: 1,
+      version: SCAN_CACHE_VERSION,
       entries: [...this._blobCache.entries()],
     });
     const tmp = `${this._scanCachePath}.${Date.now().toString(36)}.tmp`;
@@ -1186,6 +1219,23 @@ export class FsScanner {
     childRefs: string[],
   ): void {
     this._unsettledDuringScan.push(relativePath);
+    this._keepPrevious(relativePath, trees, childTrees, childRefs);
+  }
+
+  /**
+   * Puts the node the last scan had for a path into this scan's tree, when
+   * there was one.
+   * @param relativePath - The path.
+   * @param trees - The tree map being built.
+   * @param childTrees - The parent's child nodes.
+   * @param childRefs - The parent's child hashes.
+   */
+  private _keepPrevious(
+    relativePath: string,
+    trees: Map<string, Tree>,
+    childTrees: Tree[],
+    childRefs: string[],
+  ): void {
     const previous = this.getTreeByPath(relativePath);
     if (!previous) return;
     const hash = previous._hash as string;
@@ -1214,7 +1264,27 @@ export class FsScanner {
     /* v8 ignore stop -- @preserve */
   }
 
+  /**
+   * Runs one safety rescan, unless one is still running.
+   *
+   * The timer fires every {@link SAFETY_RESCAN_INTERVAL_MS} whatever a scan
+   * costs, and a scan that waits on a large file being copied takes far
+   * longer. Every tick then joined the same scan and, when it ended, each
+   * reported the same drift — seven times in one millisecond on the lab
+   * during a 400 MB copy, and seven notifications for one change. The tick
+   * that finds a rescan running is covered by it.
+   */
   private async _runSafetyRescan(): Promise<void> {
+    if (this._safetyRescanRunning) return;
+    this._safetyRescanRunning = true;
+    try {
+      await this._safetyRescan();
+    } finally {
+      this._safetyRescanRunning = false;
+    }
+  }
+
+  private async _safetyRescan(): Promise<void> {
     // Gated on the pause looking STUCK, not on the pause itself. A stuck pause
     // is what this exists to recover from — but scanning during a legitimate
     // restore pause mutates `_tree` underneath the restore, which broke delete
@@ -1306,6 +1376,31 @@ export class FsScanner {
    * @param err - The caught value.
    * @returns `true` for ENOENT / ENOTDIR.
    */
+  /**
+   * Whether an open failed because the file is held by another program, or
+   * may not be read: Windows answers a copy in progress with EBUSY.
+   * @param err - What the open threw.
+   * @returns True for EBUSY, EPERM and EACCES.
+   */
+  private static _isLocked(err: unknown): boolean {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+  }
+
+  /**
+   * Reports a file that could not be opened, once until it can be again.
+   * @param relativePath - The file.
+   * @param err - Why it could not be opened.
+   */
+  private _reportLocked(relativePath: string, err: unknown): void {
+    if (this._locked.has(relativePath)) return;
+    this._locked.add(relativePath);
+    console.warn(
+      `[fs-scanner] "${relativePath}" is locked (${FsScanner._errMessage(err)}) — ` +
+        'keeping its last version, read again on the next scan',
+    );
+  }
+
   private static _isVanished(err: unknown): boolean {
     const code = (err as NodeJS.ErrnoException | null)?.code;
     return code === 'ENOENT' || code === 'ENOTDIR';

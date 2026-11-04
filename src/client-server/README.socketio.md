@@ -202,7 +202,9 @@ const socketIoServer = new SocketIoServer(httpServer, {
     origin: 'https://yourdomain.com',
     credentials: true,
   },
-  maxHttpBufferSize: 10 * 1024 * 1024, // 10MB for large files
+  // Files cross as blocks of at most 4 MB; the largest messages are the
+  // trees of large folders.
+  maxHttpBufferSize: 10 * 1024 * 1024,
   pingTimeout: 60000,
   pingInterval: 25000,
 });

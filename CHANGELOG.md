@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Large files
+
+- **A 60 MB file over real Socket.IO with a 50 MB message cap** is added,
+  changed, kept as a conflicted copy and deleted
+  (`test/client-server/large-file.spec.ts`). A 1 KB change in its middle moves
+  3.1 MB through the hub instead of 126 MB.
+- **A conflicted copy is written as a stream,** block by block, instead of
+  reading the whole blob into memory first.
+- **The persisted scan cache carries version 2,** and a cache of any other
+  version is discarded: the first scan reads and stores every file again. A
+  cached blobId is only worth reusing while the blob store still holds that
+  blob, and a store that keeps blobs as blocks in a new layout does not hold
+  the old ones.
+- **A safety rescan does not start while one is running.** The timer fires
+  every five seconds whatever a scan costs; during a 400 MB copy seven ticks
+  joined one scan and each reported the same drift — seven log lines and
+  seven notifications for one change.
+- **A file the scanner cannot open keeps its last version** instead of failing
+  the whole scan: locked by a program copying it (`EBUSY`), or not readable
+  (`EPERM`, `EACCES`). Every other change of the folder goes on; the file is
+  read again by the next scan and reported once, not on every scan. A scan
+  without a watcher still fails for it, since nothing would come back for it.
+
 ### CLAUDE.md keeps this repo's own rules
 
 - The rules every rljson repo shares (coverage, pinning, docs, releases,

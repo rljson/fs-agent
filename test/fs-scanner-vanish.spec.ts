@@ -240,3 +240,115 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
     expect(pathsIn(tree)).not.toContain('dangling.txt');
   });
 });
+
+describe('FsScanner — a file locked by the program writing it', () => {
+  const testDir = join(process.cwd(), 'test-temp-fs-scanner-locked');
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let scanner: InstanceType<typeof FsScanner> | undefined;
+
+  beforeEach(async () => {
+    failures.length = 0;
+    await rm(testDir, { recursive: true, force: true });
+    await mkdir(testDir, { recursive: true });
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    failures.length = 0;
+    scanner?.stopWatch();
+    scanner = undefined;
+    warnSpy.mockRestore();
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  const lockedLines = (): string[] =>
+    warnSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((line) => line.includes('is locked'));
+
+  const blobOf = (
+    tree: { trees: Map<string, { meta: unknown }> },
+    path: string,
+  ): string | undefined =>
+    Array.from(tree.trees.values())
+      .map((t) => t.meta as { relativePath?: string; blobId?: string } | null)
+      .find((m) => m?.relativePath === path)?.blobId;
+
+  it('keeps its last version while the rest of the folder goes on, and reads it once it is free', async () => {
+    // Windows refuses to open a file while Explorer copies it. That failed the
+    // whole scan — measured on the lab with a 400 MB setup copied into the
+    // folder — and every other change waited for the copy to end.
+    await writeFile(join(testDir, 'setup.exe'), 'version 1');
+    await writeFile(join(testDir, 'note.txt'), 'note 1');
+    scanner = new FsScanner(testDir, { bs: new BsMem(), settleMs: 0 });
+    await scanner.watch();
+    const before = blobOf(scanner.tree!, 'setup.exe');
+    const noteBefore = blobOf(scanner.tree!, 'note.txt');
+
+    await writeFile(join(testDir, 'setup.exe'), 'version 2, still being copied');
+    await writeFile(join(testDir, 'note.txt'), 'note 2');
+    failures.push({ op: 'open', match: /setup\.exe$/, code: 'EBUSY' });
+    // A file that just changed size is waited for first; the scans after it
+    // open it, find it locked, and say so once.
+    const during = await scanner.scan();
+    await scanner.scan();
+    await scanner.scan();
+
+    expect(blobOf(during, 'setup.exe')).toBe(before);
+    // The rest of the folder went on.
+    expect(blobOf(during, 'note.txt')).toBeDefined();
+    expect(blobOf(during, 'note.txt')).not.toBe(noteBefore);
+    // Said once, not on every scan while it stays locked.
+    expect(lockedLines()).toHaveLength(1);
+    expect(lockedLines()[0]).toContain('"setup.exe" is locked');
+
+    failures.length = 0;
+    const after = await scanner.scan();
+    expect(blobOf(after, 'setup.exe')).not.toBe(before);
+    expect(blobOf(after, 'setup.exe')).toBeDefined();
+  });
+
+  it('leaves a new file out until it can be read', async () => {
+    await writeFile(join(testDir, 'stays.txt'), 'stays');
+    scanner = new FsScanner(testDir, { bs: new BsMem(), settleMs: 0 });
+    await scanner.watch();
+
+    await writeFile(join(testDir, 'copying.exe'), 'half');
+    failures.push({ op: 'open', match: /copying\.exe$/, code: 'EPERM' });
+    // The first sight of a file is deferred anyway; the second scan opens it.
+    await scanner.scan();
+    const during = await scanner.scan();
+
+    expect(pathsIn(during)).toContain('stays.txt');
+    expect(pathsIn(during)).not.toContain('copying.exe');
+    expect(lockedLines()).toHaveLength(1);
+  });
+
+  it('treats a file it may not read the same way', async () => {
+    await writeFile(join(testDir, 'stays.txt'), 'stays');
+    await writeFile(join(testDir, 'private.dbf'), 'private');
+    scanner = new FsScanner(testDir, { bs: new BsMem(), settleMs: 0 });
+    await scanner.watch();
+
+    await writeFile(join(testDir, 'private.dbf'), 'private, changed');
+    failures.push({ op: 'open', match: /private\.dbf$/, code: 'EACCES' });
+    await scanner.scan();
+    const during = await scanner.scan();
+
+    expect(pathsIn(during)).toEqual(
+      expect.arrayContaining(['stays.txt', 'private.dbf']),
+    );
+    expect(lockedLines()[0]).toContain('"private.dbf" is locked');
+  });
+
+  it('still fails a scan that nobody comes back after', async () => {
+    // Without a watcher there is no next scan to read it in: leaving the file
+    // out would drop it from a one-shot extract.
+    await writeFile(join(testDir, 'held.exe'), 'held');
+    failures.push({ op: 'open', match: /held\.exe$/, code: 'EACCES' });
+
+    await expect(
+      new FsScanner(testDir, { bs: new BsMem() }).scan(),
+    ).rejects.toThrow('Failed to read file "held.exe"');
+  });
+});

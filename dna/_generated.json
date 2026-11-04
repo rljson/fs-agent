@@ -77,9 +77,9 @@
       "name": "dna-gg",
       "package": "@ggdna/dna-gg",
       "ecosystem": "node",
-      "resolvedVersion": "1.3.0",
+      "resolvedVersion": "1.4.0",
       "via": "dna-rljson",
-      "hash": "0x7e5e4bbb754c4f13"
+      "hash": "0xcda6ccaeb5d52dd1"
     },
     {
       "name": "dna-rljson",
@@ -111,7 +111,7 @@
     },
     {
       "path": ".claude/hooks/pm-prompts.mjs",
-      "hash": "0x988aed96a8073727"
+      "hash": "0xf4266eea17b3b9c1"
     },
     {
       "path": ".claude/settings.json",
@@ -207,7 +207,7 @@
     },
     {
       "path": "doc/guides/develop-guide.md",
-      "hash": "0x71a6420e6ce25b08"
+      "hash": "0xd7b7bcff8e0de0de"
     },
     {
       "path": "doc/guides/develop-without-ai-guide.md",
