@@ -34,7 +34,7 @@ index is at the end.
 | tier | what it is | files |
 | --- | --- | --- |
 | **mesh** | a real `Server`, real sockets (`createSocketPair`), real watchers, real files on disk, two to four nodes, with cuts, heals, mutes, deafenings and stopped processes | 12 |
-| **client–server** | two or three clients and a real hub, each suite run **twice** — once over `SocketMock`, once over a real socket.io server configured at production's 50 MB limit | 6 |
+| **client–server** | two or three clients and a real hub, each suite run **twice** — once over `SocketMock`, once over a real socket.io server configured at production's 50 MB limit | 7 |
 | **unit / decision** | one agent, or a pure function with no filesystem and no clock | 55 |
 
 A decision-tier test proves a RULE. It does not prove the rule is ever
@@ -450,6 +450,7 @@ loop are counted as they run. They sum to the 807 above.
 | --- | --- | --- |
 | `client-server/socket-mock.spec.ts` | 35 | the shared suite (`shared-sync-tests.ts`) over `SocketMock` |
 | `client-server/socket-io.spec.ts` | 35 | the same shared suite over a real socket.io server at production's 50 MB limit |
+| `client-server/large-file.spec.ts` | 2 | a 60 MB file over a real socket.io server at the 50 MB limit: added, changed, deleted, and edited on both sides while apart; counts the bytes the hub carries |
 | `client-server/advanced-sync.spec.ts` | 15 | three clients, catch-up, teardown and restart, 10 MB, 100 files, rapid overwrites |
 | `client-server/heals-after-forced-divergence.spec.ts` | 14 | deliberately dropped messages |
 | `client-server/conflict-sync.spec.ts` | 2 | a real offline divergent edit, both versions preserved |
