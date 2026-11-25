@@ -751,11 +751,23 @@ an mtime to the nearest millisecond, `Date.now()` truncates — so the scan
 reuses the version before it, and a receiver authors that older version as an
 edit, which reverts the writer's own copy everywhere.
 
+**A file that refuses to open is kept — unless it is being deleted.** Windows
+refuses an open while a program copies or holds a file (EBUSY, EPERM, EACCES).
+The scan keeps the version it read last and reads the file again on the next
+scan, so one held file does not stop the rest of the folder. The same EPERM
+answers an open in the moment between a delete marking a file and its name
+going, so a refusal is looked at again after `LOCK_RECHECK_MS` (10, 20 and
+40 ms): a deleted file is gone by then, and the scan treats it as vanished —
+a partial picture, which is not published — instead of keeping a version
+nobody holds. Keeping it was field defect F6: the deletion was never authored,
+and the next apply wrote the file back on its own node.
+
 What no rule over `stat` can decide is a writer that pauses for a long time, and
 `README.public.md` → "Known constraints" says what that costs.
 
-**Tested by** `test/fs-clock-skew.spec.ts` (6) for the clock half and
-`test/fs-slow-copy.spec.ts` (3) for the deferral itself.
+**Tested by** `test/fs-clock-skew.spec.ts` (6) for the clock half,
+`test/fs-slow-copy.spec.ts` (3) for the deferral itself, and
+`test/fs-scanner-vanish.spec.ts` for the locked file and the one being deleted.
 
 ## Ignore Matching (`src/fs-ignore.ts`)
 

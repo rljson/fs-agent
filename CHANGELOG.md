@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Windows
+
+- **A file deleted while the scanner opens it is gone, not locked.** Windows
+  refuses an open with EPERM in the moment between a delete marking a file
+  and its name going. The scanner took that for a lock and kept the file's
+  last version: the deletion was never authored, and the next apply wrote
+  the file back (field defect F6). It now opens a refused file again after
+  10, 20 and 40 ms; a deleted one is gone by then.
+- `FsBlobAdapter.fileToBlob` names a file by its last path segment on either
+  separator. On Windows the name was the whole absolute path, and
+  `blobsToFiles` wrote to `<targetDir>/C:\…\file`.
+- A write that renames over a file Windows reports as held (EPERM, EBUSY,
+  EACCES) tries again for about half a second before the lock reaches the
+  caller. Two writes racing on one path failed with EPERM instead of one of
+  them winning.
+- A name Windows refuses — over 255 characters, `?`, `*`, `:` — is an
+  impossible path: the restore skips it, names it and applies the rest of
+  the tree. Windows reports such a name as ENOENT, which failed the restore
+  as if a file were missing.
+- The test suite passes on Windows. F6 seeds a folder with more than
+  `ALL_GONE_MIN_FILES` files: with one seed file, the churn's deletions left
+  what an emptied folder looks like, and the guards kept the churn files.
+
+## [0.2.7]
+
 ### Large files
 
 - **A 60 MB file over real Socket.IO with a 50 MB message cap** is added,

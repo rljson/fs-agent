@@ -212,7 +212,7 @@ describe('FsAgent — the signal channel', () => {
       // The folder is gone by the time the signal happens — a user deleting the
       // synced folder while the agent runs. Recording must not throw.
       const agent = anAgent();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10 });
       expect(() =>
         emit(agent, { kind: 'join/recovered', paths: [], action: 'review' }),
       ).not.toThrow();

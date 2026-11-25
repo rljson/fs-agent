@@ -54,7 +54,7 @@ describe('a node claims only what it changed', () => {
     dir = join(process.cwd(), `test-temp-authorship-${nth}`);
     peerDir = join(process.cwd(), `test-temp-authorship-peer-${nth}`);
     for (const d of [dir, peerDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });

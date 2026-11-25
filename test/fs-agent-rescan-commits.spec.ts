@@ -33,7 +33,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
   const dir = join(process.cwd(), 'test-temp-rescan-commit');
 
   beforeEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(dir, { recursive: true });
     // Sized like the folder the field report is about. The small-folder case
     // works; the report is that the large one does not, so the fixture has to
@@ -46,7 +46,7 @@ describe('FsAgent — a change found only by the safety rescan', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   // A rescan that lands while a head is being received is not a separate

@@ -29,6 +29,7 @@ import { rename, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { renameOver } from '../src/fs-atomic-write.ts';
 import { buildFsMesh, whyNot, type FsMesh } from './mesh/fs-mesh.ts';
 
 describe('how real programs save', () => {
@@ -64,7 +65,9 @@ describe('how real programs save', () => {
       const folder = mesh.node('A').folder;
       const tmp = join(folder, `~tmp${v}.tmp`);
       await writeFile(tmp, `version ${v}`);
-      await rename(tmp, join(folder, 'Angebot.docx'));
+      // An editor waits out a reader too: Windows refuses to replace the
+      // document while the agent holds it open to read it.
+      await renameOver(tmp, join(folder, 'Angebot.docx'), 20);
       await sleep(400);
     }
 

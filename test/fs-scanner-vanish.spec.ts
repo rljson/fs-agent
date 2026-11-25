@@ -26,19 +26,25 @@ const failures: Array<{
   op: 'stat' | 'open' | 'readdir';
   match: RegExp;
   code: string;
+  /** Fail one call only, then let the real call through again. */
+  once?: boolean;
+  /** Runs before the refusal: what the filesystem is doing meanwhile. */
+  then?: () => Promise<unknown>;
 }> = [];
 
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
   const wrap =
     (op: 'stat' | 'open' | 'readdir', real: (...a: never[]) => unknown) =>
-    (...args: never[]) => {
+    async (...args: never[]) => {
       const target = String(args[0]);
       const hit = failures.find((f) => f.op === op && f.match.test(target));
       if (hit) {
+        if (hit.once) failures.splice(failures.indexOf(hit), 1);
+        await hit.then?.();
         const err = new Error(`${hit.code}: mocked`) as NodeJS.ErrnoException;
         err.code = hit.code;
-        return Promise.reject(err);
+        throw err;
       }
       return real(...args);
     };
@@ -67,7 +73,7 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
 
   beforeEach(async () => {
     failures.length = 0;
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -75,7 +81,7 @@ describe('FsScanner — an entry that vanishes mid-scan', () => {
   afterEach(async () => {
     failures.length = 0;
     warnSpy.mockRestore();
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   const warned = (needle: string): boolean =>
@@ -248,7 +254,7 @@ describe('FsScanner — a file locked by the program writing it', () => {
 
   beforeEach(async () => {
     failures.length = 0;
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -258,7 +264,7 @@ describe('FsScanner — a file locked by the program writing it', () => {
     scanner?.stopWatch();
     scanner = undefined;
     warnSpy.mockRestore();
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   const lockedLines = (): string[] =>
@@ -285,11 +291,14 @@ describe('FsScanner — a file locked by the program writing it', () => {
     const before = blobOf(scanner.tree!, 'setup.exe');
     const noteBefore = blobOf(scanner.tree!, 'note.txt');
 
+    // Paused, as in the tests below: the lock needs a watcher, but a scan of
+    // the watcher's own racing these was a coin toss on Windows — and with it
+    // no file is deferred, so each scan opens the files it finds changed.
+    scanner.pauseWatch();
     await writeFile(join(testDir, 'setup.exe'), 'version 2, still being copied');
     await writeFile(join(testDir, 'note.txt'), 'note 2');
     failures.push({ op: 'open', match: /setup\.exe$/, code: 'EBUSY' });
-    // A file that just changed size is waited for first; the scans after it
-    // open it, find it locked, and say so once.
+    // Each scan opens it, finds it locked, and it is said once.
     const during = await scanner.scan();
     await scanner.scan();
     await scanner.scan();
@@ -308,14 +317,51 @@ describe('FsScanner — a file locked by the program writing it', () => {
     expect(blobOf(after, 'setup.exe')).toBeDefined();
   });
 
+  it('takes a file refused while it is being deleted for gone, not locked', async () => {
+    // Field defect F6, reduced. Windows refuses an open with EPERM in the
+    // moment between a delete marking a file and its name going. A scan that
+    // took that for a lock kept the file's last version: the deletion was
+    // never authored, and the next apply wrote the file back on its own node.
+    // Gone, it makes the scan a partial picture — not published, not taken
+    // for the folder's state — and the next clean scan drops it.
+    await writeFile(join(testDir, 'stays.txt'), 'stays');
+    await writeFile(join(testDir, 'churn.tmp'), 'tmp 1');
+    scanner = new FsScanner(testDir, { bs: new BsMem(), settleMs: 0 });
+    await scanner.watch();
+    expect(pathsIn(scanner.tree!)).toContain('churn.tmp');
+
+    // Paused, so this scan must open the file; changed, so it reads it again.
+    scanner.pauseWatch();
+    await writeFile(join(testDir, 'churn.tmp'), 'tmp 2');
+    failures.push({
+      op: 'open',
+      match: /churn\.tmp$/,
+      code: 'EPERM',
+      once: true,
+      then: () => rm(join(testDir, 'churn.tmp')),
+    });
+    await scanner.scan();
+
+    expect(lockedLines()).toEqual([]);
+    expect(
+      warnSpy.mock.calls.some((c) =>
+        String(c[0]).includes('1 entry vanished during the scan'),
+      ),
+    ).toBe(true);
+
+    const after = await scanner.scan();
+    expect(pathsIn(after)).toContain('stays.txt');
+    expect(pathsIn(after)).not.toContain('churn.tmp');
+  });
+
   it('leaves a new file out until it can be read', async () => {
     await writeFile(join(testDir, 'stays.txt'), 'stays');
     scanner = new FsScanner(testDir, { bs: new BsMem(), settleMs: 0 });
     await scanner.watch();
+    scanner.pauseWatch();
 
     await writeFile(join(testDir, 'copying.exe'), 'half');
     failures.push({ op: 'open', match: /copying\.exe$/, code: 'EPERM' });
-    // The first sight of a file is deferred anyway; the second scan opens it.
     await scanner.scan();
     const during = await scanner.scan();
 
@@ -329,6 +375,7 @@ describe('FsScanner — a file locked by the program writing it', () => {
     await writeFile(join(testDir, 'private.dbf'), 'private');
     scanner = new FsScanner(testDir, { bs: new BsMem(), settleMs: 0 });
     await scanner.watch();
+    scanner.pauseWatch();
 
     await writeFile(join(testDir, 'private.dbf'), 'private, changed');
     failures.push({ op: 'open', match: /private\.dbf$/, code: 'EACCES' });

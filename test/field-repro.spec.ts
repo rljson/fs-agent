@@ -248,7 +248,7 @@ describe('the weakness register reproductions, verbatim', () => {
       await waitForFile(join(folderB, 'doomed-dir/inner/a.txt'), 'inner'),
     ).toBe('inner');
 
-    await rm(join(folderA, 'doomed-dir'), { recursive: true, force: true });
+    await rm(join(folderA, 'doomed-dir'), { recursive: true, force: true, maxRetries: 10 });
 
     const gone = await waitForFile(
       join(folderB, 'doomed-dir/inner/a.txt'),

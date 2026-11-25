@@ -197,7 +197,7 @@ export function defineProductionSyncTests(
     let folderB: string;
 
     beforeEach(async () => {
-      await rm(baseDir, { recursive: true, force: true });
+      await rm(baseDir, { recursive: true, force: true, maxRetries: 10 });
       folderA = join(baseDir, 'folder-a');
       folderB = join(baseDir, 'folder-b');
       await mkdir(folderA, { recursive: true });
@@ -205,7 +205,7 @@ export function defineProductionSyncTests(
     });
 
     afterEach(async () => {
-      await rm(baseDir, { recursive: true, force: true });
+      await rm(baseDir, { recursive: true, force: true, maxRetries: 10 });
     });
 
     // =========================================================================

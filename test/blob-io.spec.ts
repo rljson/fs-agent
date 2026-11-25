@@ -35,12 +35,12 @@ describe('storeFileAsBlob', () => {
   const testDir = join(process.cwd(), 'test-temp-blob-io');
 
   beforeEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   /** Writes `size` bytes with a per-position pattern and returns them. */

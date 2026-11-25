@@ -205,7 +205,9 @@ describe('filenames: unicode and case', () => {
       'Angebot 2026 (Entwurf).docx',
       "Kunde's Projekt.txt",
       'Maß & Gewicht.csv',
-      'a#b?c=d.txt',
+      // A URL's fragment, query and value. Windows forbids `?` in a name, so
+      // no folder there holds one; it keeps the other two.
+      process.platform === 'win32' ? 'a#b;c=d.txt' : 'a#b?c=d.txt',
       'Ümläute Übersicht.txt',
       '100% fertig.txt',
       'dash-and_underscore.txt',

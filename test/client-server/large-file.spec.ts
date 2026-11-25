@@ -152,7 +152,7 @@ describe('a file above the socket cap, over real Socket.IO', () => {
   };
 
   beforeEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
 
     http = createServer();
     socketIo = new SocketIoServer(http, { maxHttpBufferSize: SOCKET_CAP });
@@ -208,7 +208,7 @@ describe('a file above the socket cap, over real Socket.IO', () => {
     await server.tearDown();
     await new Promise<void>((resolve) => socketIo.close(() => resolve()));
     http.close();
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   });
 
   it('is added, changed and deleted on the other node', async () => {
