@@ -446,6 +446,12 @@ produce bytes nobody wrote — measured at 1 520 blended pairs in 2 000.
 
 Writes to a temporary file beside the target and renames it into place.
 
+On Windows, a rename onto a target that another rename or a program holds
+(EPERM, EBUSY, EACCES) is tried again for about half a second before the error
+reaches the caller. A name the filesystem refuses — on Windows one over 255
+characters or with `?`, `*`, `:` — throws EINVAL, not the ENOENT Windows
+reports for it.
+
 ### `atomicWriteFileSync(path, content)`
 
 The same, synchronously — for a small file that must be on disk before the
