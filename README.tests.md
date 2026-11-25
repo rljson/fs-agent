@@ -8,8 +8,8 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**70 files, 807 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 806 must pass; one is committed inverted, and §2.11 says which and why.
+**71 files, 823 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 822 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 807 does
+This document says what the suite actually proves, because the number 823 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -425,7 +425,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 807 above.
+loop are counted as they run. They sum to the 823 above.
 
 ### Mesh tier
 
