@@ -127,7 +127,7 @@ describe('a divergence is a difference in CONTENT', () => {
       changed: ['theirs.txt'],
       previous: [own],
     });
-    await rm(peerDir, { recursive: true, force: true });
+    await rm(peerDir, { recursive: true, force: true, maxRetries: 10 });
 
     beacon(peer.head);
     await sleep(300);

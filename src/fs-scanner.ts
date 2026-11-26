@@ -13,7 +13,16 @@ import { Json } from '@rljson/json';
 import { Tree, TreeRef } from '@rljson/rljson';
 
 import { FSWatcher, watch } from 'fs';
-import { mkdir, open, readdir, readFile, rename, stat, writeFile } from 'fs/promises';
+import {
+  type FileHandle,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  stat,
+  writeFile,
+} from 'fs/promises';
 import { dirname, join } from 'path';
 
 /**
@@ -133,6 +142,20 @@ export const DEFAULT_SETTLE_MS = 100;
 
 /** How many of this process's own writes the scanner remembers. */
 const OWN_WRITES_MAX = 10_000;
+
+/**
+ * The pauses, in ms, before the scanner opens a refused file again.
+ *
+ * Windows deletes a file in two steps: the deleting call opens the file, marks
+ * it and closes it, and the name goes with the close. An open in between is
+ * refused with EPERM, the code of a file another program holds. Taken for a
+ * lock, the deleted file kept the version the last scan read — so its deletion
+ * was never authored, and the next apply wrote it back (field defect F6). The
+ * window lasts microseconds; a look after these pauses finds a deleted file
+ * gone and a held one still refused. Seventy milliseconds in all, paid only
+ * by a file that refuses.
+ */
+export const LOCK_RECHECK_MS: readonly number[] = [10, 20, 40];
 
 /**
  * The format of a persisted scan cache. A cache of any other version is
@@ -809,7 +832,7 @@ export class FsScanner {
             // stream off that handle — see `storeFileAsBlob`.
             let handle;
             try {
-              handle = await open(childPath, 'r');
+              handle = await FsScanner._openToRead(childPath);
             } catch (error) {
               // A file deleted between stat and read is the same race as one
               // deleted before the stat — rethrow it unwrapped so the per-entry
@@ -1385,6 +1408,29 @@ export class FsScanner {
   private static _isLocked(err: unknown): boolean {
     const code = (err as NodeJS.ErrnoException | undefined)?.code;
     return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+  }
+
+  /**
+   * Opens a file to read it, and opens it again after each of
+   * {@link LOCK_RECHECK_MS} while it is refused as held.
+   *
+   * A file refused because it is being deleted is gone at the next look, and
+   * that open throws ENOENT: the scan then treats it as vanished, not as
+   * locked. A file a program really holds is refused every time, and the last
+   * refusal is thrown as before.
+   * @param path - The file.
+   * @returns The open handle.
+   */
+  private static async _openToRead(path: string): Promise<FileHandle> {
+    for (const pause of LOCK_RECHECK_MS) {
+      try {
+        return await open(path, 'r');
+      } catch (error) {
+        if (!FsScanner._isLocked(error)) throw error;
+        await new Promise((r) => setTimeout(r, pause));
+      }
+    }
+    return open(path, 'r');
   }
 
   /**

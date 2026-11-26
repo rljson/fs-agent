@@ -21,11 +21,17 @@
 // wrote down exactly what they saw.
 // .............................................................................
 
+import { execFile } from 'child_process';
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
+import { promisify } from 'util';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { FsAppendOptions, FsEditChain } from '../../src/fs-edit-chain.ts';
+import {
+  ALL_GONE_MIN_FILES,
+  type FsAppendOptions,
+  type FsEditChain,
+} from '../../src/fs-edit-chain.ts';
 import { SIGNAL_LOG_FILE } from '../../src/fs-signals.ts';
 import {
   buildFsMesh,
@@ -33,6 +39,27 @@ import {
   type FsMesh,
   type FsMeshNode,
 } from './fs-mesh.ts';
+
+const icacls = (...args: string[]) => promisify(execFile)('icacls', args);
+
+// Everyone, by SID: the account names are localized ("Jeder").
+const EVERYONE = '*S-1-1-0';
+
+/**
+ * Makes [dir] a folder nobody can create anything in, not even its owner.
+ * Windows ignores the mode bits of a folder, so there a deny entry takes away
+ * the right to add files and subfolders instead of r-xr-xr-x.
+ */
+const lockFolder = async (dir: string): Promise<void> => {
+  if (process.platform !== 'win32') return chmod(dir, 0o555);
+  await icacls(dir, '/deny', `${EVERYONE}:(OI)(CI)(WD,AD)`);
+};
+
+/** Undoes [lockFolder]. */
+const unlockFolder = async (dir: string): Promise<void> => {
+  if (process.platform !== 'win32') return chmod(dir, 0o755);
+  await icacls(dir, '/remove:d', EVERYONE);
+};
 
 describe('field defects, reduced in process', () => {
   let mesh: FsMesh | undefined;
@@ -337,12 +364,24 @@ describe('field defects, reduced in process', () => {
   // ...........................................................................
   it('F6: a file written in the middle of heavy churn reaches every node', async () => {
     const names = ['A', 'B', 'C'];
+    // A folder with something in it, as the field's was. With one seed file
+    // the churn's deletions left two files of a dozen or more — which is what
+    // an emptied folder looks like, and the guards at both ends rightly kept
+    // the churn files and authored them again. Whether a node had seen nine
+    // churn files or ten before the deletions was timing: green on Linux,
+    // red on Windows. This test is about churn, not about an emptied folder.
+    const seeds = [
+      'seed.txt',
+      ...Array.from({ length: ALL_GONE_MIN_FILES }, (_, i) => `seed-${i}.txt`),
+    ];
     mesh = await buildFsMesh({
       root: root('churn'),
       names,
       seed: async (folders) => {
         for (const folder of Object.values(folders)) {
-          await writeFile(join(folder, 'seed.txt'), 'seed');
+          for (const seed of seeds) {
+            await writeFile(join(folder, seed), 'seed');
+          }
         }
       },
     });
@@ -386,7 +425,7 @@ describe('field defects, reduced in process', () => {
 
     // The watcher survived the churn: a write AFTER it still propagates.
     await a.write('after-churn.txt', 'after');
-    const expected = ['after-churn.txt', 'churn-survivor.txt', 'seed.txt'];
+    const expected = ['after-churn.txt', 'churn-survivor.txt', ...seeds].sort();
     for (const name of names) {
       expect(await mesh.node(name).settlesOn(expected, 30_000)).toEqual(
         expected,
@@ -485,8 +524,8 @@ describe('field defects, reduced in process', () => {
     const locked = join(mesh.node('B').folder, 'held');
     await mkdir(locked, { recursive: true });
     try {
-      // r-xr-xr-x: B cannot create anything inside, not even as the owner.
-      await chmod(locked, 0o555);
+      // B cannot create anything inside, not even as the owner.
+      await lockFolder(locked);
 
       // A writes into that directory AND outside it, in one go. The question
       // is whether the second survives the first.
@@ -509,7 +548,7 @@ describe('field defects, reduced in process', () => {
         'the writer lost the file the peer could not store',
       ).toBe('dbf');
     } finally {
-      await chmod(locked, 0o755);
+      await unlockFolder(locked);
     }
 
     // Once the obstruction lifts, the file it blocked arrives. A node that
@@ -755,7 +794,7 @@ describe('field defects, reduced in process', () => {
 
     for (const [i, dir] of dirs.entries()) {
       const node = mesh.node(i % 2 === 0 ? 'A' : 'B');
-      await rm(join(node.folder, dir), { recursive: true, force: true });
+      await rm(join(node.folder, dir), { recursive: true, force: true, maxRetries: 10 });
       const left = (await node.files()).filter((p) => !p.startsWith(`${dir}/`));
       for (const name of ['A', 'B']) {
         expect(

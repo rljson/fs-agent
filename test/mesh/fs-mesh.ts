@@ -89,7 +89,6 @@ import {
   mkdir,
   readdir,
   readFile,
-  rename,
   rm,
   unlink,
   writeFile,
@@ -103,6 +102,7 @@ import {
   RECOVERED_DIR,
   SYNC_ERROR_FILE,
 } from '../../src/fs-agent.ts';
+import { renameOver } from '../../src/fs-atomic-write.ts';
 import { SIGNAL_LOG_FILE, type FsSignal } from '../../src/fs-signals.ts';
 
 
@@ -685,7 +685,8 @@ export const buildFsMesh = async (opts: {
         //
         // The temp name carries `ATOMIC_TMP_PREFIX`, which the scanner ignores,
         // so the intermediate file is invisible to sync as well as to the
-        // sampler.
+        // sampler. The rename waits out a reader, as editors do: Windows
+        // refuses to replace a file the agent holds open to read it.
         const file = abs(path);
         await mkdir(dirname(file), { recursive: true });
         const tmp = join(
@@ -693,7 +694,7 @@ export const buildFsMesh = async (opts: {
           `${ATOMIC_TMP_PREFIX}${Math.random().toString(36).slice(2)}`,
         );
         await writeFile(tmp, content);
-        await rename(tmp, file);
+        await renameOver(tmp, file, 20);
       },
       del: async (path) => {
         await unlink(abs(path));

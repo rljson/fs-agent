@@ -347,7 +347,7 @@ describe('the conflict table, on disk', () => {
     const dir = root('strangers');
     const peerDir = `${dir}-peer`;
     for (const d of [dir, peerDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
     const io = new IoMem();
@@ -387,6 +387,6 @@ describe('the conflict table, on disk', () => {
     stopTo();
     stopFrom();
     agent.scanner.stopWatch();
-    for (const d of [dir, peerDir]) await rm(d, { recursive: true, force: true });
+    for (const d of [dir, peerDir]) await rm(d, { recursive: true, force: true, maxRetries: 10 });
   });
 });

@@ -69,7 +69,7 @@ describe('FsAgent — paths a node ignores', () => {
   beforeEach(async () => {
     db = undefined;
     for (const d of [sourceDir, targetDir, elsewhere]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
@@ -77,7 +77,7 @@ describe('FsAgent — paths a node ignores', () => {
   afterEach(async () => {
     for (const stop of stops.splice(0)) stop();
     for (const d of [sourceDir, targetDir, elsewhere]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 

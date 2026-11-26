@@ -49,14 +49,14 @@ describe('FsAgent — the mass-delete guard', () => {
     sourceDir = join(process.cwd(), `test-temp-guard-source-${nth}`);
     targetDir = join(process.cwd(), `test-temp-guard-target-${nth}`);
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
 
   afterEach(async () => {
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 
@@ -411,7 +411,7 @@ describe('FsAgent — the mass-delete guard', () => {
       expect(agent.signalTotals['deletion/refused']).toBe(1);
     } finally {
       agent.dispose();
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 });

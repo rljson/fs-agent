@@ -8,8 +8,8 @@ found in the LICENSE file in the root of this package.
 
 # The test suite, as a document
 
-**70 files, 807 scenarios, 100 % coverage on statements, branches, functions and
-lines.** 806 must pass; one is committed inverted, and §2.11 says which and why.
+**71 files, 823 scenarios, 100 % coverage on statements, branches, functions and
+lines.** 822 must pass; one is committed inverted, and §2.11 says which and why.
 One command runs all of it:
 
 ```bash
@@ -23,7 +23,7 @@ failures. Four different tests once failed
 across four CI runs of the same commit, each passing on re-run — not four bugs,
 one scheduler.
 
-This document says what the suite actually proves, because the number 807 does
+This document says what the suite actually proves, because the number 823 does
 not. It is organised by the question answered rather than by file; the file
 index is at the end.
 
@@ -296,7 +296,7 @@ visible files all vanished is refused however many it carries.
 | `fs-filenames.spec.ts` (5) | a German filename round-tripping byte for byte, two Unicode spellings of one name not destroying each other, a case-only rename |
 | `fs-hostile-tree.spec.ts` (7) | a tree from a peer is not trusted with paths — no escaping the sync root |
 | `fs-filetype-changes.spec.ts` (6) | a path that changes what it IS: file → directory, directory → file, symlinks |
-| `fs-scanner-vanish.spec.ts` (12) | an entry deleted between `readdir` and `stat` |
+| `fs-scanner-vanish.spec.ts` (17) | an entry deleted between `readdir` and `stat`, a locked file, and a file refused while it is being deleted |
 | `fs-disk-full.spec.ts` (3) | ENOSPC — a clean abort with a message, not a silent standstill |
 | `fs-slow-copy.spec.ts` (3) | a file still being written: never hashed half-done, and one unsettled file does not stop the folder |
 | `fs-clock-skew.spec.ts` (6) | a machine whose clock is wrong — a file is visible whatever its timestamp says |
@@ -425,7 +425,7 @@ Open items are in
 ## 5. File index
 
 Counts are what `pnpm test` reports per file, so suites that generate cases in a
-loop are counted as they run. They sum to the 807 above.
+loop are counted as they run. They sum to the 823 above.
 
 ### Mesh tier
 
@@ -461,8 +461,8 @@ loop are counted as they run. They sum to the 807 above.
 | file | n | what it covers |
 | --- | --- | --- |
 | `fs-agent.spec.ts` | 81 | the agent's surface |
-| `fs-scanner.spec.ts` | 62 | scanning, watching, the scan cache, the agent's own writes |
-| `fs-agent-degradation.spec.ts` | 15 | what the agent does when a dependency fails, and the shapes no scenario reaches |
+| `fs-scanner.spec.ts` | 65 | scanning, watching, the scan cache, the agent's own writes |
+| `fs-agent-degradation.spec.ts` | 16 | what the agent does when a dependency fails, and the shapes no scenario reaches |
 | `fs-agent-receive-degradation.spec.ts` | 16 | receiving when a part of it fails — a tree it cannot read, a stamp or state it cannot file, a folder that moves under the apply, a join |
 | `fs-receive.spec.ts` | 11 | what a node does with a head that arrived |
 | `fs-relate.spec.ts` | 11 | same / behind / ahead / fork / incomplete |
@@ -479,7 +479,7 @@ loop are counted as they run. They sum to the 807 above.
 | `fs-agent-authorship.spec.ts` | 4 | a node claims only what it changed |
 | `fs-divergence-is-content.spec.ts` | 2 | a divergence is a difference in CONTENT |
 | `fs-ref-vs-content.spec.ts` | 6 | ref identity vs content identity |
-| `fs-agent-concurrent-write.spec.ts` | 12 | two writes of one path must not blend — 200 rounds per assertion — and the synchronous writer the bookkeeping uses |
+| `fs-agent-concurrent-write.spec.ts` | 17 | two writes of one path must not blend — 200 rounds per assertion — the synchronous writer the bookkeeping uses, and a rename that waits out a held file and names a refused name |
 | `fs-agent-incremental-restore.spec.ts` | 8 | a restore writes only what changed |
 | `fs-agent-locked-file.spec.ts` | 8 | a file held open by another process |
 | `fs-agent-blob-stream.spec.ts` | 3 | a restore streams the blob |
@@ -492,7 +492,7 @@ loop are counted as they run. They sum to the 807 above.
 | `fs-blob-adapter.spec.ts` | 26 | file ↔ blob |
 | `fs-db-adapter.spec.ts` | 6 | storing a tree with its predecessors |
 | `blob-io.spec.ts` | 5 | storing a file as a blob |
-| `fs-scanner-vanish.spec.ts` | 12 | an entry that vanishes mid-scan |
+| `fs-scanner-vanish.spec.ts` | 17 | an entry that vanishes mid-scan, a locked file, one being deleted |
 | `fs-scanner-scan-coalescing.spec.ts` | 4 | a burst collapses into at most two passes |
 | `fs-hostile-tree.spec.ts` | 7 | a peer's tree is not trusted with paths |
 | `fs-impossible-filename.spec.ts` | 4 | a path the filesystem refuses |

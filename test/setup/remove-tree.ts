@@ -9,7 +9,7 @@ import { rm } from 'fs/promises';
 /**
  * Removes a temp folder tree that a still-settling agent may be writing into.
  *
- * Plain `rm(dir, { recursive: true, force: true })` is not enough in a teardown
+ * Plain `rm(dir, { recursive: true, force: true, maxRetries: 10 })` is not enough in a teardown
  * that follows live sync, and both ways it fails were seen on CI (Linux) while
  * every run passed on macOS:
  *

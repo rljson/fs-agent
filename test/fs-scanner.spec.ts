@@ -22,13 +22,13 @@ describe('FsScanner', () => {
 
   beforeEach(async () => {
     // Create test directory structure
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
   });
 
   afterEach(async () => {
     // Clean up
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   describe('scan', () => {
@@ -436,6 +436,25 @@ describe('FsScanner', () => {
         }
       },
     );
+
+    it('has an off-Windows handler that ignores a vanished directory', () => {
+      // The handler itself, called directly, so a Windows run — which installs
+      // its own handler above — covers it too.
+      const onWatchError = (
+        FsScanner as unknown as { _onWatchError(err: unknown): void }
+      )._onWatchError;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        onWatchError(
+          Object.assign(new Error('ENOENT: scandir d2'), { code: 'ENOENT' }),
+        );
+        expect(warn).not.toHaveBeenCalled();
+        onWatchError(new Error('EACCES'));
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   describe('example', () => {
@@ -690,14 +709,15 @@ describe('FsScanner', () => {
       // Delete the file
       await rm(join(testDir, 'delete-me.txt'));
 
-      // Wait for change detection
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Wait for the deletion. Polled: on Windows the scanner stats a vanished
+      // path up to four times before it believes it gone, which alone takes
+      // longer than a fixed half second.
+      await vi.waitFor(
+        () => expect(changes.find((c) => c.type === 'deleted')).toBeDefined(),
+        { timeout: 5000 },
+      );
 
       scanner.stopWatch();
-
-      // Check if deletion was detected
-      const deleteEvent = changes.find((c) => c.type === 'deleted');
-      expect(deleteEvent).toBeDefined();
     });
 
     it('should ignore changes to ignored files', async () => {
@@ -1141,7 +1161,7 @@ describe('FsScanner', () => {
     it('survives a scan failure (root removed) without throwing', async () => {
       const scanner = new FsScanner(testDir);
       await scanner.scan();
-      await rm(testDir, { recursive: true, force: true });
+      await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
       await expect(runRescan(scanner)).resolves.toBeUndefined();
     });
 

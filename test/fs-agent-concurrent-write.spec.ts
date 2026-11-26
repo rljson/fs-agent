@@ -43,6 +43,8 @@ import {
   atomicWriteFile,
   atomicWriteFileSync,
   atomicWriteStream,
+  renameOver,
+  renameRetries,
 } from '../src/fs-atomic-write.ts';
 
 /**
@@ -71,7 +73,7 @@ describe('atomicWriteFile', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   // ...........................................................................
@@ -151,7 +153,7 @@ describe('atomicWriteFileSync', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   const staged = async () =>
@@ -193,7 +195,7 @@ describe('atomicWriteStream', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   it('leaves one COMPLETE version when two streams race on one path', async () => {
@@ -267,5 +269,63 @@ describe('atomicWriteStream', () => {
       Object.assign(error as Error, { __blobRead: true }),
     );
     await expect(tagged).rejects.toMatchObject({ __blobRead: true });
+  });
+});
+
+describe('renameOver', () => {
+  const refusal = (code: string) =>
+    Object.assign(new Error(`${code}: refused`), { code });
+
+  /** A rename that refuses with [codes] in turn, then succeeds. */
+  const refusingRename = (codes: string[]) => {
+    const calls: string[] = [];
+    const doRename = async (from: string, to: string) => {
+      calls.push(`${from}->${to}`);
+      const code = codes[calls.length - 1];
+      if (code) throw refusal(code);
+    };
+    return { calls, doRename };
+  };
+
+  it('tries again while the target is held, then renames', async () => {
+    const { calls, doRename } = refusingRename(['EPERM', 'EBUSY', 'EACCES']);
+    await renameOver('tmp', 'doc.txt', 3, doRename);
+    expect(calls).toEqual(Array(4).fill('tmp->doc.txt'));
+  });
+
+  it('gives up after the retries and throws the refusal', async () => {
+    const { calls, doRename } = refusingRename(['EPERM', 'EPERM', 'EPERM']);
+    await expect(renameOver('tmp', 'doc.txt', 2, doRename)).rejects.toThrow(
+      'EPERM',
+    );
+    expect(calls).toHaveLength(3);
+  });
+
+  it('throws any other failure at once', async () => {
+    // No staged file exists here, so the ENOENT means what it says.
+    const { calls, doRename } = refusingRename(['ENOENT']);
+    await expect(
+      renameOver('missing-staged-file', 'doc.txt', 5, doRename),
+    ).rejects.toThrow('ENOENT');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('calls a refused NAME EINVAL, as Windows says ENOENT for it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fs-agent-rename-'));
+    try {
+      const staged = join(dir, 'staged');
+      await writeFile(staged, 'bytes');
+      const dest = join(dir, 'a?b.txt');
+      const { doRename } = refusingRename(['ENOENT']);
+      await expect(renameOver(staged, dest, 0, doRename)).rejects.toMatchObject(
+        { code: 'EINVAL', dest },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true, maxRetries: 10 });
+    }
+  });
+
+  it('retries on Windows only, where a held file refuses a rename', () => {
+    expect(renameRetries()).toBe(process.platform === 'win32' ? 10 : 0);
   });
 });
