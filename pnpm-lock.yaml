@@ -43,8 +43,8 @@ importers:
         specifier: 0.7.0
         version: 0.7.0
       '@types/node':
-        specifier: ^26.6.10
-        version: 26.6.10
+        specifier: ^26.6.11
+        version: 26.6.11
       '@typescript-eslint/eslint-plugin':
         specifier: ^8.74.0
         version: 8.74.0(@typescript-eslint/parser@8.74.0(eslint@10.15.0)(typescript@6.0.3))(eslint@10.15.0)(typescript@6.0.3)
@@ -83,19 +83,19 @@ importers:
         version: 8.74.0(eslint@10.15.0)(typescript@6.0.3)
       vite:
         specifier: ^8.3.8
-        version: 8.3.8(@types/node@26.6.10)(esbuild@0.27.3)
+        version: 8.3.8(@types/node@26.6.11)(esbuild@0.27.3)
       vite-node:
         specifier: ^6.0.0
-        version: 6.0.0(@types/node@26.6.10)(esbuild@0.27.3)
+        version: 6.0.0(@types/node@26.6.11)(esbuild@0.27.3)
       vite-plugin-dts:
         specifier: ^5.1.2
-        version: 5.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.10))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))
+        version: 5.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.11))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))
       vite-tsconfig-paths:
         specifier: ^6.1.1
-        version: 6.1.1(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))
+        version: 6.1.1(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))
       vitest:
         specifier: ^5.1.2
-        version: 5.1.2(@types/node@26.6.10)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))
+        version: 5.1.2(@types/node@26.6.11)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))
       vitest-dom:
         specifier: ^0.1.1
         version: 0.1.1(vitest@5.1.2)
@@ -360,12 +360,12 @@ packages:
     resolution: {integrity: sha512-e2ej2IIm3LZZqvqmyrO/GE8D8o7PVpaCAU1ufTwLwyWZpDvOd223fvoSlTchFEhaDe4Je8OqGz0dJ9bGO5CNQA==}
     engines: {node: '>=22'}
 
-  '@ggdna/dna-gg@1.8.0':
-    resolution: {integrity: sha512-ej+huY9CJ3AWm3fFVF7805mWZ/xGA/5hv7DpTV71dGvb8lIytQF9rS30lVMtkEy8tGwpzp8u3yLiICC9bxOODA==}
+  '@ggdna/dna-gg@1.9.0':
+    resolution: {integrity: sha512-Cm/67a8IfvAUI+HJOaEW9+d7sNPGP4k0iUB4iXJJnxcdUHmLAkj6socvYwQHwsjwNHbgadFw0rJK40GuWoHncA==}
     engines: {node: '>=26'}
 
-  '@ggdna/dna-github@0.1.1':
-    resolution: {integrity: sha512-6K79BopuKYrZd0k017tVfJYK6+zeiz5bUkIxdcR9Bgv567AdWV42YzAHHFT/z2mPPl3sqCvNPAEXRLwUOCDbKQ==}
+  '@ggdna/dna-github@0.2.0':
+    resolution: {integrity: sha512-jzs7GER09FMk4nluDNDWPIzG4kcpRrMX9OongKzzdkmE3HiU321a4Bi7WSjev21yGvs5lIRp56LpeSBGz8NGbw==}
     engines: {node: '>=22'}
 
   '@ggdna/dna-guides@0.2.0':
@@ -376,8 +376,16 @@ packages:
     resolution: {integrity: sha512-azbA8fMhn01eSvEcjJc4aXrh8H0svc/lru2MJVAOaZ+sLnzm3bTrlQTxfcJ5sm/bidtMAh9+738AfAJcQdLP2A==}
     engines: {node: '>=22'}
 
+  '@ggdna/dna-index@0.3.0':
+    resolution: {integrity: sha512-0yuDHhOH47yCYfVxRi8l3vbFPA3u8/is7IiisY9AQclOFmWk9RwLuZpGmW676xELieD7Z9IMCcypbfVJQqAx4g==}
+    engines: {node: '>=22'}
+
   '@ggdna/dna-install@0.2.0':
     resolution: {integrity: sha512-EIeGLKCSV2aBfdafgJK0ZrwHe/4t6B74MdLyw4UtbhrBivSZ2DYZfxGXohMffyOAxa8AJ1eUopPdhwyzYBKNjA==}
+    engines: {node: '>=22'}
+
+  '@ggdna/dna-install@0.3.0':
+    resolution: {integrity: sha512-l4VqRAx1VlRsIaZBT0JNXX1Ev5a9SNF0hc1J/I+Mt7s4iCNtqsnztUR28abnEwAdqHRGXoWL2rDal4GuZbmLgQ==}
     engines: {node: '>=22'}
 
   '@ggdna/dna-readme@0.3.1':
@@ -819,8 +827,8 @@ packages:
   '@types/mdurl@2.0.0':
     resolution: {integrity: sha512-RGdgjQUZba5p6QEFAVx2OGb8rQDL/cPRG7GiedRzMcJ1tYnUANBncjbSB1NRGwbvjcPeikRABz2nshyPk1bhWg==}
 
-  '@types/node@26.6.10':
-    resolution: {integrity: sha512-WJuPHoGB8WNQuTksNF7SOQpnH02PXeDYz4iueWbBT6/hTWnShY5F3T/hoJA3fY9+uYReDZ7pyTKKx83jQa7aGg==}
+  '@types/node@26.6.11':
+    resolution: {integrity: sha512-uUyQ2XLEz+EXh34lmS3GhKrkqn/8FU7KUiKRpk347At2bmnMVWss45yz8b4FG/tUtmV1tV/+TVkITItPROyeeQ==}
 
   '@types/normalize-package-data@2.4.4':
     resolution: {integrity: sha512-37i+OaWTh9qeK4LSHPsyRC7NahnGotNuZvjLSgcPzblpHB3rrCJxAOgI5gCdKm7coonsaX1Of0ILiTcnZjbfxA==}
@@ -2321,19 +2329,23 @@ snapshots:
 
   '@ggdna/dna-clean-code@0.3.0': {}
 
-  '@ggdna/dna-gg@1.8.0':
+  '@ggdna/dna-gg@1.9.0':
     dependencies:
-      '@ggdna/dna-github': 0.1.1
-      '@ggdna/dna-index': 0.2.0
-      '@ggdna/dna-install': 0.2.0
+      '@ggdna/dna-github': 0.2.0
+      '@ggdna/dna-index': 0.3.0
+      '@ggdna/dna-install': 0.3.0
 
-  '@ggdna/dna-github@0.1.1': {}
+  '@ggdna/dna-github@0.2.0': {}
 
   '@ggdna/dna-guides@0.2.0': {}
 
   '@ggdna/dna-index@0.2.0': {}
 
+  '@ggdna/dna-index@0.3.0': {}
+
   '@ggdna/dna-install@0.2.0': {}
+
+  '@ggdna/dna-install@0.3.0': {}
 
   '@ggdna/dna-readme@0.3.1': {}
 
@@ -2388,24 +2400,24 @@ snapshots:
 
   '@keyv/serialize@1.1.1': {}
 
-  '@microsoft/api-extractor-model@7.33.4(@types/node@26.6.10)':
+  '@microsoft/api-extractor-model@7.33.4(@types/node@26.6.11)':
     dependencies:
       '@microsoft/tsdoc': 0.16.0
       '@microsoft/tsdoc-config': 0.18.3
-      '@rushstack/node-core-library': 5.20.3(@types/node@26.6.10)
+      '@rushstack/node-core-library': 5.20.3(@types/node@26.6.11)
     transitivePeerDependencies:
       - '@types/node'
     optional: true
 
-  '@microsoft/api-extractor@7.57.6(@types/node@26.6.10)':
+  '@microsoft/api-extractor@7.57.6(@types/node@26.6.11)':
     dependencies:
-      '@microsoft/api-extractor-model': 7.33.4(@types/node@26.6.10)
+      '@microsoft/api-extractor-model': 7.33.4(@types/node@26.6.11)
       '@microsoft/tsdoc': 0.16.0
       '@microsoft/tsdoc-config': 0.18.3
-      '@rushstack/node-core-library': 5.20.3(@types/node@26.6.10)
+      '@rushstack/node-core-library': 5.20.3(@types/node@26.6.11)
       '@rushstack/rig-package': 0.7.2
-      '@rushstack/terminal': 0.22.3(@types/node@26.6.10)
-      '@rushstack/ts-command-line': 5.3.3(@types/node@26.6.10)
+      '@rushstack/terminal': 0.22.3(@types/node@26.6.11)
+      '@rushstack/ts-command-line': 5.3.3(@types/node@26.6.11)
       diff: 8.0.4
       lodash: 4.17.23
       minimatch: 10.2.1
@@ -2458,7 +2470,7 @@ snapshots:
     dependencies:
       '@ggdna/dna-blog': 0.3.0
       '@ggdna/dna-clean-code': 0.3.0
-      '@ggdna/dna-gg': 1.8.0
+      '@ggdna/dna-gg': 1.9.0
       '@ggdna/dna-guides': 0.2.0
       '@ggdna/dna-index': 0.2.0
       '@ggdna/dna-install': 0.2.0
@@ -2642,7 +2654,7 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.59.0':
     optional: true
 
-  '@rushstack/node-core-library@5.20.3(@types/node@26.6.10)':
+  '@rushstack/node-core-library@5.20.3(@types/node@26.6.11)':
     dependencies:
       ajv: 8.18.0
       ajv-draft-04: 1.0.0(ajv@8.18.0)
@@ -2653,12 +2665,12 @@ snapshots:
       resolve: 1.22.14
       semver: 7.5.4
     optionalDependencies:
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
     optional: true
 
-  '@rushstack/problem-matcher@0.2.1(@types/node@26.6.10)':
+  '@rushstack/problem-matcher@0.2.1(@types/node@26.6.11)':
     optionalDependencies:
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
     optional: true
 
   '@rushstack/rig-package@0.7.2':
@@ -2667,18 +2679,18 @@ snapshots:
       strip-json-comments: 3.1.1
     optional: true
 
-  '@rushstack/terminal@0.22.3(@types/node@26.6.10)':
+  '@rushstack/terminal@0.22.3(@types/node@26.6.11)':
     dependencies:
-      '@rushstack/node-core-library': 5.20.3(@types/node@26.6.10)
-      '@rushstack/problem-matcher': 0.2.1(@types/node@26.6.10)
+      '@rushstack/node-core-library': 5.20.3(@types/node@26.6.11)
+      '@rushstack/problem-matcher': 0.2.1(@types/node@26.6.11)
       supports-color: 8.1.1
     optionalDependencies:
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
     optional: true
 
-  '@rushstack/ts-command-line@5.3.3(@types/node@26.6.10)':
+  '@rushstack/ts-command-line@5.3.3(@types/node@26.6.11)':
     dependencies:
-      '@rushstack/terminal': 0.22.3(@types/node@26.6.10)
+      '@rushstack/terminal': 0.22.3(@types/node@26.6.11)
       '@types/argparse': 1.0.38
       argparse: 1.0.10
       string-argv: 0.3.2
@@ -2707,7 +2719,7 @@ snapshots:
 
   '@types/cors@2.8.19':
     dependencies:
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
 
   '@types/deep-eql@4.0.2': {}
 
@@ -2729,7 +2741,7 @@ snapshots:
 
   '@types/mdurl@2.0.0': {}
 
-  '@types/node@26.6.10':
+  '@types/node@26.6.11':
     dependencies:
       undici-types: 8.9.0
 
@@ -2737,7 +2749,7 @@ snapshots:
 
   '@types/ws@8.18.2':
     dependencies:
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
 
   '@typescript-eslint/eslint-plugin@8.74.0(@typescript-eslint/parser@8.74.0(eslint@10.15.0)(typescript@6.0.3))(eslint@10.15.0)(typescript@6.0.3)':
     dependencies:
@@ -2895,7 +2907,7 @@ snapshots:
       obug: 3.0.0
       std-env: 4.3.0
       tinyrainbow: 3.2.0
-      vitest: 5.1.2(@types/node@26.6.10)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))
+      vitest: 5.1.2(@types/node@26.6.11)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))
 
   '@vitest/istanbul-lib-coverage@2.1.1': {}
 
@@ -2903,14 +2915,14 @@ snapshots:
     dependencies:
       '@vitest/istanbul-lib-coverage': 2.1.1
 
-  '@vitest/mocker@5.1.2(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))':
+  '@vitest/mocker@5.1.2(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.1.2
       estree-walker: 3.0.3
       magic-string: 1.4.5
     optionalDependencies:
-      vite: 8.3.8(@types/node@26.6.10)(esbuild@0.27.3)
+      vite: 8.3.8(@types/node@26.6.11)(esbuild@0.27.3)
 
   '@vitest/spy@5.1.2': {}
 
@@ -3076,7 +3088,7 @@ snapshots:
   engine.io@6.6.13:
     dependencies:
       '@types/cors': 2.8.19
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
       '@types/ws': 8.18.2
       accepts: 1.3.8
       cookie: 0.7.2
@@ -3891,7 +3903,7 @@ snapshots:
   universalify@2.0.1:
     optional: true
 
-  unplugin-dts@1.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.10))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3)):
+  unplugin-dts@1.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.11))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3)):
     dependencies:
       '@rollup/pluginutils': 5.5.1(rollup@4.59.0)
       '@volar/typescript': 2.4.31(typescript@6.0.3)
@@ -3904,11 +3916,11 @@ snapshots:
       typescript: 6.0.3
       unplugin: 2.3.11
     optionalDependencies:
-      '@microsoft/api-extractor': 7.57.6(@types/node@26.6.10)
+      '@microsoft/api-extractor': 7.57.6(@types/node@26.6.11)
       esbuild: 0.27.3
       rolldown: 1.2.19
       rollup: 4.59.0
-      vite: 8.3.8(@types/node@26.6.10)(esbuild@0.27.3)
+      vite: 8.3.8(@types/node@26.6.11)(esbuild@0.27.3)
     transitivePeerDependencies:
       - supports-color
 
@@ -3930,13 +3942,13 @@ snapshots:
 
   vary@1.1.2: {}
 
-  vite-node@6.0.0(@types/node@26.6.10)(esbuild@0.27.3):
+  vite-node@6.0.0(@types/node@26.6.11)(esbuild@0.27.3):
     dependencies:
       cac: 7.1.1
       es-module-lexer: 2.3.2
       obug: 2.2.1
       pathe: 2.0.3
-      vite: 8.3.8(@types/node@26.6.10)(esbuild@0.27.3)
+      vite: 8.3.8(@types/node@26.6.11)(esbuild@0.27.3)
     transitivePeerDependencies:
       - '@types/node'
       - '@vitejs/devtools'
@@ -3951,13 +3963,13 @@ snapshots:
       - tsx
       - yaml
 
-  vite-plugin-dts@5.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.10))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3)):
+  vite-plugin-dts@5.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.11))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3)):
     dependencies:
-      unplugin-dts: 1.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.10))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))
+      unplugin-dts: 1.1.2(@microsoft/api-extractor@7.57.6(@types/node@26.6.11))(esbuild@0.27.3)(rolldown@1.2.19)(rollup@4.59.0)(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))
     optionalDependencies:
-      '@microsoft/api-extractor': 7.57.6(@types/node@26.6.10)
+      '@microsoft/api-extractor': 7.57.6(@types/node@26.6.11)
       rollup: 4.59.0
-      vite: 8.3.8(@types/node@26.6.10)(esbuild@0.27.3)
+      vite: 8.3.8(@types/node@26.6.11)(esbuild@0.27.3)
     transitivePeerDependencies:
       - '@rspack/core'
       - '@vue/language-core'
@@ -3967,17 +3979,17 @@ snapshots:
       - typescript
       - webpack
 
-  vite-tsconfig-paths@6.1.1(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3)):
+  vite-tsconfig-paths@6.1.1(typescript@6.0.3)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3)):
     dependencies:
       debug: 4.4.3
       globrex: 0.1.2
       tsconfck: 3.1.6(typescript@6.0.3)
-      vite: 8.3.8(@types/node@26.6.10)(esbuild@0.27.3)
+      vite: 8.3.8(@types/node@26.6.11)(esbuild@0.27.3)
     transitivePeerDependencies:
       - supports-color
       - typescript
 
-  vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3):
+  vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -3985,7 +3997,7 @@ snapshots:
       rolldown: 1.2.19
       tinyglobby: 0.2.17
     optionalDependencies:
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
       esbuild: 0.27.3
       fsevents: 2.3.3
 
@@ -3997,12 +4009,12 @@ snapshots:
       dom-accessibility-api: 0.6.3
       lodash-es: 4.18.1
       redent: 4.0.0
-      vitest: 5.1.2(@types/node@26.6.10)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))
+      vitest: 5.1.2(@types/node@26.6.11)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))
 
-  vitest@5.1.2(@types/node@26.6.10)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3)):
+  vitest@5.1.2(@types/node@26.6.11)(@vitest/coverage-v8@5.1.2)(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.1.2(vite@8.3.8(@types/node@26.6.10)(esbuild@0.27.3))
+      '@vitest/mocker': 5.1.2(vite@8.3.8(@types/node@26.6.11)(esbuild@0.27.3))
       chai: 6.3.0
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -4013,10 +4025,10 @@ snapshots:
       tinybench: 6.2.5
       tinyexec: 1.4.0
       tinyglobby: 0.2.17
-      vite: 8.3.8(@types/node@26.6.10)(esbuild@0.27.3)
+      vite: 8.3.8(@types/node@26.6.11)(esbuild@0.27.3)
       why-is-node-running: 3.2.1
     optionalDependencies:
-      '@types/node': 26.6.10
+      '@types/node': 26.6.11
       '@vitest/coverage-v8': 5.1.2(vitest@5.1.2)
     transitivePeerDependencies:
       - msw

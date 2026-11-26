@@ -31,7 +31,7 @@
     "@rljson/dna-rljson": "^0.3.2",
     "@rljson/server": "0.2.0",
     "@tssuite/helix-js": "0.7.0",
-    "@types/node": "^26.6.10",
+    "@types/node": "^26.6.11",
     "@typescript-eslint/eslint-plugin": "^8.74.0",
     "@typescript-eslint/parser": "^8.74.0",
     "@vitest/coverage-v8": "^5.1.2",
