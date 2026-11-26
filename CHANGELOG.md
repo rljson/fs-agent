@@ -24,6 +24,15 @@
 - The test suite passes on Windows. F6 seeds a folder with more than
   `ALL_GONE_MIN_FILES` files: with one seed file, the churn's deletions left
   what an emptied folder looks like, and the guards kept the churn files.
+  The folder rename of F1/D5 waits out the watcher's reader, as a user
+  retries, and the 50 rapid changes wait for every file, not for a sentinel.
+
+### Development
+
+- The dev dependencies are at their newest. `@tssuite/helix-js` 0.7.0 runs
+  the DNA test as WebAssembly with exception references, which Node 24
+  lacks: running the tests needs Node 26 or newer. Using the package still
+  needs Node 22.
 
 ## [0.2.7]
 

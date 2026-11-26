@@ -29,14 +29,27 @@
 
 import { BsMem } from '@rljson/bs';
 
-import { mkdir, rename, rm, writeFile } from 'fs/promises';
+import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FsAgent, MASS_DELETE_MIN_FILES } from '../src/fs-agent.ts';
+import { renameOver } from '../src/fs-atomic-write.ts';
 
 /** Comfortably over the guard's floor, so a refusal is possible at all. */
 const FILES = MASS_DELETE_MIN_FILES + 40;
+
+/**
+ * Renames `before/` to `after/` as a user does, trying again while it is held.
+ *
+ * Windows refuses to rename a folder while a file in it is open, and the
+ * watcher's scan reads the files of `before/` right after an extract. A user
+ * whose rename is refused tries again; so does this.
+ * @param dir - The folder that holds `before/`.
+ * @returns When the folder is renamed.
+ */
+const renameFolder = (dir: string): Promise<void> =>
+  renameOver(join(dir, 'before'), join(dir, 'after'), 20);
 
 describe('F1/D5 — renaming a folder', () => {
   let dir = '';
@@ -89,7 +102,7 @@ describe('F1/D5 — renaming a folder', () => {
     // from a deletion, and correctly refuses.
     await receiver.extract();
 
-    await rename(join(dir, 'before'), join(dir, 'after'));
+    await renameFolder(dir);
     const after = await source.extract();
 
     // The guard counts what WOULD be pruned against the folder size. The
@@ -128,7 +141,7 @@ describe('F1/D5 — renaming a folder', () => {
     const before = await agent.extract();
     const blobsBefore = bs.size;
 
-    await rename(join(dir, 'before'), join(dir, 'after'));
+    await renameFolder(dir);
     const after = await agent.extract();
 
     // Not one new blob: nothing for a peer to fetch.
