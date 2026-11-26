@@ -25,7 +25,7 @@
     "uses": {
       "bs": "Bs (setBlob, getBlobStream)",
       "db": "Db, Connector, trees",
-      "io": "Io",
+      "io": "IoMem, createSocketPair: client/server setup",
       "hash": "tree hashing",
       "rljson": "types",
       "server": "test: Client, Server over Socket.IO"

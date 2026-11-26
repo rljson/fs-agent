@@ -127,7 +127,7 @@ describe('FsAgent — the history a host reads, and going back', () => {
           /no history to restore from/,
         );
       } finally {
-        await rm(dir, { recursive: true, force: true });
+        await rm(dir, { recursive: true, force: true, maxRetries: 10 });
       }
     });
   });

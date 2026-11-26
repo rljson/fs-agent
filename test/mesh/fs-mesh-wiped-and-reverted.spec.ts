@@ -48,7 +48,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Empties a folder without removing it, the way a wipe or a bad script does. */
 const emptyFolder = async (folder: string): Promise<void> => {
   for (const entry of await readdir(folder)) {
-    await rm(join(folder, entry), { recursive: true, force: true });
+    await rm(join(folder, entry), { recursive: true, force: true, maxRetries: 10 });
   }
 };
 

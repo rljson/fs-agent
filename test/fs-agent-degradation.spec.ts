@@ -34,7 +34,7 @@ import { link, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { afterEach, beforeEach, describe, expect, it, } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FsAgent, SYNC_ERROR_FILE } from '../src/fs-agent.ts';
 import { ORIGIN_FIXTURE } from './origin-fixture.ts';
@@ -71,7 +71,7 @@ describe('FsAgent — degradation when a dependency fails', () => {
 
   afterEach(async () => {
     agent.dispose();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   // ...........................................................................
@@ -140,6 +140,37 @@ describe('FsAgent — degradation when a dependency fails', () => {
         ).toBeGreaterThan(0);
       }
     }, 30_000);
+    it('keeps and counts what the inode check calls the expected file', async () => {
+      // The keep branch of the prune, on every platform. The hard link above
+      // reaches it on a case-sensitive volume; on a case-insensitive one —
+      // Windows — two spellings of one name cannot both exist, the link
+      // fails, and nothing reaches it. The inode question itself is asked
+      // for real in the tests around this one.
+      const file = join(dir, 'kept.txt');
+      await writeFile(file, 'kept');
+      vi.spyOn(
+        agent as unknown as { _isSameFileAsExpected: () => Promise<boolean> },
+        '_isSameFileAsExpected',
+      ).mockResolvedValue(true);
+
+      await priv<
+        (
+          dir: string,
+          expectedDirs: Set<string>,
+          expectedFiles: Set<string>,
+          preRestore: Set<string>,
+        ) => Promise<void>
+      >(agent, '_pruneExtraneous').call(
+        agent,
+        dir,
+        new Set(),
+        new Set(),
+        new Set([file]),
+      );
+
+      expect(existsSync(file)).toBe(true);
+      expect(priv<number>(agent, '_restoreSkipped')).toBe(1);
+    });
     it('keeps the entry when both spellings are ONE file', async () => {
       // THE ONLY BRANCH THAT KEEPS ANYTHING, and it was covered by accident.
       //
@@ -239,7 +270,7 @@ describe('FsAgent — degradation when a dependency fails', () => {
       // A non-empty directory at the destination cannot be renamed over.
       await writeFile(join(dir, 'doc.txt'), 'content');
       const blocked = join(dir, '.fsagent-recovered', 'doc.txt');
-      await rm(blocked, { recursive: true, force: true });
+      await rm(blocked, { recursive: true, force: true, maxRetries: 10 });
       const { mkdir } = await import('fs/promises');
       await mkdir(blocked, { recursive: true });
       await writeFile(join(blocked, 'inside.txt'), 'somebody else\'s work');
@@ -454,7 +485,7 @@ describe('FsAgent — degradation when a dependency fails', () => {
           ).toBe(false);
         } finally {
           sender.dispose();
-          await rm(other, { recursive: true, force: true });
+          await rm(other, { recursive: true, force: true, maxRetries: 10 });
         }
       } finally {
         (agent as unknown as { _joinPending: unknown })._joinPending =

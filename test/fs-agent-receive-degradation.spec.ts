@@ -76,7 +76,7 @@ describe('FsAgent — receiving, when a part of it fails', () => {
     dir = join(process.cwd(), `test-temp-receive-degrade-${nth}`);
     peerDir = `${dir}-peer`;
     for (const d of [dir, peerDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
     stops = [];

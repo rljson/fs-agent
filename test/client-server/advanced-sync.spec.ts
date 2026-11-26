@@ -854,21 +854,16 @@ describe('Advanced Sync Tests', () => {
             );
           }
 
-          // The last file is the sentinel — when it arrives, the rest
-          // should also be there (due to debounced full-scan behavior)
-          await waitForFile(
-            join(folderB, 'rapid-049.txt'),
-            'rapid-49',
-            30_000,
-          );
-
-          // Verify a sampling of files
-          expect(
-            await readFileSafe(join(folderB, 'rapid-000.txt')),
-          ).toBe('rapid-0');
-          expect(
-            await readFileSafe(join(folderB, 'rapid-024.txt')),
-          ).toBe('rapid-24');
+          // Every file arrives. Not checked by a sentinel: the last file
+          // written need not be the last one applied, since a file still
+          // being written when a scan reads it is held back for the next one.
+          for (let i = 0; i < 50; i++) {
+            await waitForFile(
+              join(folderB, `rapid-${String(i).padStart(3, '0')}.txt`),
+              `rapid-${i}`,
+              30_000,
+            );
+          }
         } finally {
           stopAll();
           await setup.tearDown();

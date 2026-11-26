@@ -52,12 +52,12 @@ describe('FsAgent — a push that parents itself', () => {
   const dir = join(process.cwd(), 'test-temp-self-parent');
 
   beforeEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(dir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   const makeDb = async () => {
@@ -85,7 +85,7 @@ describe('FsAgent — a push that parents itself', () => {
 
     // A peer's tree, holding a file this agent does not have.
     const sourceDir = join(process.cwd(), 'test-temp-self-parent-news-src');
-    await rm(sourceDir, { recursive: true, force: true });
+    await rm(sourceDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(sourceDir, { recursive: true });
     await writeFile(join(sourceDir, 'from-peer.txt'), 'peer');
     const peerRef = await adapter.storeFsTree(
@@ -128,7 +128,7 @@ describe('FsAgent — a push that parents itself', () => {
     stopFrom();
     stopTo();
     agent.scanner.stopWatch();
-    await rm(sourceDir, { recursive: true, force: true });
+    await rm(sourceDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   it('never happens: the state it would announce is the one it just adopted', async () => {
@@ -138,7 +138,7 @@ describe('FsAgent — a push that parents itself', () => {
 
     // A peer's tree, holding one file this agent does not have yet.
     const sourceDir = join(process.cwd(), 'test-temp-self-parent-src');
-    await rm(sourceDir, { recursive: true, force: true });
+    await rm(sourceDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(sourceDir, { recursive: true });
     await writeFile(join(sourceDir, 'from-peer.txt'), 'peer');
     const peerRef = await adapter.storeFsTree(
@@ -193,6 +193,6 @@ describe('FsAgent — a push that parents itself', () => {
     stopTo();
     agent.scanner.stopWatch();
     logSpy.mockRestore();
-    await rm(sourceDir, { recursive: true, force: true });
+    await rm(sourceDir, { recursive: true, force: true, maxRetries: 10 });
   });
 });

@@ -42,7 +42,7 @@
 // .............................................................................
 
 import { renameSync, unlinkSync, writeFileSync } from 'fs';
-import { open, rename, unlink, writeFile } from 'fs/promises';
+import { open, rename, stat, unlink, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
 /**
@@ -73,6 +73,94 @@ export const atomicTmpPath = (filePath: string): string => {
 };
 
 /**
+ * The pause before the first retry of a refused rename, in ms; each further
+ * pause is one step longer.
+ */
+export const RENAME_RETRY_STEP_MS = 10;
+
+/**
+ * How often a rename onto a held file is tried again on this platform.
+ *
+ * Windows refuses to replace a file while another rename onto it is under way,
+ * or while a program holds it open, with EPERM, EBUSY or EACCES: two writes
+ * racing on one path then failed instead of one of them winning. Ten retries
+ * wait about half a second in all, long enough for a colliding rename and
+ * short enough that a real lock still reaches the caller soon. POSIX replaces
+ * the target regardless, so a refusal there is final and not retried.
+ * @returns The number of retries.
+ */
+export const renameRetries = (): number => {
+  /* v8 ignore start -- @preserve Windows-only arm; CI runs on Linux */
+  return process.platform === 'win32' ? 10 : 0;
+  /* v8 ignore stop -- @preserve */
+};
+
+const isHeld = (err: unknown): boolean => {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+};
+
+/**
+ * The error for a rename the filesystem refused because of the destination
+ * NAME, coded EINVAL, the code of an invalid argument.
+ *
+ * Windows reports an invalid name — a component over 255 characters, `?`,
+ * `*`, `:` and the other reserved characters — as ENOENT, the code of a
+ * missing file. A staged file renamed within its own directory is not missing,
+ * though: when it and the directory both still exist after the refusal, the
+ * name is what was refused. Anything else stays the ENOENT it was.
+ * @param err - What the rename threw.
+ * @param from - The staged file.
+ * @param to - The destination.
+ * @returns The EINVAL error, or `undefined` when the name is not the cause.
+ */
+const nameRefused = async (
+  err: unknown,
+  from: string,
+  to: string,
+): Promise<Error | undefined> => {
+  if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') return;
+  try {
+    await stat(from);
+    await stat(dirname(to));
+  } catch {
+    return;
+  }
+  return Object.assign(
+    new Error(`EINVAL: the filesystem refuses the name '${to}'`),
+    { code: 'EINVAL', syscall: 'rename', path: from, dest: to, cause: err },
+  );
+};
+
+/**
+ * Renames `from` onto `to`, trying again while the target is held.
+ * @param from - The staged file.
+ * @param to - The destination.
+ * @param retries - How often to try again after a held-file refusal.
+ * @param doRename - The rename to call.
+ */
+export const renameOver = async (
+  from: string,
+  to: string,
+  retries: number = renameRetries(),
+  doRename: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await doRename(from, to);
+    } catch (err) {
+      if (attempt < retries && isHeld(err)) {
+        await new Promise((r) =>
+          setTimeout(r, RENAME_RETRY_STEP_MS * (attempt + 1)),
+        );
+        continue;
+      }
+      throw (await nameRefused(err, from, to)) ?? err;
+    }
+  }
+};
+
+/**
  * Writes bytes to `filePath` through a staging file.
  *
  * We do not `fsync` the temp: it adds significant per-file latency under
@@ -88,7 +176,7 @@ export const atomicWriteFile = async (
   const tmp = atomicTmpPath(filePath);
   try {
     await writeFile(tmp, content);
-    await rename(tmp, filePath);
+    await renameOver(tmp, filePath);
   } catch (err) {
     try {
       await unlink(tmp);
@@ -175,7 +263,7 @@ export const atomicWriteStream = async (
   await handle.close();
 
   try {
-    await rename(tmp, filePath);
+    await renameOver(tmp, filePath);
     /* v8 ignore start -- @preserve a rename within one directory, onto a path the caller owns */
   } catch (err) {
     await unlink(tmp).catch(() => {});

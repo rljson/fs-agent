@@ -27,12 +27,12 @@ describe('FsAgent — restore streams the blob', () => {
   const testDir = join(process.cwd(), 'test-temp-fs-blob-stream');
 
   beforeEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
     await mkdir(testDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await rm(testDir, { recursive: true, force: true, maxRetries: 10 });
   });
 
   /** A db with a trees table, ready to store into. */

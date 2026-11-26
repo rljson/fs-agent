@@ -108,9 +108,11 @@ export class FsBlobAdapter {
       await handle.close();
     }
 
-    // Extract file name from path
-    /* v8 ignore next -- @preserve */
-    const name = filePath.split('/').pop() || filePath.split('\\').pop() || '';
+    // The file name is the last segment, on either separator. Splitting on '/'
+    // first and falling back to '\\' never falls back: a Windows path has no
+    // '/', so the first split yields the whole path, which is truthy, and
+    // `blobsToFiles` wrote each file to `<targetDir>/C:\…\file`.
+    const name = filePath.split(/[\\/]/).pop() as string;
 
     // Build metadata
     const metadata: FileBlobMeta = {

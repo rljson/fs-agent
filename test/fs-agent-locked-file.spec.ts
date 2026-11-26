@@ -116,7 +116,7 @@ describe('FsAgent — a file held open by another process', () => {
     lockedPaths.clear();
     writeErrorCode = 'EPERM';
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
       await mkdir(d, { recursive: true });
     }
   });
@@ -124,7 +124,7 @@ describe('FsAgent — a file held open by another process', () => {
   afterEach(async () => {
     lockedPaths.clear();
     for (const d of [sourceDir, targetDir]) {
-      await rm(d, { recursive: true, force: true });
+      await rm(d, { recursive: true, force: true, maxRetries: 10 });
     }
   });
 
