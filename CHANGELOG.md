@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### The rljson DNA 0.4.0
+
+- `@rljson/dna-rljson` 0.4.0, on the newest DNA layers: new are the
+  architecture guide and the `/gg-review-architecture` skill; the blog,
+  translate and code guides are updated.
+
+## [0.2.8]
+
 ### Windows
 
 - **A file deleted while the scanner opens it is gone, not locked.** Windows
