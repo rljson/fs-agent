@@ -8,7 +8,7 @@ found in the LICENSE file in the root of this package.
 
 # Install SQL Server
 
-Make sure [docker is installed](./install-docker.md)
+Make sure [docker is installed](install-docker.md)
 
 Pull, install and start MSSQL docker image
 
