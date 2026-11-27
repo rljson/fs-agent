@@ -538,7 +538,7 @@ destroyed. Usually it means that folder was restored from a backup.
 on macOS), which is reliable for programmatic operations and ordinary editor
 saves — but Finder's paste and in-place rename do not always emit an event. A
 periodic safety rescan catches these, so the gap is the rescan interval rather
-than forever. See [doc/safety-rescan.md](doc/safety-rescan.md).
+than forever. See [doc/en/safety-rescan.md](doc/en/safety-rescan.md).
 
 **Windows file locks are covered on one machine only.** The behaviour is right
 — a locked file blocks itself and nothing else, and a half-applied state is not
