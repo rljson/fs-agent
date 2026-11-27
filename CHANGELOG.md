@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### The rljson DNA 0.4.0: docs language first
+
+- `@rljson/dna-rljson` 0.4.0, on dna-gg 2.0: the guides and templates of the
+  DNA live in `doc/en/`, `doc/de/` and `doc/fa/`. New are the architecture
+  guide and the `/gg-review-architecture` skill.
+- The own documentation follows: `doc/<file>` to `doc/en/<file>`, the blog
+  posts to `pm/<lang>/2026-Q4/blog/`. The links point to the new places.
+
+## [0.2.8]
+
 ### Windows
 
 - **A file deleted while the scanner opens it is gone, not locked.** Windows
