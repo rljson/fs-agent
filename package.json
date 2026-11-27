@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@rljson/dna-rljson": "^0.4.0",
-    "@rljson/server": "0.2.0",
+    "@rljson/server": "0.2.1",
     "@tssuite/helix-js": "0.9.0",
     "@types/node": "^26.6.11",
     "@typescript-eslint/eslint-plugin": "^8.74.0",
@@ -52,12 +52,12 @@
     "vitest-dom": "^0.1.1"
   },
   "dependencies": {
-    "@rljson/bs": "0.1.1",
-    "@rljson/db": "0.1.4",
-    "@rljson/hash": "0.0.21",
-    "@rljson/io": "0.0.88",
+    "@rljson/bs": "0.1.2",
+    "@rljson/db": "0.1.5",
+    "@rljson/hash": "0.0.22",
+    "@rljson/io": "0.0.89",
     "@rljson/json": "0.0.23",
-    "@rljson/rljson": "0.0.89",
+    "@rljson/rljson": "0.0.90",
     "socket.io": "^4.8.4",
     "socket.io-client": "^4.8.4"
   },
