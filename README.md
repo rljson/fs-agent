@@ -38,8 +38,8 @@ pnpm test     # 71 files, 823 scenarios, 100 % coverage, then eslint
 
 | document | what is in it |
 | --- | --- |
-| [doc/safety-rescan.md](doc/safety-rescan.md) | the periodic rescan, and the watcher gaps it covers |
-| [doc/develop.md](doc/develop.md) · [doc/prepare.md](doc/prepare.md) | the development loop and machine setup |
+| [doc/en/safety-rescan.md](doc/en/safety-rescan.md) | the periodic rescan, and the watcher gaps it covers |
+| [doc/en/develop.md](doc/en/develop.md) · [doc/en/prepare.md](doc/en/prepare.md) | the development loop and machine setup |
 | [src/client-server/README.md](src/client-server/README.md) | the client–server rules, with a component diagram |
 | [CHANGELOG.md](CHANGELOG.md) | releases |
 | [README.blog.md](README.blog.md) | notes, newest last |

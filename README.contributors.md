@@ -104,13 +104,13 @@ for i in $(seq 1 8); do pnpm exec vitest run test/mesh/fs-mesh.spec.ts \
 
 | | |
 | --- | --- |
-| Machine setup | [doc/prepare.md](doc/prepare.md) |
-| The development loop | [doc/develop.md](doc/develop.md) |
-| Debugging in VS Code | [doc/debug-with-vscode.md](doc/debug-with-vscode.md) |
-| Repository and ruleset setup | [doc/create-new-repo.md](doc/create-new-repo.md) |
-| Fast coding | [doc/fast-coding-guide.md](doc/fast-coding-guide.md) |
-| Code review | [doc/code-review.md](doc/code-review.md) |
-| Goldens | [doc/update-goldens.md](doc/update-goldens.md) |
+| Machine setup | [doc/en/prepare.md](doc/en/prepare.md) |
+| The development loop | [doc/en/develop.md](doc/en/develop.md) |
+| Debugging in VS Code | [doc/en/debug-with-vscode.md](doc/en/debug-with-vscode.md) |
+| Repository and ruleset setup | [doc/en/create-new-repo.md](doc/en/create-new-repo.md) |
+| Fast coding | [doc/en/fast-coding-guide.md](doc/en/fast-coding-guide.md) |
+| Code review | [doc/en/code-review.md](doc/en/code-review.md) |
+| Goldens | [doc/en/update-goldens.md](doc/en/update-goldens.md) |
 
 ## Pinned dependencies
 

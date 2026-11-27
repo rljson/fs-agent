@@ -39,7 +39,7 @@ import { dirname, join } from 'path';
  * every sync trigger showed no push comes from the rescan at all. The interval
  * only shifted which bootstrap refs landed in a window where they were marked
  * received and never delivered, and that is fixed at its source. See
- * `doc/safety-rescan.md`.
+ * `doc/en/safety-rescan.md`.
  *
  * Overridable per deployment so a large or deep tree can back it off (the scan
  * is O(N), though {@link FsScanOptions.scanCachePath} makes a warm one cheap)

@@ -45,9 +45,9 @@ gg one do upgrade deps
 
 ## Develop & debug
 
-- [Debug & debug with Vscode](./debug-with-vscode.md)
-- [Update Goldens](./update-goldens.md)
-- [Rename classes](./rename-classes.md)
+- [Debug & debug with Vscode](debug-with-vscode.md)
+- [Update Goldens](update-goldens.md)
+- [Rename classes](rename-classes.md)
 
 ## Commit
 
@@ -68,7 +68,7 @@ gg one do push
 
 ## Code review
 
-You need a code review? Read [code-review.md](./code-review.md) and open a pull
+You need a code review? Read [code-review.md](code-review.md) and open a pull
 request for it (`gh pr create --base main --fill`). `gg one do publish` merges
 the branch through that pull request afterwards.
 

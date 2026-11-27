@@ -86,7 +86,7 @@ describe('the scenario matrix, at the mesh tier', () => {
     // first unlink observed, the rest lost with the watch.
     //
     // The watcher is an event SOURCE and the safety rescan is what covers its
-    // gaps — see `doc/safety-rescan.md`. So the end state is the thing to
+    // gaps — see `doc/en/safety-rescan.md`. So the end state is the thing to
     // assert, and it has to be given the interval that mechanism runs on.
     // `settlesOn` polls for the exact list and returns what it last saw, so a
     // failure still prints the real contents and the assertion below is
