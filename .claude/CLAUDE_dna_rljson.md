@@ -2,9 +2,9 @@
 
 The rules every rljson repo shares:
 
-@../doc/guides/rljson-guide.md
+@../doc/en/guides/rljson-guide.md
 
-- **Reviews** follow `doc/guides/for-ai/rljson-review-guide.md`.
+- **Reviews** follow `doc/en/guides/for-ai/rljson-review-guide.md`.
 - **Pull requests:** CI on a pull request runs the quick check (`gg one did
   commit`), which passes only for commits made through gg. The full tests run
   on `main` after the merge: watch them after every release.
