@@ -105,7 +105,7 @@
   },
   "baseVersion": "1.16.0",
   "baseHash": "0x6883da335b415f9d",
-  "configHash": "0x4ccc367513307b57",
+  "configHash": "0xf09fa51ef6d256c5",
   "instances": [
     {
       "path": ".claude/CLAUDE_dna_gg.md",
