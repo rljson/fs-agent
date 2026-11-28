@@ -1,0 +1,62 @@
+# .gitignore
+# Node modules
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+dist/
+build/
+
+# Coverage reports
+coverage/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+*.swp
+*.swo
+*.swn
+
+# Optional npm cache files
+.npm/
+
+# Other
+*.lock  # (Optional: for ignoring package-lock.json or yarn.lock if you don't want to version them)
+
+# Demo
+/demo/
+
+# Temporary test files
+/test-tmp/
+# Specs that name their own temp root leak it when a teardown loses a race;
+# an untracked folder here is what makes `git add -A` dangerous in this repo.
+/test-temp-*/
+
+# gg: the local ticket marker written by `gg one do create ticket`
+ticket.json
+.gg/publish_config.json
+.gg/publish_state.json
+.gg/gg-publish.json
+.gg/pubspec_overrides_backup.yaml
+.gg/pnpm_workspace_backup.yaml
+.gg/*
+!.gg/gg.json
+
+# dna-readme
+/doc/*/guides/
+/doc/*/templates/
+/scripts/
+
+# dna-gg
+/CLAUDE.md
